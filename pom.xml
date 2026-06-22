@@ -11,6 +11,7 @@
     <modules>
         <module>bl0jv2</module>
         <module>bl0jv1-deprecated</module>
+        <module>bl0jv2-vm</module>
     </modules>
 
     <properties>

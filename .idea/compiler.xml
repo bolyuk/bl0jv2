@@ -10,6 +10,7 @@
         <module name="reflection" />
         <module name="bl0jv2" />
         <module name="services" />
+        <module name="bl0jv2-vm" />
         <module name="async" />
         <module name="core" />
         <module name="common" />
