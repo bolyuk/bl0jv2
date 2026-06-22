@@ -1,3 +1,5 @@
+package org.boluj;
+
 import org.boluj.Interpreter;
 import org.boluj.Kovalski;
 import org.boluj.classes.BJobject;

@@ -2,12 +2,27 @@
 <project version="4">
   <component name="CompilerConfiguration">
     <annotationProcessing>
+      <profile default="true" name="Default" enabled="true" />
       <profile name="Maven default annotation processors profile" enabled="true">
         <sourceOutputDir name="target/generated-sources/annotations" />
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
-        <module name="boluj" />
+        <module name="reflection" />
+        <module name="bl0jv2" />
+        <module name="services" />
+        <module name="async" />
+        <module name="core" />
+        <module name="common" />
+        <module name="eventbus" />
+        <module name="bl0jv1-deprecated" />
+        <module name="logging" />
+        <module name="sockets" />
+        <module name="boot" />
+        <module name="db" />
       </profile>
     </annotationProcessing>
+    <bytecodeTargetLevel>
+      <module name="test" target="26" />
+    </bytecodeTargetLevel>
   </component>
 </project>
