@@ -1,4 +1,4 @@
-package bl0.bl0jv2.data.generation.tokens;
+package bl0.bl0jv2.data.generation.tokens.data;
 
 public class NumberToken extends DataToken {
     public final String value;

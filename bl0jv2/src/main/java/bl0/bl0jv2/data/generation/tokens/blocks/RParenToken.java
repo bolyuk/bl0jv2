@@ -1,4 +1,4 @@
-package bl0.bl0jv2.data.generation.tokens.paren;
+package bl0.bl0jv2.data.generation.tokens.blocks;
 
 import bl0.bl0jv2.data.generation.tokens.Token;
 

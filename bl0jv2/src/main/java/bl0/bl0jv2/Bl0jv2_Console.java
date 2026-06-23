@@ -11,6 +11,7 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Scanner;
 
+import static org.bl0.bl0jv2.vm.Bl0jv2_jVM.dump_file;
 import static org.bl0.bl0jv2.vm.Bl0jv2_jVM.mock_header;
 
 public class Bl0jv2_Console {
@@ -31,10 +32,13 @@ public class Bl0jv2_Console {
             List<Token> tokens = lexer.getTokens(line);
             Node ast = parser.getAST(tokens);
             byte[] instructions = compiler.compile(ast);
+            dump_file(instructions);
+            System.out.println();
 
             vm.feed_compiled_file(ByteBuffer.wrap(instructions));
             vm.run_instructions();
 
+            System.out.println();
             System.out.print("> ");
         }
     }
