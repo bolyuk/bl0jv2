@@ -4,6 +4,8 @@ import bl0.bl0jv2.data.generation.tokens.Token;
 import bl0.bl0jv2.data.Op;
 import bl0.bl0jv2.data.generation.tokens.OpToken;
 import bl0.bl0jv2.data.generation.tokens.NumberToken;
+import bl0.bl0jv2.data.generation.tokens.paren.LParenToken;
+import bl0.bl0jv2.data.generation.tokens.paren.RParenToken;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -30,14 +32,20 @@ public class Bl0jv2_Lexer {
                     line++;
                     line_index = 0;
                     break;
+                case '(':
+                    tokens.add(new LParenToken(line, line_index));
+                    break;
+                case ')':
+                    tokens.add(new RParenToken(line, line_index));
+                    break;
                 case '+':
-                    tokens.add(new OpToken(line, line_index, Op.ADD));
+                    tokens.add(new OpToken(line, line_index, Op.PLUS));
                     break;
                 case '-':
-                    tokens.add(new OpToken(line, line_index, Op.SUB));
+                    tokens.add(new OpToken(line, line_index, Op.MINUS));
                     break;
                 case '*':
-                    tokens.add(new OpToken(line, line_index, Op.MUL));
+                    tokens.add(new OpToken(line, line_index, Op.STAR));
                     break;
                 case '/':
                     tokens.add(new OpToken(line, line_index, Op.DIV));

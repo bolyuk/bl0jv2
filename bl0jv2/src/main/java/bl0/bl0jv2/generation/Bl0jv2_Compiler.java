@@ -3,6 +3,9 @@ package bl0.bl0jv2.generation;
 import bl0.bl0jv2.data.generation.nodes.BinaryNode;
 import bl0.bl0jv2.data.generation.nodes.Node;
 import bl0.bl0jv2.data.generation.nodes.NumberNode;
+import bl0.bl0jv2.data.generation.nodes.unary.LUnaryNode;
+import bl0.bl0jv2.data.generation.nodes.unary.RUnaryNode;
+import bl0.bl0jv2.data.generation.nodes.unary.UnaryNode;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -13,7 +16,7 @@ import java.util.List;
 public class Bl0jv2_Compiler {
     private List<Byte> bytecode = new ArrayList<>();
     private List<Object> constants = new ArrayList<>();
-    private int regIndex = 0; // следующий свободный регистр
+    private int regIndex = 0;
 
     public byte[] compile(Node node) {
         bytecode.clear();
@@ -38,7 +41,6 @@ public class Bl0jv2_Compiler {
             dos.writeShort(constants.size());
             dos.writeShort(regIndex);
 
-            // константы
             for (Object c : constants) {
                 if (c instanceof Integer i) {
                     dos.writeByte(0x01);
@@ -51,7 +53,6 @@ public class Bl0jv2_Compiler {
                 }
             }
 
-            // инструкции
             for (byte b : bytecode) {
                 dos.writeByte(b);
             }
@@ -68,6 +69,7 @@ public class Bl0jv2_Compiler {
         if (node instanceof NumberNode n) {
             int constIndex = constant(n.value);
             int reg = regIndex++;
+
             emit(0x01, reg, constIndex);
             return reg;
         }
@@ -77,9 +79,9 @@ public class Bl0jv2_Compiler {
             int right = compileInner(n.right);
 
             byte op = switch (n.op) {
-                case ADD -> 0x02;
-                case SUB -> 0x03;
-                case MUL -> 0x04;
+                case PLUS -> 0x02;
+                case MINUS -> 0x03;
+                case STAR -> 0x04;
                 case DIV -> 0x05;
                 default -> throw new RuntimeException("Unknown op: " + n.op);
             };
@@ -88,7 +90,22 @@ public class Bl0jv2_Compiler {
             return left;
         }
 
-        throw new RuntimeException("TODO");
+        if(node instanceof UnaryNode u){
+            int reg;
+
+            byte op = switch (u.op){
+                case MINUS -> 0x0E;
+                default -> throw new RuntimeException("Unknown op: " + u.op);
+            };
+
+            if(node instanceof LUnaryNode l) {
+                reg = compileInner(l.left);
+                emit(op, reg , 0x00);
+                return reg;
+            }
+        }
+
+        throw new RuntimeException("Unexpected node type: " + node);
     }
 
     private void emit(int op, int a, int b) {

@@ -106,6 +106,10 @@ public class Bl0jv2_jVM {
                 case 0x0D: // SET
                     reg[a] = b;
                     break;
+                case 0x0E: // NEG
+                    reg[a] = -(int) reg[a];
+                    break;
+
                 case (byte) 0xFE: // PRINT
                     System.out.println(reg[a]);
                     break;
