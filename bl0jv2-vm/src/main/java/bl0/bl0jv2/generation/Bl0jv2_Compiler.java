@@ -44,11 +44,21 @@ public final class Bl0jv2_Compiler {
         if(!(node instanceof ProgramNode program))
             throw new Bl0j_CompilerException("node is not a ProgramNode");
 
+        fetchFunctions(program);
         compileInner(program);
         _emit(OpCodes.HALT);
         compileFunctions();
 
         return build_header_bytecode();
+    }
+
+    private void fetchFunctions(ProgramNode program) {
+        for(var node : program.nodes)
+            if(node instanceof FunNode funNode){
+                lazy_functions.add(funNode);
+                int constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
+                functionMapping.put(funNode.name, constIndex);
+            }
     }
 
     private void compileFunctions(){
@@ -102,12 +112,9 @@ public final class Bl0jv2_Compiler {
             return -1;
         }
 
-        if(node instanceof FunNode funNode){
-            lazy_functions.add(funNode);
-            int constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
-            functionMapping.put(funNode.name, constIndex);
+        if(node instanceof FunNode)
             return -1;
-        }
+
 
         if(node instanceof WhileNode whileNode){
             int startJump = _instr_len();
