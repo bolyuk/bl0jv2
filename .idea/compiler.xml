@@ -8,14 +8,15 @@
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
         <module name="reflection" />
-        <module name="bl0jv2" />
         <module name="services" />
         <module name="bl0jv2-vm" />
         <module name="async" />
         <module name="core" />
+        <module name="bl0jv2-compiler" />
         <module name="common" />
         <module name="eventbus" />
         <module name="bl0jv1-deprecated" />
+        <module name="bl0jv2-terminal" />
         <module name="logging" />
         <module name="sockets" />
         <module name="boot" />

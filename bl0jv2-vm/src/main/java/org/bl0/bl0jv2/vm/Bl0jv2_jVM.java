@@ -1,5 +1,7 @@
 package org.bl0.bl0jv2.vm;
 
+import java.io.IOException;
+import java.io.Writer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -13,6 +15,8 @@ public class Bl0jv2_jVM {
     };
 
     private final int version = 1;
+
+    private Writer out;
 
     private Object[] reg;
     private Object[] constants;
@@ -61,11 +65,15 @@ public class Bl0jv2_jVM {
         bytes.get(instructions);
     }
 
+    public void set_out_writer(Writer out){
+        this.out = out;
+    }
+
     public void set_instructions(byte[] instruction){
         instructions = instruction;
     }
 
-    public void run_instructions(){
+    public void run_instructions() throws IOException {
         for(int addr = 0; addr < instructions.length;){
             int opcode = instructions[addr] & 0xFF;
 
@@ -121,7 +129,10 @@ public class Bl0jv2_jVM {
                     reg[a] = !(boolean) reg[a];
                     break;
                 case 0xFE: // PRINT
-                    System.out.println(reg[a]);
+                    if(out != null)
+                        out.append(reg[a].toString());
+                    else
+                        System.out.println(reg[a]);
                     break;
 
                 case 0xFF: // stop
@@ -144,8 +155,9 @@ public class Bl0jv2_jVM {
         return buf;
     }
 
-    public static void dump_file(byte[] file) {
+    public static void dump_file(byte[] file, Writer writer) throws IOException {
         int p = 0;
+        int headerStart = p;
 
         int magic =
                 ((file[p] & 0xFF) << 24) |
@@ -163,18 +175,21 @@ public class Bl0jv2_jVM {
         short regCount = (short) ((file[p] & 0xFF) << 8 | (file[p + 1] & 0xFF));
         p += 2;
 
-        System.out.println("=== HEADER ===");
-        System.out.printf("magic   = 0x%08X%n", magic);
-        System.out.printf("version = %d%n", version);
-        System.out.printf("consts  = %d%n", constCount);
-        System.out.printf("regs    = %d%n", regCount);
+        int headerSize = p - headerStart;
 
-        System.out.println("\n=== CONSTANTS ===");
+        writer.append(String.format("%n=== HEADER === (%d bytes)%n", headerSize));
+        writer.append(String.format("magic   = 0x%08X%n", magic));
+        writer.append(String.format("version = %d%n", version));
+        writer.append(String.format("consts  = %d%n", constCount));
+        writer.append(String.format("regs    = %d%n", regCount));
+
+        writer.append(String.format("%n=== CONSTANTS ===%n"));
 
         Object[] constants = new Object[constCount];
+        int constsStart = p;
 
         for (int i = 0; i < constCount; i++) {
-
+            int entryStart = p;
             int type = file[p++] & 0xFF;
 
             switch (type) {
@@ -186,7 +201,7 @@ public class Bl0jv2_jVM {
                                     (file[p++] & 0xFF);
 
                     constants[i] = val;
-                    System.out.printf("[%d] INT    = %d%n", i, val);
+                    writer.append(String.format("[%d] INT    = %d  (%d bytes)%n", i, val, p - entryStart));
                 }
 
                 case 0x02 -> {
@@ -197,63 +212,71 @@ public class Bl0jv2_jVM {
                     p += len;
 
                     constants[i] = s;
-                    System.out.printf("[%d] STRING = %s%n", i, s);
+                    writer.append(String.format("[%d] STRING = %s  (%d bytes)%n", i, s, p - entryStart));
                 }
 
                 case 0x03 -> {
                     boolean val = (file[p++] & 0xFF) != 0;
 
                     constants[i] = val;
-                    System.out.printf("[%d] BOOL   = %b%n", i, val);
+                    writer.append(String.format("[%d] BOOL   = %b  (%d bytes)%n", i, val, p - entryStart));
                 }
 
                 default -> throw new RuntimeException("Unknown const type: " + type);
             }
         }
 
-        System.out.println("\n=== BYTECODE ===");
+        int constsSize = p - constsStart;
 
-        int pc = 0;
+        int bytecodeStart = p;
         int instr = 0;
 
-        while (p + 2 < file.length) {
+        writer.append(String.format("%n=== BYTECODE ===%n"));
+
+        while (p + 2 <= file.length) {
 
             int op = file[p++] & 0xFF;
             int a  = file[p++] & 0xFF;
             int b  = file[p++] & 0xFF;
 
-            System.out.printf("%04d: 0x%02X ", instr, op);
+            writer.append(String.format("%04d: 0x%02X ", instr, op));
 
             switch (op) {
+                case 0x00 -> writer.append(String.format("LOAD_NIL %d", a));
+                case 0x01 -> writer.append(String.format("LOAD_CONST r%d = const[%d] (%s)", a, b, constants[b]));
+                case 0x02 -> writer.append(String.format("ADD r%d = r%d + r%d", a, a, b));
+                case 0x03 -> writer.append(String.format("SUB r%d = r%d - r%d", a, a, b));
+                case 0x04 -> writer.append(String.format("MUL r%d = r%d * r%d", a, a, b));
+                case 0x05 -> writer.append(String.format("DIV r%d = r%d / r%d", a, a, b));
 
-                case 0x00 -> System.out.printf("LOAD_NIL %d", a);
-                case 0x01 -> System.out.printf("LOAD_CONST r%d = const[%d] (%s)", a, b, constants[b]);
-                case 0x02 -> System.out.printf("ADD r%d = r%d + r%d", a, a, b);
-                case 0x03 -> System.out.printf("SUB r%d = r%d - r%d", a, a, b);
-                case 0x04 -> System.out.printf("MUL r%d = r%d * r%d", a, a, b);
-                case 0x05 -> System.out.printf("DIV r%d = r%d / r%d", a, a, b);
+                case 0x06 -> writer.append(String.format("JUMP %d", a));
+                case 0x07 -> writer.append(String.format("JUMP_IF r%d -> %d", a, b));
+                case 0x08 -> writer.append(String.format("JUMP_IF_NOT r%d -> %d", a, b));
 
-                case 0x06 -> System.out.printf("JUMP %d", a);
-                case 0x07 -> System.out.printf("JUMP_IF r%d -> %d", a, b);
-                case 0x08 -> System.out.printf("JUMP_IF_NOT r%d -> %d", a, b);
+                case 0x09 -> writer.append(String.format("EQ r%d = r%d == r%d", a, a, b));
+                case 0x0A -> writer.append(String.format("LESS r%d = r%d < r%d", a, a, b));
+                case 0x0B -> writer.append(String.format("GREATER r%d = r%d > r%d", a, a, b));
 
-                case 0x09 -> System.out.printf("EQ r%d = r%d == r%d", a, a, b);
-                case 0x0A -> System.out.printf("LESS r%d = r%d < r%d", a, a, b);
-                case 0x0B -> System.out.printf("GREATER r%d = r%d > r%d", a, a, b);
+                case 0x0C -> writer.append(String.format("MOV r%d = r%d", a, b));
+                case 0x0D -> writer.append(String.format("SET r%d = r%d", a, b));
+                case 0x0E -> writer.append(String.format("NEG r%d", a));
+                case 0x0F -> writer.append(String.format("NOT r%d", a));
 
-                case 0x0C -> System.out.printf("MOV r%d = r%d", a, b);
-                case 0x0D -> System.out.printf("SET r%d = r%d", a, b);
-                case 0x0E -> System.out.printf("NEG r%d", a);
-                case 0x0F -> System.out.printf("NOT r%d", a);
+                case 0xFE -> writer.append(String.format("PRINT r%d", a));
+                case 0xFF -> writer.append("HALT");
 
-                case 0xFE -> System.out.print("PRINT r" + a);
-                case 0xFF -> System.out.print("HALT");
-
-                default -> System.out.print("UNKNOWN");
+                default -> writer.append("UNKNOWN");
             }
-
-            System.out.println();
+            writer.append(String.format("%n"));
             instr++;
         }
+
+        int bytecodeSize = p - bytecodeStart;
+
+        writer.append(String.format("%n=== SUMMARY ===%n"));
+        writer.append(String.format("header    = %4d bytes  (%5.1f%%)%n", headerSize,   100.0 * headerSize   / file.length));
+        writer.append(String.format("constants = %4d bytes  (%5.1f%%)%n", constsSize,   100.0 * constsSize   / file.length));
+        writer.append(String.format("bytecode  = %4d bytes  (%5.1f%%)%n", bytecodeSize, 100.0 * bytecodeSize / file.length));
+        writer.append(String.format("total     = %4d bytes  (%d instrs)%n", file.length, instr));
     }
 }
