@@ -3,10 +3,11 @@
   <component name="Encoding">
     <file url="file://$PROJECT_DIR$/bl0jv1-deprecated/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/bl0jv1-deprecated/src/main/resources" charset="UTF-8" />
-    <file url="file://$PROJECT_DIR$/bl0jv2-compiler/src/main/java" charset="UTF-8" />
-    <file url="file://$PROJECT_DIR$/bl0jv2-compiler/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/bl0jv2-common/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/bl0jv2-common/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/bl0jv2-console/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/bl0jv2-terminal/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/bl0jv2-terminal/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/bl0jv2-vm/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/bl0jv2-vm/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/test/src/main/java" charset="UTF-8" />

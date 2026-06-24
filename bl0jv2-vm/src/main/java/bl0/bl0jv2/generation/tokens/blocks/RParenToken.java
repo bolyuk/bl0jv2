@@ -1,0 +1,9 @@
+package bl0.bl0jv2.generation.tokens.blocks;
+
+import bl0.bl0jv2.generation.tokens.Token;
+
+public class RParenToken extends Token {
+    public RParenToken(int line, int pos) {
+        super(line, pos);
+    }
+}
