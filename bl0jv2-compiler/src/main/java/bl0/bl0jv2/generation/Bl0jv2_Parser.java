@@ -6,10 +6,9 @@ import bl0.bl0jv2.data.generation.nodes.Node;
 import bl0.bl0jv2.data.exceptions.Bl0j_ParserException;
 import bl0.bl0jv2.data.generation.nodes.ProgramNode;
 import bl0.bl0jv2.data.generation.nodes.data.*;
-import bl0.bl0jv2.data.generation.nodes.statements.IfNode;
-import bl0.bl0jv2.data.generation.nodes.statements.Ternary_IfNode;
-import bl0.bl0jv2.data.generation.nodes.statements.WhileNode;
+import bl0.bl0jv2.data.generation.nodes.statements.*;
 import bl0.bl0jv2.data.generation.nodes.unary.LUnaryNode;
+import bl0.bl0jv2.data.generation.nodes.unary.RUnaryNode;
 import bl0.bl0jv2.data.generation.tokens.*;
 import bl0.bl0jv2.data.generation.tokens.blocks.LBraceToken;
 import bl0.bl0jv2.data.generation.tokens.blocks.RBraceToken;
@@ -25,20 +24,26 @@ public class Bl0jv2_Parser {
     private List<Token> tokens;
     private int pos;
 
-    // program    = statement*
-    // statement  = if | while | print | sysCall | assign ';'
-    // if         = 'if' condition block ('else' block)?
-    // while      = 'while' condition  block
-    // block      = '{' statement* '}' | statement
-    // condition  = '('? assign ')'?
-    // assign     = IDENT '=' assign | ternary
-    // ternary    = equality ('?' ternary ':' ternary)?
-    // equality   = comparison (('==' | '!=') comparison)*
-    // comparison = addSub (('<' | '>' | '<=' | '>=') addSub)*
-    // addSub     = multiplyDivide (('+' | '-') multiplyDivide)*
+    // program        = statement*
+    // statement      = if | fun | while | sysCall | assign ';'
+    // fun            = 'fun' IDENT funcBody block
+    // lambda         = funcBody  '->' (assign | block)                        TODO (later)
+    // argBody        = '(' (IDENT (',' IDENT)*)? ')'
+    // if             = 'if' condition block ('else' block)?
+    // while          = 'while' condition block
+    // block          = '{' statement* '}' | statement
+    // condition      = assign
+    // sysCall        = ('print' | 'read' | 'wait') assign ';'                 TODO (later)
+    // assign         = IDENT '=' assign | ternary
+    // ternary        = equality ('?' ternary ':' ternary)?
+    // equality       = comparison (('==' | '!=') comparison)*
+    // comparison     = addSub (('<' | '>' | '<=' | '>=') addSub)*
+    // addSub         = multiplyDivide (('+' | '-') multiplyDivide)*
     // multiplyDivide = unary (('*' | '/') unary)*
-    // unary      = ('-' | '!') unary | data
-    // data       = NUMBER | IDENT | '(' assign ')'
+    // unary          = ('-' | '!') unary | postfix
+    // postfix        = data ('++' | '--')?
+    // tuple          = '(' assign (',' assign)* ')'
+    // data           = NUMBER | IDENT | STRING | tuple | lambda
     public Node getAST(List<Token> tokens) {
         this.tokens = tokens;
         this.pos = 0;
@@ -67,6 +72,11 @@ public class Bl0jv2_Parser {
             return new LUnaryNode(op.op, operand);
         }
 
+        if(peek() instanceof DefToken){
+            pos++; // consume
+            return fun();
+        }
+
         if(peek() instanceof IfToken){
             pos++; // consume
             return If();
@@ -84,6 +94,48 @@ public class Bl0jv2_Parser {
         }
 
         return expr;
+    }
+
+    private Node fun(){
+        Token t = peek();
+        if(!(t instanceof IdentityToken identityToken))
+            throw new Bl0j_ParserException(t.line, t.line_index, "expected 'IDENTITY'");
+        pos++;
+
+        return new FunNode(identityToken.name, argBody(), block());
+    }
+
+    private ArgumentNode argBody(){
+        Token t = peek();
+        if (!(t instanceof LParenToken))
+            throw new Bl0j_ParserException(t.line, t.line_index, "expected '('");
+        pos++;
+
+        boolean findIdentity = true;
+        List<String> args = new ArrayList<>();
+        while (pos < tokens.size()) {
+            t = peek();
+
+            if (t instanceof RParenToken) break;
+
+            if(findIdentity){
+                if (t instanceof IdentityToken identityToken) {
+                    pos++; // consume
+                    args.add(identityToken.name);
+                } else throw new Bl0j_ParserException(t.line, t.line_index, "expected 'IDENTITY'");
+            } else {
+                if (t instanceof SeparatorToken) {
+                    pos++; // consume
+                } else throw new Bl0j_ParserException(t.line, t.line_index, "expected 'SEPARATOR'");
+            }
+            findIdentity = !findIdentity;
+        }
+
+        t = peek();
+        if (!(t instanceof RParenToken))
+            throw new Bl0j_ParserException(t.line, t.line_index, "expected ')'");
+        pos++;
+        return new ArgumentNode(args);
     }
 
     private Node If(){
@@ -131,7 +183,7 @@ public class Bl0jv2_Parser {
             pos++;
             return node;
         } else
-            return statement();
+            return assign();
     }
 
     private Node assign(){
@@ -229,7 +281,18 @@ public class Bl0jv2_Parser {
             Node operand = unary();
             return new LUnaryNode(op.op, operand);
         }
-        return data();
+        return postfix();
+    }
+
+    private Node postfix(){
+        Node left = data();
+        if(peek() instanceof OpToken op &&
+                (op.op == Op.PLUS_PLUS || op.op == Op.MINUS_MINUS)){
+            pos++; // consume
+            return new RUnaryNode(op.op, left);
+        }
+
+        return left;
     }
 
     private Node data() {
@@ -259,14 +322,27 @@ public class Bl0jv2_Parser {
             return new IdentityNode(identityToken.name);
         }
 
-        if(t instanceof LParenToken){
+        if (t instanceof LParenToken) {
             pos++;
-            var node = assign();
-            Token closing = peek();
-            if (!(closing instanceof RParenToken))
-                throw new Bl0j_ParserException(closing.line, closing.line_index, "expected ')'");
-            pos++;
-            return node;
+            Node first = assign();
+
+            if (peek() instanceof SeparatorToken) {
+                List<Node> values = new ArrayList<>();
+                values.add(first);
+                while (peek() instanceof SeparatorToken) {
+                    pos++; // consume ','
+                    values.add(assign());
+                }
+                if (!(peek() instanceof RParenToken))
+                    throw new Bl0j_ParserException(-1, -1, "expected ')'");
+                pos++;
+                return new TupleNode(values);
+            } else {
+                if (!(peek() instanceof RParenToken))
+                    throw new Bl0j_ParserException(-1, -1, "expected ')'");
+                pos++;
+                return first;
+            }
         }
 
         throw new Bl0j_ParserException(t.line, t.line_index, "unexpected token - "+t);
