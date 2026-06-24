@@ -8,6 +8,7 @@ import bl0.bl0jv2.data.generation.nodes.ProgramNode;
 import bl0.bl0jv2.data.generation.nodes.data.*;
 import bl0.bl0jv2.data.generation.nodes.statements.IfNode;
 import bl0.bl0jv2.data.generation.nodes.statements.Ternary_IfNode;
+import bl0.bl0jv2.data.generation.nodes.statements.WhileNode;
 import bl0.bl0jv2.data.generation.nodes.unary.LUnaryNode;
 import bl0.bl0jv2.data.generation.tokens.*;
 import bl0.bl0jv2.data.generation.tokens.blocks.LBraceToken;
@@ -25,11 +26,11 @@ public class Bl0jv2_Parser {
     private int pos;
 
     // program    = statement*
-    // statement  = if | while | return | sysCall | assign ';' TODO
-    // sysCall    = ('print' | 'read' | 'wait') assign ';'     TODO
-    // return     = 'return' assign? ';'                       TODO
-    // if         = 'if' '('? assign ')'? block ('else' block)?
+    // statement  = if | while | print | sysCall | assign ';'
+    // if         = 'if' condition block ('else' block)?
+    // while      = 'while' condition  block
     // block      = '{' statement* '}' | statement
+    // condition  = '('? assign ')'?
     // assign     = IDENT '=' assign | ternary
     // ternary    = equality ('?' ternary ':' ternary)?
     // equality   = comparison (('==' | '!=') comparison)*
@@ -71,6 +72,11 @@ public class Bl0jv2_Parser {
             return If();
         }
 
+        if(peek() instanceof WhileToken){
+            pos++; // consume
+            return While();
+        }
+
         Node expr = assign();
 
         if (peek() instanceof SemicolonToken) {
@@ -81,24 +87,9 @@ public class Bl0jv2_Parser {
     }
 
     private Node If(){
-        Token t = peek();
-
-        Node condition;
-        Node body;
+        Node condition = condition();
+        Node body = block();
         Node elseBody = null;
-
-        if(t instanceof LParenToken){
-            pos++;
-            var node = assign();
-            Token closing = peek();
-            if (!(closing instanceof RParenToken))
-                throw new Bl0j_ParserException(closing.line, closing.line_index, "expected ')'");
-            pos++;
-            condition = node;
-        } else
-            condition = statement();
-
-        body = block();
 
         if(peek() instanceof ElseToken) {
             pos++;
@@ -106,6 +97,10 @@ public class Bl0jv2_Parser {
         }
 
         return new IfNode(condition, body, elseBody);
+    }
+
+    private Node While(){
+        return new WhileNode(condition(), block());
     }
 
     private Node block(){
@@ -124,6 +119,19 @@ public class Bl0jv2_Parser {
                 pos++; // consume ;
             return left;
         }
+    }
+
+    private Node condition(){
+        if(peek() instanceof LParenToken){
+            pos++;
+            var node = assign();
+            Token closing = peek();
+            if (!(closing instanceof RParenToken))
+                throw new Bl0j_ParserException(closing.line, closing.line_index, "expected ')'");
+            pos++;
+            return node;
+        } else
+            return statement();
     }
 
     private Node assign(){

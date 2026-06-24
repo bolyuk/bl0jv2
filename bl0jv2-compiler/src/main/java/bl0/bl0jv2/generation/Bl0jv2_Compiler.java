@@ -7,6 +7,8 @@ import bl0.bl0jv2.data.generation.nodes.Node;
 import bl0.bl0jv2.data.generation.nodes.ProgramNode;
 import bl0.bl0jv2.data.generation.nodes.data.*;
 import bl0.bl0jv2.data.generation.nodes.statements.IfNode;
+import bl0.bl0jv2.data.generation.nodes.statements.Ternary_IfNode;
+import bl0.bl0jv2.data.generation.nodes.statements.WhileNode;
 import bl0.bl0jv2.data.generation.nodes.unary.LUnaryNode;
 import bl0.bl0jv2.data.generation.nodes.unary.UnaryNode;
 
@@ -89,6 +91,40 @@ public class Bl0jv2_Compiler {
             return -1;
         }
 
+        if(node instanceof WhileNode whileNode){
+            int startJump = bytecode.size() / 3;
+            int condReg = compileInner(whileNode.condition);
+
+            emit(0x08, condReg, 0);
+            int patchJumpIfNot = bytecode.size() - 1;
+            compileInner(whileNode.body);
+            emit(0x06, startJump, 0);
+            bytecode.set(patchJumpIfNot,(byte)(bytecode.size() / 3));
+            return -1;
+        }
+
+        if(node instanceof Ternary_IfNode ternaryIfNode){
+            int resultReg = regIndex++;
+
+            int condReg = compileInner(ternaryIfNode.condition);
+            emit(0x08, condReg, 0);
+            int patchJumpIfNot = bytecode.size() - 1;
+
+            int bodyReg = compileInner(ternaryIfNode.body);
+            emit(0x0C, resultReg, bodyReg);  // MOV resultReg = bodyReg
+
+            emit(0x06, 0, 0);
+            int patchJump = bytecode.size() - 2;
+            bytecode.set(patchJumpIfNot, (byte)(bytecode.size() / 3));
+
+            int elseReg = compileInner(ternaryIfNode.elseBody);
+            emit(0x0C, resultReg, elseReg);  // MOV resultReg = elseReg
+
+            bytecode.set(patchJump, (byte)(bytecode.size() / 3));
+
+            return resultReg;
+        }
+
         if (node instanceof IfNode ifNode) {
             int condReg = compileInner(ifNode.condition);
             emit(0x08, condReg, 0);  // JUMP_IF_NOT
@@ -133,6 +169,15 @@ public class Bl0jv2_Compiler {
         }
 
         if (node instanceof BinaryNode n) {
+
+            if (n.op == Op.ASSIGNMENT) {
+                int varReg = compileInner(n.left);
+                int valueReg = compileInner(n.right);
+                emit(0x0C, varReg, valueReg);
+                return varReg;
+            }
+
+            int result = regIndex++;
             int left  = compileInner(n.left);
             int right = compileInner(n.right);
 
@@ -141,19 +186,19 @@ public class Bl0jv2_Compiler {
                 case MINUS -> 0x03;
                 case STAR -> 0x04;
                 case DIV -> 0x05;
-                case ASSIGNMENT -> 0x0C;
                 case EQUALS, NOT_EQUALS -> 0x09;
                 case LESS -> 0x0A;
                 case GREATER -> 0x0B;
                 default -> throw new RuntimeException("Unknown op: " + n.op);
             };
 
-            emit(op, left, right);
+            emit(0x0c, result, left);
+            emit(op, result, right);
 
             if(n.op == Op.NOT_EQUALS)
-                emit(0x0F, left, 0);
+                emit(0x0F, result, 0);
 
-            return left;
+            return result;
         }
 
         if(node instanceof UnaryNode u){

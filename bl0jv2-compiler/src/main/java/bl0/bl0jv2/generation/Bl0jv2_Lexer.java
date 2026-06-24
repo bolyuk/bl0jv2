@@ -121,16 +121,14 @@ public class Bl0jv2_Lexer {
                                 } else
                                     break;
                             }
-                            if(buf.equals("nil"))
-                                tokens.add(new NilToken(line, line_index));
-                            else if(buf.equals("print"))
-                                tokens.add(new OpToken(line, line_index, Op.PRINT));
-                            else if(buf.equals("if"))
-                                tokens.add(new IfToken(line, line_index));
-                            else if(buf.equals("else"))
-                            tokens.add(new ElseToken(line, line_index));
-                            else
-                                tokens.add(new IdentityToken(line, line_index, buf));
+                            switch (buf) {
+                                case "nil" -> tokens.add(new NilToken(line, line_index));
+                                case "print" -> tokens.add(new OpToken(line, line_index, Op.PRINT));
+                                case "if" -> tokens.add(new IfToken(line, line_index));
+                                case "else" -> tokens.add(new ElseToken(line, line_index));
+                                case "while" -> tokens.add(new WhileToken(line, line_index));
+                                default -> tokens.add(new IdentityToken(line, line_index, buf));
+                            }
                         }
                     } else if(!Character.isWhitespace(c))
                         throw new Bl0j_ParserException(line, line_index, "unexpected character - "+c);
