@@ -90,7 +90,8 @@ public final class Bl0jv2_Utils {
 
                 case 0xFE -> writer.append(String.format("PRINT r%d", a));
                 case 0xFF -> writer.append("HALT");
-
+                case 0x10 -> writer.append(String.format("CALL r%d args@%d", a, b));
+                case 0x11 -> writer.append("RETURN");
                 default -> writer.append("UNKNOWN");
             }
             writer.append(String.format("%n"));

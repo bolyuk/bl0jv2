@@ -42,7 +42,7 @@ public final class Bl0jv2_Parser {
     // addSub         = multiplyDivide (('+' | '-') multiplyDivide)*
     // multiplyDivide = unary (('*' | '/') unary)*
     // unary          = ('-' | '!') unary | postfix
-    // postfix        = data ('++' | '--')?
+    // postfix        = data (tuple | '++' | '--')*
     // tuple          = '(' assign (',' assign)* ')'
     // data           = NUMBER | IDENT | STRING | tuple | lambda
     public Node getAST(List<Token> tokens) {
@@ -287,13 +287,40 @@ public final class Bl0jv2_Parser {
 
     private Node postfix(){
         Node left = data();
-        if(peek() instanceof OpToken op &&
-                (op.op == Operator.PLUS_PLUS || op.op == Operator.MINUS_MINUS)){
-            pos++; // consume
-            return new RUnaryNode(op.op, left);
+
+        while (true) {
+            if (peek() instanceof LParenToken) {
+                List<Node> args = tupleArgs();
+                left = new FunCall(left, args);
+            } else if (peek() instanceof OpToken op &&
+                    (op.op == Operator.PLUS_PLUS || op.op == Operator.MINUS_MINUS)) {
+                pos++;
+                left = new RUnaryNode(op.op, left);
+            } else break;
         }
 
         return left;
+    }
+
+    private List<Node> tupleArgs(){
+        pos++; // consume '('
+        List<Node> args = new ArrayList<>();
+
+        if (peek() instanceof RParenToken) {
+            pos++;
+            return args;
+        }
+
+        args.add(assign());
+        while (peek() instanceof SeparatorToken) {
+            pos++;
+            args.add(assign());
+        }
+
+        if (!(peek() instanceof RParenToken))
+            throw new Bl0j_ParserException(peek().line, peek().line_index, "expected ')'");
+        pos++;
+        return args;
     }
 
     private Node data() {

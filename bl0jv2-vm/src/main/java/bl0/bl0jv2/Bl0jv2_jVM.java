@@ -11,6 +11,7 @@ import java.io.Writer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.Objects;
 
 public final class Bl0jv2_jVM {
@@ -22,7 +23,7 @@ public final class Bl0jv2_jVM {
 
     private Writer out;
 
-    private Object[] reg;
+    private ArrayDeque<Frame> callStack = new ArrayDeque<>();
     private Object[] consts;
     private byte[] instructions;
 
@@ -44,7 +45,8 @@ public final class Bl0jv2_jVM {
         short constants_length = bytes.getShort();
         short registers_length = bytes.getShort();
 
-        reg = new Object[registers_length];
+        callStack.clear();
+        callStack.add(new Frame(new Object[registers_length], -1));
         consts = new Object[constants_length];
 
         for (int i = 0; i < constants_length; i++) {
@@ -83,6 +85,8 @@ public final class Bl0jv2_jVM {
             int b = instructions[addr+2] & 0xFF;
             addr += 3;
 
+            Object[] reg = callStack.peek().regs();
+
             switch (opcode) {
                 case OpCodes.LOAD_NIL -> reg[a] = NIL;
                 case OpCodes.LOAD_CONST -> reg[a] = consts[b];
@@ -105,6 +109,22 @@ public final class Bl0jv2_jVM {
                 case OpCodes.SET -> reg[a] = b;
                 case OpCodes.NEG  -> reg[a] = -(int) reg[a];
 
+                case OpCodes.CALL -> {
+                    FunDef fun = (FunDef) reg[a];
+                    Object[] args = new Object[fun.arity()];
+
+                    for (int i = 0; i < fun.arity(); i++)
+                        args[i] = reg[b + i];
+
+                    gen_frame(fun, args, addr);
+                    addr = fun.address() * 3;
+                }
+
+                case OpCodes.RETURN -> {
+                    Frame frame = callStack.pop();
+                    addr = frame.addressToReturn;
+                }
+
                 case OpCodes.PRINT -> {
                     if (out != null) out.append(reg[a].toString());
                     else System.out.println(reg[a]);
@@ -112,8 +132,18 @@ public final class Bl0jv2_jVM {
                 case OpCodes.HALT -> {
                     return;
                 }
+                default -> throw new Bl0j_VM_Exception("Unknown opcode: " + opcode);
             }
         }
+    }
+
+    private void gen_frame(FunDef fun, Object[] args, int addressToReturn) {
+        Object[] regs = new Object[fun.regs()];
+
+        for (int i = 0; i < args.length; i++)
+            regs[i] = args[i];
+
+        callStack.push(new Frame(regs, addressToReturn));
     }
 
     private String get_str(ByteBuffer bytes){
@@ -122,4 +152,7 @@ public final class Bl0jv2_jVM {
         bytes.get(strBytes);
         return new String(strBytes, StandardCharsets.UTF_8);
     }
+
+    private record Frame(Object[] regs, int addressToReturn) {}
 }
+

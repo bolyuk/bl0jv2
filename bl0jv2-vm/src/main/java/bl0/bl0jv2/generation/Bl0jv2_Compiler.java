@@ -9,11 +9,9 @@ import bl0.bl0jv2.generation.nodes.BinaryNode;
 import bl0.bl0jv2.generation.nodes.Node;
 import bl0.bl0jv2.generation.nodes.ProgramNode;
 import bl0.bl0jv2.generation.nodes.data.*;
-import bl0.bl0jv2.generation.nodes.statements.FunNode;
-import bl0.bl0jv2.generation.nodes.statements.IfNode;
-import bl0.bl0jv2.generation.nodes.statements.Ternary_IfNode;
-import bl0.bl0jv2.generation.nodes.statements.WhileNode;
+import bl0.bl0jv2.generation.nodes.statements.*;
 import bl0.bl0jv2.generation.nodes.unary.LUnaryNode;
+import bl0.bl0jv2.generation.nodes.unary.RUnaryNode;
 import bl0.bl0jv2.generation.nodes.unary.UnaryNode;
 
 import java.io.ByteArrayOutputStream;
@@ -31,6 +29,7 @@ public final class Bl0jv2_Compiler {
 
     private final HashMap<String, Integer> identityMapping = new HashMap<>();
     private final List<FunNode> lazy_functions = new ArrayList<>();
+    private final HashMap<String, Integer> functionMapping = new HashMap<>();
     public Bl0jv2_Compiler() {}
 
     public byte[] compile(Node node) {
@@ -38,6 +37,7 @@ public final class Bl0jv2_Compiler {
         constants.clear();
         identityMapping.clear();
         lazy_functions.clear();
+        functionMapping.clear();
         regIndex = 0;
         regCount = 0;
 
@@ -67,15 +67,34 @@ public final class Bl0jv2_Compiler {
                 map(arg);
 
             compileInner(fun.body);
-
-            constant(new FunDef(fun.name, adress,(short) arity ,(short) regIndex));
-
             _emit(OpCodes.RETURN);
+
+            int constIndex = functionMapping.get(fun.name);
+            constants.set(constIndex, new FunDef(fun.name, adress,(short) arity ,(short) regIndex));;
         }
 
     }
 
     private int compileInner(Node node) {
+
+        if(node instanceof FunCall funCall){
+            int[] valRegs = new int[funCall.args.size()];
+
+            for(int i=0;i<funCall.args.size();i++) {
+                valRegs[i] = compileInner(funCall.args.get(i));
+            }
+
+            int method = compileInner(funCall.left);
+            int startReg = regIndex;
+
+            for(var val : valRegs) {
+                _emit(OpCodes.MOV, regIndex, val);
+                regIndex++;
+            }
+
+            _emit(OpCodes.CALL, method, valRegs.length > 0 ? startReg : -1);
+            return method;
+        }
 
         if(node instanceof ProgramNode programNode){
             for(var n : programNode.nodes)
@@ -85,6 +104,8 @@ public final class Bl0jv2_Compiler {
 
         if(node instanceof FunNode funNode){
             lazy_functions.add(funNode);
+            int constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
+            functionMapping.put(funNode.name, constIndex);
             return -1;
         }
 
@@ -145,8 +166,16 @@ public final class Bl0jv2_Compiler {
         if(node instanceof DataNode){
             int constIndex = -1;
 
-            if(node instanceof IdentityNode n)
+            if(node instanceof IdentityNode n){
+                if (functionMapping.containsKey(n.name)) {
+                    constIndex = functionMapping.get(n.name);
+                    int reg = regIndex++;
+                    _emit(OpCodes.LOAD_CONST, reg, constIndex);
+                    return reg;
+                }
                 return map(n.name);
+            }
+
 
             if (node instanceof NumberNode n)
                 constIndex = constant(n.value);
@@ -200,6 +229,24 @@ public final class Bl0jv2_Compiler {
 
         if(node instanceof UnaryNode u){
             int reg;
+
+            if(node instanceof RUnaryNode rUnaryNode){
+                reg = compileInner(rUnaryNode.right);
+
+                int oneConst = constant(1);
+                int tempReg = regIndex++;
+                _emit(OpCodes.LOAD_CONST, tempReg, oneConst);
+
+                byte op = switch (rUnaryNode.op){
+                    case MINUS_MINUS -> OpCodes.LR_SUB;
+                    case PLUS_PLUS -> OpCodes.LR_ADD;
+                    default -> throw new Bl0j_CompilerException("Unknown op: " + u.op);
+                };
+
+                _emit(op, reg, tempReg);
+
+                return reg;
+            }
 
             byte op = switch (u.op){
                 case MINUS -> OpCodes.NEG;
