@@ -57,7 +57,7 @@ public final class Bl0jv2_jVM {
                 case Constants.BOOL -> consts[i] = bytes.get() != 0;
                 case Constants.FUN -> consts[i] = new FunDef(
                         get_str(bytes),
-                        bytes.getInt(),
+                        bytes.getInt() & 0xFF,
                         bytes.getShort(),
                         bytes.getShort());
                 default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
@@ -78,63 +78,68 @@ public final class Bl0jv2_jVM {
     }
 
     public void run_instructions() throws IOException {
-        for(int addr = 0; addr < instructions.length;){
-            byte opcode = (byte) (instructions[addr] & 0xFF);
 
-            int a = instructions[addr+1] & 0xFF;
-            int b = instructions[addr+2] & 0xFF;
-            addr += 3;
+            for(int addr = 0; addr < instructions.length;){
+                try {
+                byte opcode = (byte) (instructions[addr] & 0xFF);
 
-            Object[] reg = callStack.peek().regs();
+                int a = instructions[addr+1] & 0xFF;
+                int b = instructions[addr+2] & 0xFF;
+                addr += 3;
 
-            switch (opcode) {
-                case OpCodes.LOAD_NIL -> reg[a] = NIL;
-                case OpCodes.LOAD_CONST -> reg[a] = consts[b];
+                Object[] reg = callStack.peek().regs();
 
-                case OpCodes.LR_ADD -> reg[a] = (int) reg[a] + (int) reg[b];
-                case OpCodes.LR_SUB -> reg[a] = (int) reg[a] - (int) reg[b];
-                case OpCodes.LR_MUL -> reg[a] = (int) reg[a] * (int) reg[b];
-                case OpCodes.LR_DIV -> reg[a] = (int) reg[a] / (int) reg[b];
+                switch (opcode) {
+                    case OpCodes.LOAD_NIL -> reg[a] = NIL;
+                    case OpCodes.LOAD_CONST -> reg[a] = consts[b];
 
-                case OpCodes.JUMP -> addr = a * 3;
-                case OpCodes.JUMP_IF -> { if ( (boolean) reg[a]) addr = b * 3; }
-                case OpCodes.JUMP_IF_NOT -> { if (!(boolean) reg[a]) addr = b * 3; }
+                    case OpCodes.LR_ADD -> reg[a] = (int) reg[a] + (int) reg[b];
+                    case OpCodes.LR_SUB -> reg[a] = (int) reg[a] - (int) reg[b];
+                    case OpCodes.LR_MUL -> reg[a] = (int) reg[a] * (int) reg[b];
+                    case OpCodes.LR_DIV -> reg[a] = (int) reg[a] / (int) reg[b];
 
-                case OpCodes.EQ -> reg[a] = Objects.equals(reg[a], reg[b]);
-                case OpCodes.LESS -> reg[a] = (int) reg[a] < (int) reg[b];
-                case OpCodes.GREATER  -> reg[a] = (int) reg[a] > (int) reg[b];
-                case OpCodes.NOT -> reg[a] = !(boolean) reg[a];
+                    case OpCodes.JUMP -> addr = a * 3;
+                    case OpCodes.JUMP_IF -> { if ( (boolean) reg[a]) addr = b * 3; }
+                    case OpCodes.JUMP_IF_NOT -> { if (!(boolean) reg[a]) addr = b * 3; }
 
-                case OpCodes.MOV -> reg[a] = reg[b];
-                case OpCodes.SET -> reg[a] = b;
-                case OpCodes.NEG  -> reg[a] = -(int) reg[a];
+                    case OpCodes.EQ -> reg[a] = Objects.equals(reg[a], reg[b]);
+                    case OpCodes.LESS -> reg[a] = (int) reg[a] < (int) reg[b];
+                    case OpCodes.GREATER  -> reg[a] = (int) reg[a] > (int) reg[b];
+                    case OpCodes.NOT -> reg[a] = !(boolean) reg[a];
 
-                case OpCodes.CALL -> {
-                    FunDef fun = (FunDef) reg[a];
-                    Object[] args = new Object[fun.arity()];
+                    case OpCodes.MOV -> reg[a] = reg[b];
+                    case OpCodes.SET -> reg[a] = b;
+                    case OpCodes.NEG  -> reg[a] = -(int) reg[a];
 
-                    for (int i = 0; i < fun.arity(); i++)
-                        args[i] = reg[b + i];
+                    case OpCodes.CALL -> {
+                        FunDef fun = (FunDef) reg[a];
+                        Object[] args = new Object[fun.arity()];
 
-                    gen_frame(fun, args, addr);
-                    addr = fun.address() * 3;
+                        for (int i = 0; i < fun.arity(); i++)
+                            args[i] = reg[b + i];
+
+                        gen_frame(fun, args, addr);
+                        addr = fun.address() * 3;
+                    }
+
+                    case OpCodes.RETURN -> {
+                        Frame frame = callStack.pop();
+                        addr = frame.addressToReturn;
+                    }
+
+                    case OpCodes.PRINT -> {
+                        if (out != null) out.append(reg[a].toString());
+                        else System.out.println(reg[a]);
+                    }
+                    case OpCodes.HALT -> {
+                        return;
+                    }
+                    default -> throw new Bl0j_VM_Exception("Unknown opcode: " + opcode);
                 }
-
-                case OpCodes.RETURN -> {
-                    Frame frame = callStack.pop();
-                    addr = frame.addressToReturn;
+                } catch (Exception e) {
+                    throw new Bl0j_VM_Exception("Exception on address: "+addr+" - "+ e);
                 }
-
-                case OpCodes.PRINT -> {
-                    if (out != null) out.append(reg[a].toString());
-                    else System.out.println(reg[a]);
-                }
-                case OpCodes.HALT -> {
-                    return;
-                }
-                default -> throw new Bl0j_VM_Exception("Unknown opcode: " + opcode);
             }
-        }
     }
 
     private void gen_frame(FunDef fun, Object[] args, int addressToReturn) {

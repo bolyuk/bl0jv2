@@ -9,4 +9,9 @@ public class OpToken extends Token {
         super(line, pos);
         this.op = op;
     }
+
+    @Override
+    public String toString() {
+        return op.toString();
+    }
 }

@@ -1,7 +1,6 @@
 package bl0.bl0jv2.generation;
 
 import bl0.bl0jv2.exceptions.Bl0j_LexerException;
-import bl0.bl0jv2.exceptions.Bl0j_ParserException;
 import bl0.bl0jv2.generation.tokens.EOFToken;
 import bl0.bl0jv2.generation.tokens.OpToken;
 import bl0.bl0jv2.generation.tokens.Token;

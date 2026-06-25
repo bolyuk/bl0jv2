@@ -44,7 +44,7 @@ public final class Bl0jv2_Utils {
                     int len = s.length();
 
                     writer.append(
-                            String.format("[%d] FUN = %s ad:%d ag:%d rg:%d (%d bytes)%n", i, s, bytes.getInt(), bytes.getShort(), bytes.getShort(), len+10));
+                            String.format("[%d] FUN = %s ad:%d ag:%d rg:%d (%d bytes)%n", i, s, bytes.getInt() & 0xFF, bytes.getShort(), bytes.getShort(), len+10));
                 }
 
                 default -> throw new RuntimeException("Unknown const type: " + type);

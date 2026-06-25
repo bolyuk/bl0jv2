@@ -242,6 +242,7 @@ public final class Bl0jv2_Compiler {
 
                 int oneConst = constant(1);
                 int tempReg = regIndex++;
+                int tempRegToReturn = regIndex++;
                 _emit(OpCodes.LOAD_CONST, tempReg, oneConst);
 
                 byte op = switch (rUnaryNode.op){
@@ -250,21 +251,21 @@ public final class Bl0jv2_Compiler {
                     default -> throw new Bl0j_CompilerException("Unknown op: " + u.op);
                 };
 
+                _emit(OpCodes.MOV, tempRegToReturn, reg);
                 _emit(op, reg, tempReg);
 
-                return reg;
+                return tempRegToReturn;
             }
-
-            byte op = switch (u.op){
-                case MINUS -> OpCodes.NEG;
-                case NOT -> OpCodes.NOT;
-                case PRINT -> OpCodes.PRINT; //TODO
-                default -> throw new Bl0j_CompilerException("Unknown op: " + u.op);
-            };
 
             if(node instanceof LUnaryNode l) {
                 reg = compileInner(l.left);
 
+                byte op = switch (u.op){
+                    case MINUS -> OpCodes.NEG;
+                    case NOT -> OpCodes.NOT;
+                    case PRINT -> OpCodes.PRINT; //TODO
+                    default -> throw new Bl0j_CompilerException("Unknown op: " + u.op);
+                };
                 _emit(op, reg);
 
                 return reg;
@@ -295,6 +296,8 @@ public final class Bl0jv2_Compiler {
     }
 
     private byte _instr_len(){
+        if(bytecode.size() % 3 != 0)
+            throw new Bl0j_CompilerException("Invalid instruction len: " + bytecode.size());
         return (byte) (bytecode.size()/3);
     }
 

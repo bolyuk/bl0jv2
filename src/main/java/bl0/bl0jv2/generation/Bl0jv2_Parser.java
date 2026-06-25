@@ -25,6 +25,8 @@ public final class Bl0jv2_Parser {
     private List<Token> tokens;
     private int pos;
 
+    private String sourceCode;
+
     // program        = statement*
     // statement      = if | fun | while | sysCall | assign ';'
     // fun            = 'fun' IDENT funcBody block
@@ -49,6 +51,10 @@ public final class Bl0jv2_Parser {
         this.tokens = tokens;
         this.pos = 0;
         return program();
+    }
+
+    public void set_debug_source_code(String sourceCode) {
+        this.sourceCode = sourceCode;
     }
 
     private Node program() {
@@ -373,7 +379,22 @@ public final class Bl0jv2_Parser {
             }
         }
 
-        throw new Bl0j_ParserException(t.line, t.line_index, "unexpected token - "+t);
+        gen_exception(t,"unexpected token - "+t);
+        return null;
+    }
+
+    private void gen_exception(Token t, String reason){
+        String line = "";
+        if(sourceCode != null && t != null)
+        {
+            var lines = sourceCode.split("\n");
+            if(lines.length-1 < t.line)
+                line = lines[t.line] + "\n";
+            else
+                line = "wrong line indices...\n";
+        }
+
+        throw new Bl0j_ParserException(t != null ? t.line : -1,t != null ? t.line_index : 1, line+reason);
     }
 
     private Token peek() {
