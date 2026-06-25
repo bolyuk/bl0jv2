@@ -80,6 +80,11 @@ public final class Bl0jv2_Parser {
             return new NativeCallNode(nativeCallToken.id, operand);
         }
 
+        if(peek() instanceof ReturnToken){
+            pos++;
+            return new ReturnNode(assign());
+        }
+
         if(peek() instanceof DefToken){
             pos++; // consume
             return fun();

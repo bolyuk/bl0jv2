@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class Bl0jv2_Compiler {
     private final List<Byte> bytecode = new ArrayList<>();
@@ -68,7 +69,7 @@ public final class Bl0jv2_Compiler {
 
         for (var fun : lazy_functions) {
             identityMapping.clear();
-            regIndex = 0;
+            regIndex = 1; // first reg for return value
 
             adress = _instr_len();
             arity = fun.args.args.size();
@@ -77,7 +78,8 @@ public final class Bl0jv2_Compiler {
                 map(arg);
 
             compileInner(fun.body);
-            _emit(OpCodes.RETURN);
+            if(bytecode.get(bytecode.size()-3) != OpCodes.RETURN)
+                _emit(OpCodes.RETURN, 0);
 
             int constIndex = functionMapping.get(fun.name);
             constants.set(constIndex, new FunDef(fun.name, adress,(short) arity ,(short) regIndex));;
@@ -87,17 +89,18 @@ public final class Bl0jv2_Compiler {
 
     private int compileInner(Node node) {
 
+        if(node instanceof ReturnNode returnNode){
+            var reg = compileInner(returnNode.right);
+            _emit(OpCodes.RETURN, reg);
+            return reg;
+        }
+
         if(node instanceof NativeCallNode nativeCallNode){
             int valReg = compileInner(nativeCallNode.right);
-            int methodIdReg = regIndex++;
-            int dataBufReg = regIndex++;
-            int constantId = constant(nativeCallNode.id);
 
-            _emit(OpCodes.LOAD_CONST, methodIdReg, constantId);
-            _emit(OpCodes.MOV, dataBufReg, valReg);
-            _emit(OpCodes.CALL_NATIVE, methodIdReg, dataBufReg);
+            _emit(OpCodes.CALL_NATIVE, nativeCallNode.id, valReg);
 
-            return dataBufReg;
+            return valReg;
         }
 
         if(node instanceof FunCall funCall){
@@ -108,15 +111,16 @@ public final class Bl0jv2_Compiler {
             }
 
             int method = compileInner(funCall.left);
-            int startReg = regIndex;
+
+            int startReg = regIndex++;
 
             for(var val : valRegs) {
                 _emit(OpCodes.MOV, regIndex, val);
                 regIndex++;
             }
 
-            _emit(OpCodes.CALL, method, valRegs.length > 0 ? startReg : -1);
-            return method;
+            _emit(OpCodes.CALL, method, startReg);
+            return startReg;
         }
 
         if(node instanceof ProgramNode programNode){

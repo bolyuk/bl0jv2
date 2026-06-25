@@ -48,7 +48,7 @@ public final class Bl0jv2_Utils {
                             String.format("[%d] FUN = %s ad:%d ag:%d rg:%d (%d bytes)%n", i, s, bytes.getInt() & 0xFF, bytes.getShort(), bytes.getShort(), len+10));
                 }
                 case Constants.BYTE -> {
-                    writer.append(String.format("[%d] BYTE    = 0x%02X %n", i, bytes.get()));
+                    writer.append(String.format("[%d] BYTE   = 0x%02X %n", i, bytes.get()));
                 }
 
                 default -> throw new RuntimeException("Unknown const type: " + type);
@@ -96,7 +96,7 @@ public final class Bl0jv2_Utils {
                 case OpCodes.HALT -> writer.append("HALT");
                 case OpCodes.CALL_NATIVE -> writer.append(String.format("CALL_NATIVE r%d r%d", a, b));
                 case OpCodes.CALL -> writer.append(String.format("CALL r%d args@%d", a, b));
-                case OpCodes.RETURN -> writer.append("RETURN");
+                case OpCodes.RETURN -> writer.append(String.format("RETURN r%d", a));
                 default -> writer.append("UNKNOWN");
             }
             writer.append(String.format("%n"));

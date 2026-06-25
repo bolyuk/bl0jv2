@@ -53,7 +53,7 @@ public final class Bl0jv2_jVM {
         });
         nativeMethods.put(NativeMethods.WAIT, (d) -> {
             try {
-                wait((int)d);
+                Thread.sleep((int) d);
             } catch (InterruptedException e) {
                 return -1;
             }
@@ -78,7 +78,7 @@ public final class Bl0jv2_jVM {
         short registers_length = bytes.getShort();
 
         callStack.clear();
-        callStack.add(new Frame(new Object[registers_length], -1));
+        callStack.add(new Frame(new Object[registers_length], -1, -1));
         consts = new Object[constants_length];
 
         for (int i = 0; i < constants_length; i++) {
@@ -149,19 +149,27 @@ public final class Bl0jv2_jVM {
                         Object[] args = new Object[fun.arity()];
 
                         for (int i = 0; i < fun.arity(); i++)
-                            args[i] = reg[b + i];
+                            args[i] = reg[b + 1 + i];
 
-                        gen_frame(fun, args, addr);
+                        gen_frame(fun, args, addr, b);
                         addr = fun.address() * 3;
                     }
 
                     case OpCodes.CALL_NATIVE -> {
-                        var nativeFun = nativeMethods.get((byte)reg[a]);
-                        reg[b] = nativeFun.apply(reg[b]);
+                        var nativeFun = nativeMethods.get((byte) a);
+                        if (nativeFun == null)
+                            throw new Bl0j_VM_Exception("unknown native method: " + a);
+                        Object result = nativeFun.apply(reg[b]);
+                        if (result instanceof Integer code && code == -1)
+                            throw new Bl0j_VM_Exception("native method " + a + " returned error");
                     }
 
                     case OpCodes.RETURN -> {
+                        if(callStack.size() == 1)
+                            throw new Bl0j_VM_Exception("return call for last stack frame");
+
                         Frame frame = callStack.pop();
+                        callStack.peek().regs[frame.resultReg]  = reg[a];
                         addr = frame.addressToReturn;
                     }
                     case OpCodes.HALT -> {
@@ -175,13 +183,14 @@ public final class Bl0jv2_jVM {
             }
     }
 
-    private void gen_frame(FunDef fun, Object[] args, int addressToReturn) {
+    private void gen_frame(FunDef fun, Object[] args, int addressToReturn, int resultReg) {
         Object[] regs = new Object[fun.regs()];
 
+        regs[0] = NIL;
         for (int i = 0; i < args.length; i++)
-            regs[i] = args[i];
+            regs[i+1] = args[i];
 
-        callStack.push(new Frame(regs, addressToReturn));
+        callStack.push(new Frame(regs, addressToReturn, resultReg));
     }
 
     private String get_str(ByteBuffer bytes){
@@ -191,6 +200,6 @@ public final class Bl0jv2_jVM {
         return new String(strBytes, StandardCharsets.UTF_8);
     }
 
-    private record Frame(Object[] regs, int addressToReturn) {}
+    private record Frame(Object[] regs, int addressToReturn, int resultReg) {}
 }
 

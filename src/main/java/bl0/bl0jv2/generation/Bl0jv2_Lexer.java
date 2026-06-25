@@ -136,6 +136,7 @@ public final class Bl0jv2_Lexer {
                             case "while" -> tokens.add(new WhileToken(line, line_index));
 
                             case "def" -> tokens.add(new DefToken(line, line_index));
+                            case "return" -> tokens.add(new ReturnToken(line, line_index));
 
                             case "println" -> tokens.add(new NativeCallToken(line, line_index, NativeMethods.PRINT_LN));
                             case "print" -> tokens.add(new NativeCallToken(line, line_index, NativeMethods.PRINT));
