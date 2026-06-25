@@ -1,4 +1,4 @@
-package bl0.bl0jv2;
+package bl0.bl0jv2.runtime;
 
 import bl0.bl0jv2.data.*;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
@@ -22,6 +22,12 @@ public final class Bl0jv2_jVM {
     };
 
     private Writer out;
+
+    private final OperatorTable addTable = new OperatorTable();
+    private final OperatorTable subTable = new OperatorTable();
+    private final OperatorTable divTable = new OperatorTable();
+    private final OperatorTable mulTable = new OperatorTable();
+    private final OperatorTable remTable = new OperatorTable();
 
     private ArrayDeque<Frame> callStack = new ArrayDeque<>();
     private Map<Byte, Function<Object, Object>> nativeMethods = new HashMap<>();
@@ -58,6 +64,26 @@ public final class Bl0jv2_jVM {
                 return -1;
             }
             return 0;
+        });
+
+        addTable.add(Integer.class, Integer.class, (a, b) -> (int)a + (int)b);
+        addTable.add(String.class,  String.class,  (a, b) -> a.toString() + b.toString());
+        addTable.add(String.class,  Integer.class, (a, b) -> a.toString() + b.toString());
+        addTable.add(String.class,  Boolean.class, (a, b) -> a.toString() + b.toString());
+
+        subTable.add(Integer.class, Integer.class, (a, b) -> (int)a - (int)b);
+
+        mulTable.add(Integer.class, Integer.class, (a, b) -> (int)a * (int)b);
+        mulTable.add(String.class,  Integer.class, (a, b) -> a.toString().repeat((int)b));
+
+        divTable.add(Integer.class, Integer.class, (a, b) -> {
+            if ((int)b == 0) throw new Bl0j_VM_Exception("division by zero");
+            return (int)a / (int)b;
+        });
+
+        remTable.add(Integer.class, Integer.class, (a, b) -> {
+            if ((int)b == 0) throw new Bl0j_VM_Exception("division by zero");
+            return (int)a % (int)b;
         });
     }
 
@@ -126,11 +152,12 @@ public final class Bl0jv2_jVM {
                     case OpCodes.LOAD_NIL -> reg[a] = NIL;
                     case OpCodes.LOAD_CONST -> reg[a] = consts[b];
 
-                    case OpCodes.LR_ADD -> reg[a] = (int) reg[a] + (int) reg[b];
-                    case OpCodes.LR_SUB -> reg[a] = (int) reg[a] - (int) reg[b];
-                    case OpCodes.LR_MUL -> reg[a] = (int) reg[a] * (int) reg[b];
-                    case OpCodes.LR_DIV -> reg[a] = (int) reg[a] / (int) reg[b];
-                    case OpCodes.LR_REM -> reg[a] = (int) reg[a] % (int) reg[b];
+                    case OpCodes.LR_ADD -> reg[a] = addTable.calculate(reg[a], reg[b]);
+                    case OpCodes.LR_SUB -> reg[a] = subTable.calculate(reg[a], reg[b]);
+                    case OpCodes.LR_MUL -> reg[a] = mulTable.calculate(reg[a], reg[b]);
+                    case OpCodes.LR_DIV -> reg[a] = divTable.calculate(reg[a], reg[b]);
+                    case OpCodes.LR_REM -> reg[a] = remTable.calculate(reg[a], reg[b]);
+
                     case OpCodes.JUMP -> addr = a * 3;
                     case OpCodes.JUMP_IF -> { if ( (boolean) reg[a]) addr = b * 3; }
                     case OpCodes.JUMP_IF_NOT -> { if (!(boolean) reg[a]) addr = b * 3; }
@@ -178,7 +205,7 @@ public final class Bl0jv2_jVM {
                     default -> throw new Bl0j_VM_Exception("Unknown opcode: " + opcode);
                 }
                 } catch (Exception e) {
-                    throw new Bl0j_VM_Exception("Exception on address: "+addr+" - "+ e);
+                    throw new Bl0j_VM_Exception("Exception on address: "+addr/3+" - "+ e);
                 }
             }
     }
