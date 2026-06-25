@@ -7,15 +7,15 @@
         <sourceOutputDir name="target/generated-sources/annotations" />
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
-        <module name="reflection" />
-        <module name="services" />
         <module name="bl0jv2-vm" />
         <module name="async" />
         <module name="core" />
+        <module name="reflection" />
         <module name="common" />
         <module name="eventbus" />
         <module name="bl0jv2-terminal" />
         <module name="logging" />
+        <module name="services" />
         <module name="sockets" />
         <module name="boot" />
         <module name="db" />
@@ -24,6 +24,7 @@
     <bytecodeTargetLevel>
       <module name="bl0jv1-deprecated" target="21" />
       <module name="bl0jv2-common" target="21" />
+      <module name="bl0jv2-compiler" target="21" />
       <module name="test" target="26" />
     </bytecodeTargetLevel>
   </component>

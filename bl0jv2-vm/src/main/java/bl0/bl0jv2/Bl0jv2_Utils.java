@@ -97,6 +97,7 @@ public final class Bl0jv2_Utils {
             writer.append(String.format("%n"));
             instr++;
         }
+        writer.flush();
     }
 
     private static String get_str(ByteBuffer bytes){
