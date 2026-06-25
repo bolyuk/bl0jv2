@@ -1,7 +1,9 @@
 package bl0.bl0jv2.generation;
 
+import bl0.bl0jv2.data.NativeMethods;
 import bl0.bl0jv2.exceptions.Bl0j_LexerException;
 import bl0.bl0jv2.generation.tokens.EOFToken;
+import bl0.bl0jv2.generation.tokens.NativeCallToken;
 import bl0.bl0jv2.generation.tokens.OpToken;
 import bl0.bl0jv2.generation.tokens.Token;
 import bl0.bl0jv2.generation.tokens.blocks.LBraceToken;
@@ -53,8 +55,11 @@ public final class Bl0jv2_Lexer {
                 case ';':
                     tokens.add(new SemicolonToken(line, line_index));
                     break;
+                case '%':
+                    tokens.add(new OpToken(line, line_index, Operator.REMAINDER));
+                    break;
                 case '=':
-                    if(peekIfNext('='))
+                    if (peekIfNext('='))
                         tokens.add(new OpToken(line, line_index, Operator.EQUALS));
                     else
                         tokens.add(new OpToken(line, line_index, Operator.ASSIGNMENT));
@@ -84,16 +89,16 @@ public final class Bl0jv2_Lexer {
                     tokens.add(new OpToken(line, line_index, Operator.DIV));
                     break;
                 case '!':
-                    if(peekIfNext('='))
+                    if (peekIfNext('='))
                         tokens.add(new OpToken(line, line_index, Operator.NOT_EQUALS));
                     else
                         tokens.add(new OpToken(line, line_index, Operator.NOT));
                     break;
                 default:
-                    if(c == '\''){
+                    if (c == '\'') {
                         String buf = "";
-                        while (pos+1 < len){
-                            if(!isNext('\'')) {
+                        while (pos + 1 < len) {
+                            if (!isNext('\'')) {
                                 buf += peek();
                                 line_index++;
                             } else {
@@ -102,41 +107,43 @@ public final class Bl0jv2_Lexer {
                             }
                         }
                         tokens.add(new StringToken(line, line_index, buf));
-                    } else if(isNumber(c)){
-                        String buf = ""+c;
-                        while (pos+1 < len) {
-                            if(isNumber(lookAhead())) {
+                    } else if (isNumber(c)) {
+                        String buf = "" + c;
+                        while (pos + 1 < len) {
+                            if (isNumber(lookAhead())) {
                                 buf += peek();
                                 line_index++;
                             } else
                                 break;
                         }
                         tokens.add(new NumberToken(line, line_index, buf));
-                    } else if(isIdentity(c)){
-                        if((c == 't' || c == 'f')
-                        && !isIdentity(lookAhead())){
-                            tokens.add(new BooleanToken(line, line_index, c == 't'));
-                        } else {
-                            String buf = "" + c;
-                            while (pos + 1 < len) {
-                                if (isIdentity(lookAhead())) {
-                                    buf += peek();
-                                    line_index++;
-                                } else
-                                    break;
-                            }
-                            switch (buf) {
-                                case "nil" -> tokens.add(new NilToken(line, line_index));
-                                case "print" -> tokens.add(new OpToken(line, line_index, Operator.PRINT));
-                                case "if" -> tokens.add(new IfToken(line, line_index));
-                                case "else" -> tokens.add(new ElseToken(line, line_index));
-                                case "while" -> tokens.add(new WhileToken(line, line_index));
-                                case "def" -> tokens.add(new DefToken(line, line_index));
-                                default -> tokens.add(new IdentityToken(line, line_index, buf));
-                            }
+                    } else if (isIdentity(c)) {
+                        String buf = "" + c;
+                        while (pos + 1 < len) {
+                            if (isIdentity(lookAhead())) {
+                                buf += peek();
+                                line_index++;
+                            } else
+                                break;
                         }
-                    } else if(!Character.isWhitespace(c))
-                        throw new Bl0j_LexerException(line, line_index, "unexpected character - "+c);
+                        switch (buf) {
+                            case "true" -> tokens.add(new BooleanToken(line, line_index, true));
+                            case "false" -> tokens.add(new BooleanToken(line, line_index, false));
+                            case "nil" -> tokens.add(new NilToken(line, line_index));
+
+                            case "if" -> tokens.add(new IfToken(line, line_index));
+                            case "else" -> tokens.add(new ElseToken(line, line_index));
+                            case "while" -> tokens.add(new WhileToken(line, line_index));
+
+                            case "def" -> tokens.add(new DefToken(line, line_index));
+
+                            case "println" -> tokens.add(new NativeCallToken(line, line_index, NativeMethods.PRINT_LN));
+                            case "print" -> tokens.add(new NativeCallToken(line, line_index, NativeMethods.PRINT));
+                            case "wait" -> tokens.add(new NativeCallToken(line, line_index, NativeMethods.WAIT));
+                            default -> tokens.add(new IdentityToken(line, line_index, buf));
+                        }
+                    } else if (!Character.isWhitespace(c))
+                        throw new Bl0j_LexerException(line, line_index, "unexpected character - " + c);
             }
             line_index++;
             pos++;

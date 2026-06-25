@@ -1,9 +1,6 @@
 package bl0.bl0jv2;
 
-import bl0.bl0jv2.data.C;
-import bl0.bl0jv2.data.Constants;
-import bl0.bl0jv2.data.FunDef;
-import bl0.bl0jv2.data.OpCodes;
+import bl0.bl0jv2.data.*;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
 import java.io.IOException;
@@ -12,7 +9,10 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 
 public final class Bl0jv2_jVM {
 
@@ -24,10 +24,42 @@ public final class Bl0jv2_jVM {
     private Writer out;
 
     private ArrayDeque<Frame> callStack = new ArrayDeque<>();
+    private Map<Byte, Function<Object, Object>> nativeMethods = new HashMap<>();
     private Object[] consts;
     private byte[] instructions;
 
-    public Bl0jv2_jVM() {}
+    public Bl0jv2_jVM() {
+        nativeMethods.put(NativeMethods.PRINT, (d) -> {
+            if (out != null) {
+                try {
+                    out.append(d.toString());
+                } catch (IOException e) {
+                    return -1;
+                }
+            }
+            else System.out.print(d);
+            return 0;
+        });
+        nativeMethods.put(NativeMethods.PRINT_LN, (d) -> {
+            if (out != null) {
+                try {
+                    out.append("\n").append(d.toString());
+                } catch (IOException e) {
+                    return -1;
+                }
+            }
+            else System.out.println(d);
+            return 0;
+        });
+        nativeMethods.put(NativeMethods.WAIT, (d) -> {
+            try {
+                wait((int)d);
+            } catch (InterruptedException e) {
+                return -1;
+            }
+            return 0;
+        });
+    }
 
     public void feed_compiled_file(ByteBuffer bytes){
         bytes.order(ByteOrder.BIG_ENDIAN);
@@ -60,6 +92,7 @@ public final class Bl0jv2_jVM {
                         bytes.getInt() & 0xFF,
                         bytes.getShort(),
                         bytes.getShort());
+                case Constants.BYTE -> consts[i] = bytes.get();
                 default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
             }
         }
@@ -97,7 +130,7 @@ public final class Bl0jv2_jVM {
                     case OpCodes.LR_SUB -> reg[a] = (int) reg[a] - (int) reg[b];
                     case OpCodes.LR_MUL -> reg[a] = (int) reg[a] * (int) reg[b];
                     case OpCodes.LR_DIV -> reg[a] = (int) reg[a] / (int) reg[b];
-
+                    case OpCodes.LR_REM -> reg[a] = (int) reg[a] % (int) reg[b];
                     case OpCodes.JUMP -> addr = a * 3;
                     case OpCodes.JUMP_IF -> { if ( (boolean) reg[a]) addr = b * 3; }
                     case OpCodes.JUMP_IF_NOT -> { if (!(boolean) reg[a]) addr = b * 3; }
@@ -122,14 +155,14 @@ public final class Bl0jv2_jVM {
                         addr = fun.address() * 3;
                     }
 
+                    case OpCodes.CALL_NATIVE -> {
+                        var nativeFun = nativeMethods.get((byte)reg[a]);
+                        reg[b] = nativeFun.apply(reg[b]);
+                    }
+
                     case OpCodes.RETURN -> {
                         Frame frame = callStack.pop();
                         addr = frame.addressToReturn;
-                    }
-
-                    case OpCodes.PRINT -> {
-                        if (out != null) out.append(reg[a].toString());
-                        else System.out.println(reg[a]);
                     }
                     case OpCodes.HALT -> {
                         return;

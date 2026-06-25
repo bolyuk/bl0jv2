@@ -6,11 +6,11 @@ public enum Operator {
     STAR,           //   *
     DIV,            //   /
     ASSIGNMENT,     //   =
+    REMAINDER,      //   %
 
     EQUALS,         //   ==
     NOT_EQUALS,     //   !=
     NOT,            //   !
-    PRINT,          //   print
 
     LESS,           // <
     LESS_EQUALS,    // <=

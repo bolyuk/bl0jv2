@@ -9,6 +9,7 @@ import bl0.bl0jv2.generation.nodes.statements.*;
 import bl0.bl0jv2.generation.nodes.unary.LUnaryNode;
 import bl0.bl0jv2.generation.nodes.unary.RUnaryNode;
 import bl0.bl0jv2.generation.tokens.EOFToken;
+import bl0.bl0jv2.generation.tokens.NativeCallToken;
 import bl0.bl0jv2.generation.tokens.OpToken;
 import bl0.bl0jv2.generation.tokens.Token;
 import bl0.bl0jv2.generation.tokens.blocks.LBraceToken;
@@ -42,7 +43,7 @@ public final class Bl0jv2_Parser {
     // equality       = comparison (('==' | '!=') comparison)*
     // comparison     = addSub (('<' | '>' | '<=' | '>=') addSub)*
     // addSub         = multiplyDivide (('+' | '-') multiplyDivide)*
-    // multiplyDivide = unary (('*' | '/') unary)*
+    // multiplyDivide = unary (('*' | '/' | '%') unary)*
     // unary          = ('-' | '!') unary | postfix
     // postfix        = data (tuple | '++' | '--')*
     // tuple          = '(' assign (',' assign)* ')'
@@ -69,14 +70,14 @@ public final class Bl0jv2_Parser {
 
     private Node statement(){
 
-        if(peek() instanceof OpToken op && op.op == Operator.PRINT){
+        if(peek() instanceof NativeCallToken nativeCallToken){
             pos++; // consume
             Node operand = assign();
 
             if (peek() instanceof SemicolonToken)
                 pos++; // consume ;
 
-            return new LUnaryNode(op.op, operand);
+            return new NativeCallNode(nativeCallToken.id, operand);
         }
 
         if(peek() instanceof DefToken){
@@ -270,7 +271,7 @@ public final class Bl0jv2_Parser {
 
         while (pos < tokens.size()) {
             Token t = peek();
-            if (t instanceof OpToken op && (op.op == Operator.STAR || op.op == Operator.DIV)) {
+            if (t instanceof OpToken op && (op.op == Operator.STAR || op.op == Operator.DIV || op.op == Operator.REMAINDER)) {
                 pos++; // consume
                 Node right = unary();
                 left = new BinaryNode(left, op.op, right);

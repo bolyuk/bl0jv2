@@ -87,6 +87,19 @@ public final class Bl0jv2_Compiler {
 
     private int compileInner(Node node) {
 
+        if(node instanceof NativeCallNode nativeCallNode){
+            int valReg = compileInner(nativeCallNode.right);
+            int methodIdReg = regIndex++;
+            int dataBufReg = regIndex++;
+            int constantId = constant(nativeCallNode.id);
+
+            _emit(OpCodes.LOAD_CONST, methodIdReg, constantId);
+            _emit(OpCodes.MOV, dataBufReg, valReg);
+            _emit(OpCodes.CALL_NATIVE, methodIdReg, dataBufReg);
+
+            return dataBufReg;
+        }
+
         if(node instanceof FunCall funCall){
             int[] valRegs = new int[funCall.args.size()];
 
@@ -219,6 +232,7 @@ public final class Bl0jv2_Compiler {
                 case MINUS -> OpCodes.LR_SUB;
                 case STAR -> OpCodes.LR_MUL;
                 case DIV -> OpCodes.LR_DIV;
+                case REMAINDER ->  OpCodes.LR_REM;
                 case EQUALS, NOT_EQUALS -> OpCodes.EQ;
                 case LESS -> OpCodes.LESS;
                 case GREATER -> OpCodes.GREATER;
@@ -263,7 +277,6 @@ public final class Bl0jv2_Compiler {
                 byte op = switch (u.op){
                     case MINUS -> OpCodes.NEG;
                     case NOT -> OpCodes.NOT;
-                    case PRINT -> OpCodes.PRINT; //TODO
                     default -> throw new Bl0j_CompilerException("Unknown op: " + u.op);
                 };
                 _emit(op, reg);
@@ -349,6 +362,10 @@ public final class Bl0jv2_Compiler {
                         dos.writeInt(f.address());
                         dos.writeShort(f.arity());
                         dos.writeShort(f.regs());
+                    }
+                    case Byte b -> {
+                        dos.writeByte(Constants.BYTE);
+                        dos.writeByte(b);
                     }
                     default -> throw new  Bl0j_CompilerException("unknown constant type - "+c.getClass().getName());
                 }
