@@ -7,7 +7,7 @@ import bl0.bl0jv2.data.OpCodes;
 import bl0.bl0jv2.exceptions.Bl0j_CompilerException;
 import bl0.bl0jv2.generation.nodes.BinaryNode;
 import bl0.bl0jv2.generation.nodes.Node;
-import bl0.bl0jv2.generation.nodes.ProgramNode;
+import bl0.bl0jv2.generation.nodes.PROGRAM_N;
 import bl0.bl0jv2.generation.nodes.data.*;
 import bl0.bl0jv2.generation.nodes.statements.*;
 import bl0.bl0jv2.generation.nodes.unary.LUnaryNode;
@@ -20,7 +20,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 public final class Bl0jv2_Compiler {
     private final List<Byte> bytecode = new ArrayList<>();
@@ -42,7 +41,7 @@ public final class Bl0jv2_Compiler {
         regIndex = 0;
         regCount = 0;
 
-        if(!(node instanceof ProgramNode program))
+        if(!(node instanceof PROGRAM_N program))
             throw new Bl0j_CompilerException("node is not a ProgramNode");
 
         fetchFunctions(program);
@@ -53,7 +52,7 @@ public final class Bl0jv2_Compiler {
         return build_header_bytecode();
     }
 
-    private void fetchFunctions(ProgramNode program) {
+    private void fetchFunctions(PROGRAM_N program) {
         for(var node : program.nodes)
             if(node instanceof FunNode funNode){
                 lazy_functions.add(funNode);
@@ -123,7 +122,7 @@ public final class Bl0jv2_Compiler {
             return startReg;
         }
 
-        if(node instanceof ProgramNode programNode){
+        if(node instanceof PROGRAM_N programNode){
             for(var n : programNode.nodes)
                 compileInner(n);
             return -1;

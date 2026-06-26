@@ -3,15 +3,12 @@ package bl0.bl0jv2.generation;
 import bl0.bl0jv2.generation.nodes.BinaryNode;
 import bl0.bl0jv2.generation.nodes.Node;
 import bl0.bl0jv2.exceptions.Bl0j_ParserException;
-import bl0.bl0jv2.generation.nodes.ProgramNode;
+import bl0.bl0jv2.generation.nodes.PROGRAM_N;
 import bl0.bl0jv2.generation.nodes.data.*;
 import bl0.bl0jv2.generation.nodes.statements.*;
 import bl0.bl0jv2.generation.nodes.unary.LUnaryNode;
 import bl0.bl0jv2.generation.nodes.unary.RUnaryNode;
-import bl0.bl0jv2.generation.tokens.EOFToken;
-import bl0.bl0jv2.generation.tokens.NativeCallToken;
-import bl0.bl0jv2.generation.tokens.OpToken;
-import bl0.bl0jv2.generation.tokens.Token;
+import bl0.bl0jv2.generation.tokens.*;
 import bl0.bl0jv2.generation.tokens.blocks.LBraceToken;
 import bl0.bl0jv2.generation.tokens.blocks.RBraceToken;
 import bl0.bl0jv2.generation.tokens.blocks.LParenToken;
@@ -29,284 +26,301 @@ public final class Bl0jv2_Parser {
     private String sourceCode;
 
     // program        = statement*
-    // statement      = if | fun | while | sysCall | assign ';'
-    // fun            = 'fun' IDENT funcBody block
+    // statement      =  if | fun | class | while | sysCall | assign ';'       TODO
+    // class          = 'def' 'class' IDENT '{' fun* '}'                       TODO
+    // new            = 'new' IDENT tuple                                      TODO
+    // fun            = 'def' 'fun' IDENT funcBody block
     // lambda         = funcBody  '->' (assign | block)                        TODO (later)
     // argBody        = '(' (IDENT (',' IDENT)*)? ')'
     // if             = 'if' condition block ('else' block)?
     // while          = 'while' condition block
     // block          = '{' statement* '}' | statement
     // condition      = assign
-    // sysCall        = ('print' | 'read' | 'wait') assign ';'                 TODO (later)
-    // assign         = IDENT '=' assign | ternary
+    // sysCall        = ('print' | 'println' | 'read' | 'wait') assign ';'
+    // assign         = IDENT '=' assign | ternary | postfix '=' assign        TODO
     // ternary        = equality ('?' ternary ':' ternary)?
     // equality       = comparison (('==' | '!=') comparison)*
     // comparison     = addSub (('<' | '>' | '<=' | '>=') addSub)*
     // addSub         = multiplyDivide (('+' | '-') multiplyDivide)*
     // multiplyDivide = unary (('*' | '/' | '%') unary)*
     // unary          = ('-' | '!') unary | postfix
-    // postfix        = data (tuple | '++' | '--')*
+    // postfix        = data (tuple | '++' | '--' | '.' IDENT )*               TODO
     // tuple          = '(' assign (',' assign)* ')'
-    // data           = NUMBER | IDENT | STRING | tuple | lambda
+    // data           = NUMBER | IDENT | STRING | tuple | lambda | new         TODO
     public Node getAST(List<Token> tokens) {
         this.tokens = tokens;
         this.pos = 0;
         return program();
     }
 
-    public void set_debug_source_code(String sourceCode) {
+    public void setSourceCode(String sourceCode) {
         this.sourceCode = sourceCode;
     }
 
-    private Node program() {
+    // --- UPPER NODES ---
+
+    private PROGRAM_N program() {
         List<Node> stmts = new ArrayList<>();
 
-        while (!(peek() instanceof EOFToken)) {
-            stmts.add(statement());
-        }
+        while (!(peek_t() instanceof EOFToken))
+            stmts.add(classStatement());
 
-        return new ProgramNode(stmts);
+        return new PROGRAM_N(stmts);
+    }
+
+    private Node classStatement() {
+        if(peek_t() instanceof DefToken) // dont consume!!
+            return define_function_or_class();
+
+        return statement();
     }
 
     private Node statement(){
 
-        if(peek() instanceof NativeCallToken nativeCallToken){
-            pos++; // consume
-            Node operand = assign();
+        if(peek_t() instanceof NativeCallToken)
+           return native_call_statement();
 
-            if (peek() instanceof SemicolonToken)
-                pos++; // consume ;
+        if(consume_if(ReturnToken.class))
+            return new ReturnNode(assign_evaluation());
 
-            return new NativeCallNode(nativeCallToken.id, operand);
-        }
+        if(peek_t() instanceof IfToken) // dont consume!!
+            return if_statement();
 
-        if(peek() instanceof ReturnToken){
-            pos++;
-            return new ReturnNode(assign());
-        }
+        if(peek_t() instanceof WhileToken) // dont consume!!
+            return while_statement();
 
-        if(peek() instanceof DefToken){
-            pos++; // consume
-            return fun();
-        }
+        // TODO probably not needed
+        consume_if(SemicolonToken.class); // TODO check if it possible to kill semicolons in another place
 
-        if(peek() instanceof IfToken){
-            pos++; // consume
-            return If();
-        }
-
-        if(peek() instanceof WhileToken){
-            pos++; // consume
-            return While();
-        }
-
-        Node expr = assign();
-
-        if (peek() instanceof SemicolonToken) {
-            pos++;
-        }
-
-        return expr;
+        return assign_evaluation();
     }
 
-    private Node fun(){
-        Token t = peek();
-        if(!(t instanceof IdentityToken identityToken))
-            throw new Bl0j_ParserException(t.line, t.line_index, "expected 'IDENTITY'");
-        pos++;
+    // --- DEFINITIONS ---
 
-        return new FunNode(identityToken.name, argBody(), block());
+    private Node define_function_or_class(){
+        consume_or_throw(DefToken.class, "'define' token expected for Class or Function definition");
+
+        Token t = peek_t();
+
+        if(t instanceof IdentityToken)
+            return define_function();
+
+        if(t instanceof ClassToken)
+            return define_class();
+
+        throw new Bl0j_ParserException(t.line, t.line_index, "unexpected 'def' token");
     }
 
-    private ArgumentNode argBody(){
-        Token t = peek();
-        if (!(t instanceof LParenToken))
-            throw new Bl0j_ParserException(t.line, t.line_index, "expected '('");
-        pos++;
+    private Node define_function(){
+        String function_name = consume_or_throw(IdentityToken.class, "'IDENTITY' token expected for Function definition").name;
+
+        return new FunNode(function_name, define_function_params_body(), block());
+    }
+
+    private PARAMS_N define_function_params_body(){
+        // mandatory
+        consume_or_throw(LParenToken.class, "'(' token expected for parameter definition");
+
+        Token t;
 
         boolean findIdentity = true;
-        List<String> args = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+
         while (pos < tokens.size()) {
-            t = peek();
+            t = peek_t();
 
-            if (t instanceof RParenToken) break;
+            if (t instanceof RParenToken) break; // end of params input, consuming later
 
-            if(findIdentity){
-                if (t instanceof IdentityToken identityToken) {
-                    pos++; // consume
-                    args.add(identityToken.name);
-                } else throw new Bl0j_ParserException(t.line, t.line_index, "expected 'IDENTITY'");
-            } else {
-                if (t instanceof SeparatorToken) {
-                    pos++; // consume
-                } else throw new Bl0j_ParserException(t.line, t.line_index, "expected 'SEPARATOR'");
-            }
+            if(findIdentity)
+                params.add(consume_or_throw(IdentityToken.class, "'IDENTITY' token expected for parameter definition").name);
+            else
+                consume_or_throw(SeparatorToken.class,"',' token expected for parameter definition");
+
             findIdentity = !findIdentity;
         }
 
-        t = peek();
-        if (!(t instanceof RParenToken))
-            throw new Bl0j_ParserException(t.line, t.line_index, "expected ')'");
-        pos++;
-        return new ArgumentNode(args);
+        // mandatory
+        consume_or_throw(RParenToken.class, "')' token expected at end of parameter definition");
+
+        return new PARAMS_N(params);
     }
 
-    private Node If(){
-        Node condition = condition();
+    private Node define_class(){
+        consume_or_throw(ClassToken.class, "'class' token expected for Class definition");
+        String className = consume_or_throw(IdentityToken.class, "'IDENTITY' token expected for Class definition").name;
+
+        List<Node> stmts = new ArrayList<>();
+
+        while (!(peek_t() instanceof EOFToken))
+            stmts.add(classStatement());
+
+
+        return null; //TODO just for now so
+    }
+
+    // --- STATEMENTS ---
+
+    private Node native_call_statement(){
+        byte id = consume_or_throw(NativeCallToken.class, "'if' token expected at start for if statement").id;
+
+        Node operand = assign_evaluation();
+
+        consume_if(SemicolonToken.class); // TODO check if it possible to kill semicolons in another place
+
+        return new NativeCallNode(id, operand);
+    }
+
+    private Node if_statement(){
+        consume_or_throw(IfToken.class, "'if' token expected at start for if statement");
+
+        Node condition = condition_evaluation();
         Node body = block();
         Node elseBody = null;
 
-        if(peek() instanceof ElseToken) {
-            pos++;
+        if(consume_if(ElseToken.class))
             elseBody = block();
-        }
 
         return new IfNode(condition, body, elseBody);
     }
 
-    private Node While(){
-        return new WhileNode(condition(), block());
+    private Node while_statement(){
+        consume_or_throw(WhileToken.class, "'while' token expected at start for while statement");
+        return new WhileNode(condition_evaluation(), block());
     }
 
     private Node block(){
-        if(peek() instanceof LBraceToken) {
-            pos++; // consume
+        if(consume_if(LBraceToken.class)) {
             List<Node> stmts = new ArrayList<>();
 
-            while (!(peek() instanceof RBraceToken)) {
+            while (!consume_if(RBraceToken.class))
                 stmts.add(statement());
-            }
-            pos++;
-            return new ProgramNode(stmts);
+
+            return new PROGRAM_N(stmts);
         } else {
             Node left = statement();
-            if (peek() instanceof SemicolonToken)
-                pos++; // consume ;
+
+            consume_if(SemicolonToken.class); // TODO check if it possible to kill semicolons in another place
+
             return left;
         }
     }
 
-    private Node condition(){
-        if(peek() instanceof LParenToken){
-            pos++;
-            var node = assign();
-            Token closing = peek();
-            if (!(closing instanceof RParenToken))
-                throw new Bl0j_ParserException(closing.line, closing.line_index, "expected ')'");
-            pos++;
+    // --- EVALUATIONS ---
+
+    private Node condition_evaluation(){
+        if(consume_if(LParenToken.class)) {
+            var node = assign_evaluation();
+
+            consume_or_throw(RParenToken.class, "')' token expected at end for condition evaluation");
+
             return node;
         } else
-            return assign();
+            return assign_evaluation();
     }
 
-    private Node assign(){
-        if(peek() instanceof IdentityToken &&
-           peek(1) instanceof OpToken op &&
-        op.op == Operator.ASSIGNMENT){
+    private Node assign_evaluation(){
+        if(peek_t() instanceof IdentityToken && peek_t(1) instanceof OpToken op && op.op == Operator.ASSIGNMENT){
             Node left = data();
-            pos++; // "=" consumed
-            Node right = assign();
+            consume_t();
+            Node right = assign_evaluation();
             return new BinaryNode(left, op.op, right);
         }
-        return ternary();
+        return ternary_evaluation();
     }
 
-    private Node ternary(){
-        Node left = equality();
-        if(peek() instanceof Ternary_IfToken){
-            pos++; // consume
-            var body = ternary();
-            if(!(peek() instanceof Ternary_ElseToken))
-                throw new Bl0j_ParserException(peek().line, peek().line_index, "expected ':' for ternary if");
-            pos++; // consume :
-            var elseBody = ternary();
+    private Node ternary_evaluation(){
+        Node left = equality_evaluation();
+
+        if(consume_if(Ternary_IfToken.class)){
+            var body = ternary_evaluation();
+
+            consume_or_throw(Ternary_ElseToken.class, "':' token expected for ternary");
+
+            var elseBody = ternary_evaluation();
+
             return new Ternary_IfNode(left, body, elseBody);
         }
+
         return left;
     }
 
-    private Node equality(){
-        Node left = comparison();
+    private Node equality_evaluation(){
+        Node left = comparison_evaluation();
 
         while (pos < tokens.size()) {
-            Token t = peek();
+            Token t = peek_t();
             if (t instanceof OpToken op && (op.op == Operator.EQUALS || op.op == Operator.NOT_EQUALS)) {
-                pos++; // consume
-                Node right = comparison();
-                left = new BinaryNode(left, op.op, right);
+                consume_t();
+                left = new BinaryNode(left, op.op, comparison_evaluation());
             } else break;
         }
 
         return left;
     }
 
-    private Node comparison(){
-        Node left = addSub();
+    private Node comparison_evaluation(){
+        Node left = add_sub_evaluation();
 
         while (pos < tokens.size()) {
-            Token t = peek();
-            if (t instanceof OpToken op && (op.op == Operator.LESS || op.op == Operator.LESS_EQUALS ||
-                    op.op == Operator.GREATER || op.op == Operator.GREATER_EQUALS)) {
-                pos++; // consume
-                Node right = addSub();
-                left = new BinaryNode(left, op.op, right);
+            Token t = peek_t();
+            if (t instanceof OpToken op &&
+                    (op.op == Operator.LESS || op.op == Operator.LESS_EQUALS || op.op == Operator.GREATER || op.op == Operator.GREATER_EQUALS)) {
+                consume_t();
+                left = new BinaryNode(left, op.op, add_sub_evaluation());
             } else break;
         }
 
         return left;
     }
 
-    private Node addSub() {
-        Node left = multiplyDivide();
+    private Node add_sub_evaluation() {
+        Node left = mul_div_evaluation();
 
         while (pos < tokens.size()) {
-            Token t = peek();
-            if (t instanceof OpToken op && (op.op == Operator.PLUS || op.op == Operator.MINUS)) {
-                pos++; // consume
-                Node right = multiplyDivide();
-                left = new BinaryNode(left, op.op, right);
+            Token t = peek_t();
+            if (t instanceof OpToken op &&
+                    (op.op == Operator.PLUS || op.op == Operator.MINUS)) {
+                consume_t();
+                left = new BinaryNode(left, op.op, mul_div_evaluation());
             } else break;
         }
 
         return left;
     }
 
-    private Node multiplyDivide() {
-        Node left = unary();
+    private Node mul_div_evaluation() {
+        Node left = unary_evaluation();
 
         while (pos < tokens.size()) {
-            Token t = peek();
-            if (t instanceof OpToken op && (op.op == Operator.STAR || op.op == Operator.DIV || op.op == Operator.REMAINDER)) {
-                pos++; // consume
-                Node right = unary();
-                left = new BinaryNode(left, op.op, right);
+            Token t = peek_t();
+            if (t instanceof OpToken op &&
+                    (op.op == Operator.STAR || op.op == Operator.DIV || op.op == Operator.REMAINDER)) {
+                consume_t();
+                left = new BinaryNode(left, op.op, unary_evaluation());
             } else break;
         }
 
         return left;
     }
 
-    private Node unary() {
-        Token t = peek();
+    private Node unary_evaluation() {
+        Token t = peek_t();
         if (t instanceof OpToken op &&
                 (op.op == Operator.MINUS || op.op == Operator.NOT)) {
-            pos++; // consume
-            Node operand = unary();
-            return new LUnaryNode(op.op, operand);
+            consume_t();
+            return new LUnaryNode(op.op, unary_evaluation());
         }
-        return postfix();
+        return postfix_evaluation();
     }
 
-    private Node postfix(){
+    private Node postfix_evaluation(){
         Node left = data();
 
         while (true) {
-            if (peek() instanceof LParenToken) {
-                List<Node> args = tupleArgs();
-                left = new FunCall(left, args);
-            } else if (peek() instanceof OpToken op &&
-                    (op.op == Operator.PLUS_PLUS || op.op == Operator.MINUS_MINUS)) {
-                pos++;
+            if (peek_t() instanceof LParenToken)
+                left = new FunCall(left, tuple_args());
+            else if (peek_t() instanceof OpToken op && (op.op == Operator.PLUS_PLUS || op.op == Operator.MINUS_MINUS)) {
+                consume_t();
                 left = new RUnaryNode(op.op, left);
             } else break;
         }
@@ -314,29 +328,29 @@ public final class Bl0jv2_Parser {
         return left;
     }
 
-    private List<Node> tupleArgs(){
-        pos++; // consume '('
+    private List<Node> tuple_args(){
+        consume_or_throw(LParenToken.class, "'(' token expected at start for tuple arguments");
         List<Node> args = new ArrayList<>();
 
-        if (peek() instanceof RParenToken) {
-            pos++;
+        if (consume_if(RParenToken.class))
             return args;
-        }
 
-        args.add(assign());
-        while (peek() instanceof SeparatorToken) {
-            pos++;
-            args.add(assign());
-        }
+        args.add(assign_evaluation());
 
-        if (!(peek() instanceof RParenToken))
-            throw new Bl0j_ParserException(peek().line, peek().line_index, "expected ')'");
-        pos++;
+        while (consume_if(SeparatorToken.class))
+            args.add(assign_evaluation());
+
+        consume_or_throw(RParenToken.class, "')' token expected at end for tuple arguments");
+
         return args;
     }
 
     private Node data() {
-        Token t = peek();
+        Token t = peek_t();
+
+        if(consume_if(NilToken.class))
+            return new NilNode();
+
         if (t instanceof NumberToken numberToken) {
             pos++;
             return new NumberNode(Integer.parseInt(numberToken.value));
@@ -345,11 +359,6 @@ public final class Bl0jv2_Parser {
         if(t instanceof StringToken stringToken) {
             pos++;
             return new StringNode(stringToken.value);
-        }
-
-        if(t instanceof NilToken){
-            pos++;
-            return new NilNode();
         }
 
         if(t instanceof BooleanToken identityToken){
@@ -364,21 +373,21 @@ public final class Bl0jv2_Parser {
 
         if (t instanceof LParenToken) {
             pos++;
-            Node first = assign();
+            Node first = assign_evaluation();
 
-            if (peek() instanceof SeparatorToken) {
+            if (peek_t() instanceof SeparatorToken) {
                 List<Node> values = new ArrayList<>();
                 values.add(first);
-                while (peek() instanceof SeparatorToken) {
+                while (peek_t() instanceof SeparatorToken) {
                     pos++; // consume ','
-                    values.add(assign());
+                    values.add(assign_evaluation());
                 }
-                if (!(peek() instanceof RParenToken))
+                if (!(peek_t() instanceof RParenToken))
                     throw new Bl0j_ParserException(-1, -1, "expected ')'");
                 pos++;
                 return new TupleNode(values);
             } else {
-                if (!(peek() instanceof RParenToken))
+                if (!(peek_t() instanceof RParenToken))
                     throw new Bl0j_ParserException(-1, -1, "expected ')'");
                 pos++;
                 return first;
@@ -403,15 +412,39 @@ public final class Bl0jv2_Parser {
         throw new Bl0j_ParserException(t != null ? t.line : -1,t != null ? t.line_index : 1, line+reason);
     }
 
-    private Token peek() {
+    private <T extends Token> boolean consume_if(Class<T> tokenClass){
+        Token t = peek_t();
+
+        boolean qualified = tokenClass.isInstance(t);
+
+        if(qualified)
+            consume_t();
+
+        return qualified;
+    }
+
+    private <T extends Token> T consume_or_throw(Class<T> tokenClass, String errorMsg){
+        Token t = peek_t();
+
+        if(!consume_if(tokenClass))
+            throw new Bl0j_ParserException(t.line, t.line_index, errorMsg+", but got - "+t);
+
+        return (T)t;
+    }
+
+    private void consume_t(){
+        pos++;
+    }
+
+    private Token peek_t() {
         if (pos >= tokens.size())
-            throw new Bl0j_ParserException(-1, -1, "unexpected end of input");
+            throw new Bl0j_ParserException(pos+1, -1, "unexpected end of input");
         return tokens.get(pos);
     }
 
-    private Token peek(int extra) {
+    private Token peek_t(int extra) {
         if (pos+extra >= tokens.size())
-            throw new Bl0j_ParserException(-1, -1, "unexpected end of input");
+            throw new Bl0j_ParserException(pos+1, -1, "unexpected end of input");
         return tokens.get(pos+extra);
     }
 }

@@ -154,7 +154,7 @@ public class Bl0jv2_CLI {
             timer.mark("lexer");
             System.out.printf("lexer done: (%d tokens)%n", tokens.size());
 
-            parser.set_debug_source_code(data);
+            parser.setSourceCode(data);
             var ast = parser.getAST(tokens);
             timer.mark("parser");
             System.out.println("parser done");
