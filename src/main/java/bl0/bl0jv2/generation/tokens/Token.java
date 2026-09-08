@@ -8,4 +8,9 @@ public abstract class Token {
         this.line = line;
         this.line_index = pos;
     }
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName();
+    }
 }

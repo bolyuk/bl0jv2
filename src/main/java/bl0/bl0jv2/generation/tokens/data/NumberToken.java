@@ -7,4 +7,9 @@ public class NumberToken extends DataToken {
         super(line, pos);
         this.value = value;
     }
+
+    @Override
+    public String toString() {
+        return "number '" + value + "'";
+    }
 }

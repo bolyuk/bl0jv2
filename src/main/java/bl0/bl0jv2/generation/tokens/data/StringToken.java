@@ -8,4 +8,9 @@ public class StringToken extends DataToken {
         super(line, pos);
         this.value = value;
     }
+
+    @Override
+    public String toString() {
+        return "string '" + value + "'";
+    }
 }

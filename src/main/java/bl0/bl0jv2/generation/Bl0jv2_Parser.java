@@ -399,17 +399,19 @@ public final class Bl0jv2_Parser {
     }
 
     private void gen_exception(Token t, String reason){
-        String line = "";
+        String context = "";
         if(sourceCode != null && t != null)
         {
-            var lines = sourceCode.split("\n");
-            if(lines.length-1 < t.line)
-                line = lines[t.line] + "\n";
-            else
-                line = "wrong line indices...\n";
+            var lines = sourceCode.split("\n", -1);
+            if(t.line >= 0 && t.line < lines.length){
+                String srcLine = lines[t.line];
+                String caret = " ".repeat(Math.max(0, t.line_index)) + "^";
+                context = srcLine + "\n" + caret + "\n";
+            } else
+                context = "wrong line indices...\n";
         }
 
-        throw new Bl0j_ParserException(t != null ? t.line : -1,t != null ? t.line_index : 1, line+reason);
+        throw new Bl0j_ParserException(t != null ? t.line : -1,t != null ? t.line_index : 1, context+reason);
     }
 
     private <T extends Token> boolean consume_if(Class<T> tokenClass){
@@ -427,7 +429,7 @@ public final class Bl0jv2_Parser {
         Token t = peek_t();
 
         if(!consume_if(tokenClass))
-            throw new Bl0j_ParserException(t.line, t.line_index, errorMsg+", but got - "+t);
+            gen_exception(t, errorMsg+", but got - "+t);
 
         return (T)t;
     }
@@ -438,13 +440,17 @@ public final class Bl0jv2_Parser {
 
     private Token peek_t() {
         if (pos >= tokens.size())
-            throw new Bl0j_ParserException(pos+1, -1, "unexpected end of input");
+            gen_exception(lastToken(), "unexpected end of input");
         return tokens.get(pos);
     }
 
     private Token peek_t(int extra) {
         if (pos+extra >= tokens.size())
-            throw new Bl0j_ParserException(pos+1, -1, "unexpected end of input");
+            gen_exception(lastToken(), "unexpected end of input");
         return tokens.get(pos+extra);
+    }
+
+    private Token lastToken(){
+        return tokens.isEmpty() ? null : tokens.get(tokens.size()-1);
     }
 }

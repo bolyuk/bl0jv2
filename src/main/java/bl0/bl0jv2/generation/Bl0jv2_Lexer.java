@@ -96,6 +96,7 @@ public final class Bl0jv2_Lexer {
                     break;
                 default:
                     if (c == '\'') {
+                        int start_index = line_index;
                         String buf = "";
                         while (pos + 1 < len) {
                             if (!isNext('\'')) {
@@ -106,8 +107,9 @@ public final class Bl0jv2_Lexer {
                                 break;
                             }
                         }
-                        tokens.add(new StringToken(line, line_index, buf));
+                        tokens.add(new StringToken(line, start_index, buf));
                     } else if (isNumber(c)) {
+                        int start_index = line_index;
                         String buf = "" + c;
                         while (pos + 1 < len) {
                             if (isNumber(lookAhead())) {
@@ -116,8 +118,9 @@ public final class Bl0jv2_Lexer {
                             } else
                                 break;
                         }
-                        tokens.add(new NumberToken(line, line_index, buf));
+                        tokens.add(new NumberToken(line, start_index, buf));
                     } else if (isIdentity(c)) {
+                        int start_index = line_index;
                         String buf = "" + c;
                         while (pos + 1 < len) {
                             if (isIdentity(lookAhead())) {
@@ -127,24 +130,24 @@ public final class Bl0jv2_Lexer {
                                 break;
                         }
                         switch (buf) {
-                            case "true" -> tokens.add(new BooleanToken(line, line_index, true));
-                            case "false" -> tokens.add(new BooleanToken(line, line_index, false));
-                            case "nil" -> tokens.add(new NilToken(line, line_index));
+                            case "true" -> tokens.add(new BooleanToken(line, start_index, true));
+                            case "false" -> tokens.add(new BooleanToken(line, start_index, false));
+                            case "nil" -> tokens.add(new NilToken(line, start_index));
 
-                            case "if" -> tokens.add(new IfToken(line, line_index));
-                            case "else" -> tokens.add(new ElseToken(line, line_index));
-                            case "while" -> tokens.add(new WhileToken(line, line_index));
+                            case "if" -> tokens.add(new IfToken(line, start_index));
+                            case "else" -> tokens.add(new ElseToken(line, start_index));
+                            case "while" -> tokens.add(new WhileToken(line, start_index));
 
-                            case "def" -> tokens.add(new DefToken(line, line_index));
-                            case "return" -> tokens.add(new ReturnToken(line, line_index));
+                            case "def" -> tokens.add(new DefToken(line, start_index));
+                            case "return" -> tokens.add(new ReturnToken(line, start_index));
 
-                            case "println" -> tokens.add(new NativeCallToken(line, line_index, NativeMethods.PRINT_LN));
-                            case "print" -> tokens.add(new NativeCallToken(line, line_index, NativeMethods.PRINT));
-                            case "wait" -> tokens.add(new NativeCallToken(line, line_index, NativeMethods.WAIT));
-                            default -> tokens.add(new IdentityToken(line, line_index, buf));
+                            case "println" -> tokens.add(new NativeCallToken(line, start_index, NativeMethods.PRINT_LN));
+                            case "print" -> tokens.add(new NativeCallToken(line, start_index, NativeMethods.PRINT));
+                            case "wait" -> tokens.add(new NativeCallToken(line, start_index, NativeMethods.WAIT));
+                            default -> tokens.add(new IdentityToken(line, start_index, buf));
                         }
                     } else if (!Character.isWhitespace(c))
-                        throw new Bl0j_LexerException(line, line_index, "unexpected character - " + c);
+                        gen_exception(line, line_index, "unexpected character - " + c);
             }
             line_index++;
             pos++;
@@ -153,6 +156,19 @@ public final class Bl0jv2_Lexer {
         tokens.add(new EOFToken(line, line_index));
 
         return  tokens;
+    }
+
+    private void gen_exception(int line, int line_index, String reason) {
+        String[] lines = new String(data).split("\n", -1);
+        String context = "";
+
+        if (line >= 0 && line < lines.length) {
+            String srcLine = lines[line];
+            String caret = " ".repeat(Math.max(0, line_index)) + "^";
+            context = srcLine + "\n" + caret + "\n";
+        }
+
+        throw new Bl0j_LexerException(line, line_index, context + reason);
     }
 
     private char lookAhead() {

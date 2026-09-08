@@ -7,4 +7,9 @@ public class IdentityToken extends DataToken {
         super(line, pos);
         this.name = name;
     }
+
+    @Override
+    public String toString() {
+        return "identifier '" + name + "'";
+    }
 }
