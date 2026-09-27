@@ -35,7 +35,8 @@ public final class OpCodes {
     public static final byte INDEX_GET = 0x16;
     public static final byte INDEX_SET = 0x17;
     public static final byte LENGTH = 0x18;
-    public static final byte TO_ARRAY = 0x19;
+    // 0x19 (formerly TO_ARRAY) is free - toArr() moved to Bl0jv2_Prelude
+    // once push()/len()/indexing made it expressible without an opcode
 
     public static final byte LR_AND = 0x1A;
     public static final byte LR_OR = 0x1B;
@@ -57,6 +58,17 @@ public final class OpCodes {
 
     public static final byte NEW_TUPLE = 0x26;
     public static final byte UNPACK = 0x27;
+
+    public static final byte READ = 0x28;
+
+    public static final byte TRY_ENTER = 0x29;
+    public static final byte TRY_EXIT = 0x2A;
+    public static final byte MAKE_ERR = 0x2B;
+
+    public static final byte NEW_INSTANCE = 0x2C;
+    public static final byte GET_FIELD = 0x2D;
+    public static final byte SET_FIELD = 0x2E;
+    public static final byte LOOKUP_METHOD = 0x2F;
 
     public static final byte HALT = (byte) 0xFF;
 }

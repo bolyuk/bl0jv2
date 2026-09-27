@@ -3,7 +3,9 @@ package bl0.bl0jv2.runtime;
 import bl0.bl0jv2.data.*;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.Writer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -45,6 +47,11 @@ public final class Bl0jv2_jVM {
     // reference-typed values (strings, FunDefs, ...) that registers/consts
     // hold as a NanBox REF index rather than inline
     private final List<Object> heap = new ArrayList<>();
+
+    // active try/catch handlers, innermost on top
+    private final ArrayDeque<Handler> handlerStack = new ArrayDeque<>();
+
+    private BufferedReader stdin;
 
     private long[] consts;
     private byte[] instructions;
@@ -96,6 +103,14 @@ public final class Bl0jv2_jVM {
         addTable.add(Bl0jArray.class, String.class,  (a, b) -> a.toString() + b.toString());
         addTable.add(String.class,  Bl0jTuple.class, (a, b) -> a.toString() + b.toString());
         addTable.add(Bl0jTuple.class, String.class,  (a, b) -> a.toString() + b.toString());
+        addTable.add(String.class,  Bl0jError.class, (a, b) -> a.toString() + b.toString());
+        addTable.add(Bl0jError.class, String.class,  (a, b) -> a.toString() + b.toString());
+        addTable.add(String.class,  Bl0jInstance.class, (a, b) -> a.toString() + b.toString());
+        addTable.add(Bl0jInstance.class, String.class,  (a, b) -> a.toString() + b.toString());
+        // NIL_OBJECT's type is an anonymous class, so it's registered via
+        // .getClass() here rather than a named Foo.class literal
+        addTable.add(String.class,  NIL_OBJECT.getClass(), (a, b) -> a.toString() + b.toString());
+        addTable.add(NIL_OBJECT.getClass(), String.class,  (a, b) -> a.toString() + b.toString());
         addTable.add(String.class,  Character.class, (a, b) -> a.toString() + b.toString());
         addTable.add(Character.class, String.class,  (a, b) -> a.toString() + b.toString());
         // integer arithmetic stays integer (10/3 truncates); any operand
@@ -201,15 +216,6 @@ public final class Bl0jv2_jVM {
         throw new Bl0j_VM_Exception("cannot apply '~' to " + value.getClass().getSimpleName());
     }
 
-    private static Bl0jArray toCharArray(Object value, Bl0jv2_jVM owner) {
-        if (!(value instanceof String s))
-            throw new Bl0j_VM_Exception("toArr expects a string, got " + value.getClass().getSimpleName());
-        long[] chars = new long[s.length()];
-        for (int i = 0; i < s.length(); i++)
-            chars[i] = NanBox.ofChar(s.charAt(i));
-        return new Bl0jArray(chars, owner);
-    }
-
     // shares arr[-1]-style negative indexing with Bl0jArray.getRaw
     private static char charAt(String s, int index) {
         int i = Bl0jArray.normalizeIndex(index, s.length());
@@ -255,9 +261,22 @@ public final class Bl0jv2_jVM {
         if (value instanceof String) return "string";
         if (value instanceof Bl0jArray) return "array";
         if (value instanceof Bl0jTuple) return "tuple";
+        if (value instanceof Bl0jError) return "err";
         if (value instanceof FunDef) return "function";
+        if (value instanceof Bl0jClass) return "class";
+        if (value instanceof Bl0jInstance instance) return instance.cls.name;
         if (value == NIL_OBJECT) return "nil";
         throw new Bl0j_VM_Exception("unknown type: " + value.getClass().getSimpleName());
+    }
+
+    private String readLine() {
+        if (stdin == null)
+            stdin = new BufferedReader(new InputStreamReader(System.in));
+        try {
+            return stdin.readLine(); // null on EOF
+        } catch (IOException e) {
+            throw new Bl0j_VM_Exception("read failed: " + e.getMessage());
+        }
     }
 
     public void feed_compiled_file(ByteBuffer bytes){
@@ -278,6 +297,7 @@ public final class Bl0jv2_jVM {
 
         callStack.clear();
         heap.clear();
+        handlerStack.clear();
         callStack.add(new Frame(new long[registers_length], -1, -1));
         consts = new long[constants_length];
 
@@ -294,6 +314,23 @@ public final class Bl0jv2_jVM {
                         bytes.getShort()));
                 case Constants.BYTE -> consts[i] = NanBox.ofInt(bytes.get());
                 case Constants.FLOAT -> consts[i] = Double.doubleToLongBits(bytes.getDouble());
+                // methods are always registered (and thus loaded) before
+                // the class itself, so consts[methodConstIdx] is already
+                // populated whenever we get here - see ClassDef's javadoc
+                case Constants.CLASS -> {
+                    String className = get_str(bytes);
+                    int fieldCount = bytes.getShort() & 0xFFFF;
+                    List<String> fieldNames = new ArrayList<>();
+                    for (int f = 0; f < fieldCount; f++) fieldNames.add(get_str(bytes));
+                    int methodCount = bytes.getShort() & 0xFFFF;
+                    Map<String, FunDef> methods = new HashMap<>();
+                    for (int m = 0; m < methodCount; m++) {
+                        String methodName = get_str(bytes);
+                        int methodConstIdx = bytes.getShort() & 0xFFFF;
+                        methods.put(methodName, (FunDef) unbox(consts[methodConstIdx]));
+                    }
+                    consts[i] = boxRef(new Bl0jClass(className, fieldNames, methods));
+                }
                 default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
             }
         }
@@ -409,7 +446,6 @@ public final class Bl0jv2_jVM {
                     }
 
                     case OpCodes.LENGTH -> reg[a] = NanBox.ofInt(length(unbox(reg[a])));
-                    case OpCodes.TO_ARRAY -> reg[a] = boxRef(toCharArray(unbox(reg[a]), this));
 
                     // mutates the Bl0jArray object the reference points at,
                     // not the register holding that reference - reg[a]
@@ -438,9 +474,50 @@ public final class Bl0jv2_jVM {
                     case OpCodes.TO_STRING -> reg[a] = boxRef(unbox(reg[a]).toString());
                     case OpCodes.TYPE_OF -> reg[a] = boxRef(typeName(unbox(reg[a])));
 
+                    case OpCodes.READ -> {
+                        String line = readLine();
+                        reg[a] = line == null ? NanBox.NIL : boxRef(line);
+                    }
+
+                    // b holds the catch block's address (patched by the
+                    // compiler), a the register the caught error lands in
+                    case OpCodes.TRY_ENTER -> handlerStack.push(new Handler(b * 3, a, callStack.size()));
+                    case OpCodes.TRY_EXIT -> handlerStack.pop();
+                    case OpCodes.MAKE_ERR -> reg[a] = boxRef(new Bl0jError(String.valueOf(unbox(reg[a]))));
+
+                    // mutates a's own slot: class-ref in, instance-ref out
+                    case OpCodes.NEW_INSTANCE -> reg[a] = boxRef(new Bl0jInstance((Bl0jClass) unbox(reg[a]), this));
+
+                    case OpCodes.GET_FIELD -> {
+                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
+                        String name = (String) unbox(consts[b]);
+                        reg[a] = instance.getFieldRaw(name);
+                    }
+
+                    // field name's const index and the value sit at reg[b]
+                    // and reg[b+1], same packing trick as INDEX_SET
+                    case OpCodes.SET_FIELD -> {
+                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
+                        String name = (String) unbox(consts[(int) unbox(reg[b])]);
+                        instance.setFieldRaw(name, reg[b + 1]);
+                    }
+
+                    // mutates a's own slot: object in, resolved FunDef out
+                    case OpCodes.LOOKUP_METHOD -> {
+                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
+                        String name = (String) unbox(consts[b]);
+                        reg[a] = box(instance.cls.method(name));
+                    }
+
                     case OpCodes.RETURN -> {
                         if(callStack.size() == 1)
                             throw new Bl0j_VM_Exception("return call for last stack frame");
+
+                        // any handler registered inside the frame being
+                        // returned from goes out of scope with it, exactly
+                        // like it would on an exception unwinding past it
+                        while (!handlerStack.isEmpty() && handlerStack.peek().callStackDepth() >= callStack.size())
+                            handlerStack.pop();
 
                         Frame frame = callStack.pop();
                         callStack.peek().regs[frame.resultReg]  = reg[a];
@@ -452,6 +529,15 @@ public final class Bl0jv2_jVM {
                     default -> throw new Bl0j_VM_Exception("Unknown opcode: " + opcode);
                 }
                 } catch (Exception e) {
+                    if (!handlerStack.isEmpty()) {
+                        Handler handler = handlerStack.pop();
+                        while (callStack.size() > handler.callStackDepth())
+                            callStack.pop();
+                        String message = e.getMessage() != null ? e.getMessage() : e.toString();
+                        callStack.peek().regs()[handler.errReg()] = box(new Bl0jError(message));
+                        addr = handler.catchAddr();
+                        continue;
+                    }
                     throw new Bl0j_VM_Exception("Exception on address: "+addr/3+" - "+ e);
                 }
             }
@@ -509,4 +595,9 @@ public final class Bl0jv2_jVM {
     }
 
     private record Frame(long[] regs, int addressToReturn, int resultReg) {}
+
+    // callStackDepth is callStack.size() at the moment TRY_ENTER ran, so a
+    // RETURN that unwinds past this depth knows the handler no longer
+    // applies (see the RETURN and exception-catch cases below)
+    private record Handler(int catchAddr, int errReg, int callStackDepth) {}
 }

@@ -1,6 +1,7 @@
 package bl0.bl0jv2.generation;
 
 import bl0.bl0jv2.data.C;
+import bl0.bl0jv2.data.ClassDef;
 import bl0.bl0jv2.data.Constants;
 import bl0.bl0jv2.data.FunDef;
 import bl0.bl0jv2.data.OpCodes;
@@ -30,7 +31,27 @@ public final class Bl0jv2_Compiler {
     private final HashMap<String, Integer> identityMapping = new HashMap<>();
     private final List<FunNode> lazy_functions = new ArrayList<>();
     private final HashMap<String, Integer> functionMapping = new HashMap<>();
+
+    // className -> (its constant-pool index, whether it declares 'init')
+    private final HashMap<String, ClassInfo> classMapping = new HashMap<>();
+    private record ClassInfo(int constIndex, boolean hasInit) {}
+
     public Bl0jv2_Compiler() {}
+
+    // parsed once per JVM (the prelude source never changes at runtime),
+    // then its top-level statements (currently just function definitions)
+    // are prepended ahead of every user program
+    private static List<Node> preludeNodes;
+
+    private static List<Node> preludeNodes() {
+        if (preludeNodes == null) {
+            var lexer = new Bl0jv2_Lexer();
+            var parser = new Bl0jv2_Parser();
+            Node ast = parser.getAST(lexer.getTokens(Bl0jv2_Prelude.SOURCE));
+            preludeNodes = ((PROGRAM_N) ast).nodes;
+        }
+        return preludeNodes;
+    }
 
     public byte[] compile(Node node) {
         bytecode.clear();
@@ -38,14 +59,19 @@ public final class Bl0jv2_Compiler {
         identityMapping.clear();
         lazy_functions.clear();
         functionMapping.clear();
+        classMapping.clear();
         regIndex = 0;
         regCount = 0;
 
         if(!(node instanceof PROGRAM_N program))
             throw new Bl0j_CompilerException("node is not a ProgramNode");
 
-        fetchFunctions(program);
-        compileInner(program);
+        List<Node> withPrelude = new ArrayList<>(preludeNodes());
+        withPrelude.addAll(program.nodes);
+        PROGRAM_N merged = new PROGRAM_N(withPrelude);
+
+        fetchFunctions(merged);
+        compileInner(merged);
         _emit(OpCodes.HALT);
         compileFunctions();
 
@@ -53,12 +79,38 @@ public final class Bl0jv2_Compiler {
     }
 
     private void fetchFunctions(PROGRAM_N program) {
-        for(var node : program.nodes)
+        for(var node : program.nodes) {
             if(node instanceof FunNode funNode){
                 lazy_functions.add(funNode);
                 int constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
                 functionMapping.put(funNode.name, constIndex);
             }
+
+            // a class's methods are registered exactly like top-level
+            // functions (they already carry a "ClassName.method" name and
+            // an implicit 'this' parameter from the parser) - the class
+            // itself is then a ClassDef constant that just points at each
+            // method's own FunDef constant by index
+            if (node instanceof ClassNode classNode) {
+                List<String> methodNames = new ArrayList<>();
+                List<Integer> methodConstIndices = new ArrayList<>();
+                boolean hasInit = false;
+
+                for (FunNode method : classNode.methods) {
+                    lazy_functions.add(method);
+                    int constIndex = constant(new FunDef(method.name, -1, (short)0, (short)0));
+                    functionMapping.put(method.name, constIndex);
+
+                    String plainName = method.name.substring(classNode.name.length() + 1);
+                    methodNames.add(plainName);
+                    methodConstIndices.add(constIndex);
+                    if (plainName.equals("init")) hasInit = true;
+                }
+
+                int classConstIndex = constant(new ClassDef(classNode.name, classNode.fieldNames, methodNames, methodConstIndices));
+                classMapping.put(classNode.name, new ClassInfo(classConstIndex, hasInit));
+            }
+        }
     }
 
     private void compileFunctions(){
@@ -145,6 +197,17 @@ public final class Bl0jv2_Compiler {
         return result;
     }
 
+    // read(): no argument at all, so there's nothing to (mis)mutate - a
+    // fresh register just receives whatever READ produces
+    private Integer compileRead(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "read", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.READ, result);
+        return result;
+    }
+
     // isInt(x) etc: expands to typeOf(x) == "<expectedType>" rather than
     // needing one opcode per predicate - TYPE_OF is the actual primitive,
     // these are just compile-time sugar over it
@@ -168,16 +231,42 @@ public final class Bl0jv2_Compiler {
 
     // tries every call-syntax built-in in turn; null means funCall is an
     // ordinary user function call
+    // obj.method(args): resolves the method against obj's *actual* runtime
+    // class (LOOKUP_METHOD), then calls it with 'this' prepended to args -
+    // shared by both obj.method(...) call sites and new ClassName(...)'s
+    // implicit init(...) call
+    private int compileMethodCall(int objReg, String methodName, List<Node> argNodes) {
+        int[] valRegs = new int[argNodes.size()];
+        for (int i = 0; i < argNodes.size(); i++)
+            valRegs[i] = compileInner(argNodes.get(i));
+
+        int methodReg = regIndex++;
+        _emit(OpCodes.MOV, methodReg, objReg);
+        _emit(OpCodes.LOOKUP_METHOD, methodReg, constant(methodName));
+
+        int startReg = regIndex++;
+        _emit(OpCodes.MOV, regIndex, objReg); // 'this'
+        regIndex++;
+        for (var val : valRegs) {
+            _emit(OpCodes.MOV, regIndex, val);
+            regIndex++;
+        }
+
+        _emit(OpCodes.CALL, methodReg, startReg);
+        return startReg;
+    }
+
     private Integer tryCompileBuiltin(FunCall funCall) {
         Integer r;
         if ((r = compileBuiltinUnaryCall(funCall, "len", OpCodes.LENGTH)) != null) return r;
-        if ((r = compileBuiltinUnaryCall(funCall, "toArr", OpCodes.TO_ARRAY)) != null) return r;
         if ((r = compileBuiltinUnaryCall(funCall, "int", OpCodes.TO_INT)) != null) return r;
         if ((r = compileBuiltinUnaryCall(funCall, "float", OpCodes.TO_FLOAT)) != null) return r;
         if ((r = compileBuiltinUnaryCall(funCall, "str", OpCodes.TO_STRING)) != null) return r;
         if ((r = compileBuiltinUnaryCall(funCall, "typeOf", OpCodes.TYPE_OF)) != null) return r;
+        if ((r = compileBuiltinUnaryCall(funCall, "err", OpCodes.MAKE_ERR)) != null) return r;
         if ((r = compilePush(funCall)) != null) return r;
         if ((r = compilePop(funCall)) != null) return r;
+        if ((r = compileRead(funCall)) != null) return r;
         if ((r = compileTypeCheck(funCall, "isInt", "int")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isFloat", "float")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isString", "string")) != null) return r;
@@ -186,6 +275,7 @@ public final class Bl0jv2_Compiler {
         if ((r = compileTypeCheck(funCall, "isNil", "nil")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isChar", "char")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isTuple", "tuple")) != null) return r;
+        if ((r = compileTypeCheck(funCall, "isErr", "err")) != null) return r;
         return null;
     }
 
@@ -208,6 +298,12 @@ public final class Bl0jv2_Compiler {
         if(node instanceof FunCall funCall){
             Integer builtin = tryCompileBuiltin(funCall);
             if (builtin != null) return builtin;
+
+            if (funCall.left instanceof FieldAccessNode fieldAccess) {
+                int objReg = compileInner(fieldAccess.target);
+                return compileMethodCall(objReg, fieldAccess.fieldName, funCall.args);
+            }
+
             int[] valRegs = new int[funCall.args.size()];
 
             for(int i=0;i<funCall.args.size();i++) {
@@ -292,6 +388,29 @@ public final class Bl0jv2_Compiler {
             return result;
         }
 
+        if(node instanceof FieldAccessNode fieldAccess){
+            int objReg = compileInner(fieldAccess.target);
+            int result = regIndex++;
+            _emit(OpCodes.MOV, result, objReg);
+            _emit(OpCodes.GET_FIELD, result, constant(fieldAccess.fieldName));
+            return result;
+        }
+
+        if(node instanceof NewNode newNode){
+            ClassInfo info = classMapping.get(newNode.className);
+            if (info == null)
+                throw new Bl0j_CompilerException("unknown class: " + newNode.className);
+
+            int instanceReg = regIndex++;
+            _emit(OpCodes.LOAD_CONST, instanceReg, info.constIndex());
+            _emit(OpCodes.NEW_INSTANCE, instanceReg); // class-ref in, instance-ref out
+
+            if (info.hasInit())
+                compileMethodCall(instanceReg, "init", newNode.args); // return value discarded
+
+            return instanceReg;
+        }
+
         if(node instanceof PROGRAM_N programNode){
             for(var n : programNode.nodes)
                 compileInner(n);
@@ -300,6 +419,9 @@ public final class Bl0jv2_Compiler {
 
         if(node instanceof FunNode)
             return -1;
+
+        if(node instanceof ClassNode)
+            return -1; // its methods were already queued by fetchFunctions
 
 
         if(node instanceof WhileNode whileNode){
@@ -332,6 +454,25 @@ public final class Bl0jv2_Compiler {
 
             _emit(OpCodes.JUMP, startJump);
             bytecode.set(patchJumpIfNot, _instr_len());
+
+            return -1;
+        }
+
+        if(node instanceof TryNode tryNode){
+            int errReg = map(tryNode.catchVarName);
+
+            // b (the catch address) is patched once we know where the
+            // catch block actually starts, same pattern as if/ternary
+            int patchCatchAddr = _emit(OpCodes.TRY_ENTER, errReg) - 1;
+
+            compileInner(tryNode.tryBody);
+            _emit(OpCodes.TRY_EXIT);
+
+            int patchJumpOverCatch = _emit(OpCodes.JUMP) - 2;
+            bytecode.set(patchCatchAddr, _instr_len());
+
+            compileInner(tryNode.catchBody);
+            bytecode.set(patchJumpOverCatch, _instr_len());
 
             return -1;
         }
@@ -425,6 +566,23 @@ public final class Bl0jv2_Compiler {
                     regIndex++;
 
                     _emit(OpCodes.INDEX_SET, arrReg, base);
+                    return base + 1;
+                }
+
+                if (n.left instanceof FieldAccessNode fieldAccess) {
+                    int objReg = compileInner(fieldAccess.target);
+                    int valueRegRaw = compileInner(n.right);
+
+                    // the field name's const index and the value need to
+                    // sit in two consecutive registers, same trick as
+                    // INDEX_SET above (SET_FIELD only has 2 operand slots
+                    // but needs object + name + value)
+                    int base = regIndex++;
+                    _emit(OpCodes.SET, base, constant(fieldAccess.fieldName));
+                    _emit(OpCodes.MOV, regIndex, valueRegRaw);
+                    regIndex++;
+
+                    _emit(OpCodes.SET_FIELD, objReg, base);
                     return base + 1;
                 }
 
@@ -635,6 +793,27 @@ public final class Bl0jv2_Compiler {
                     case Double d -> {
                         dos.writeByte(Constants.FLOAT);
                         dos.writeDouble(d);
+                    }
+                    case ClassDef cd -> {
+                        dos.writeByte(Constants.CLASS);
+                        byte[] nameBytes = cd.name().getBytes(StandardCharsets.UTF_8);
+                        dos.writeShort(nameBytes.length);
+                        dos.write(nameBytes);
+
+                        dos.writeShort(cd.fieldNames().size());
+                        for (String field : cd.fieldNames()) {
+                            byte[] fieldBytes = field.getBytes(StandardCharsets.UTF_8);
+                            dos.writeShort(fieldBytes.length);
+                            dos.write(fieldBytes);
+                        }
+
+                        dos.writeShort(cd.methodNames().size());
+                        for (int i = 0; i < cd.methodNames().size(); i++) {
+                            byte[] methodBytes = cd.methodNames().get(i).getBytes(StandardCharsets.UTF_8);
+                            dos.writeShort(methodBytes.length);
+                            dos.write(methodBytes);
+                            dos.writeShort(cd.methodConstIndices().get(i));
+                        }
                     }
                     default -> throw new  Bl0j_CompilerException("unknown constant type - "+c.getClass().getName());
                 }

@@ -28,15 +28,17 @@ public final class Bl0jv2_Parser {
     private String sourceCode;
 
     // program        = statement*
-    // statement      =  if | for | fun | class | while | sysCall | assign ';' TODO (class)
-    // class          = 'def' 'class' IDENT '{' fun* '}'                       TODO
-    // new            = 'new' IDENT tuple                                      TODO
+    // statement      =  if | for | try | fun | class | while | sysCall | assign ';'
+    // class          = 'def' 'class' IDENT '{' (field | fun)* '}'             (no inheritance)
+    // field          = 'field' IDENT ';'
+    // new            = 'new' IDENT tuple
     // fun            = 'def' 'fun' IDENT funcBody block
     // lambda         = funcBody  '->' (assign | block)                        TODO (later)
     // argBody        = '(' (IDENT (',' IDENT)*)? ')'
     // if             = 'if' condition block ('else' block)?
     // while          = 'while' condition block
     // for            = 'for' '(' assign ';' assign ';' assign ')' block
+    // try            = 'try' block 'catch' '(' IDENT ')' block
     // block          = '{' statement* '}' | statement
     // condition      = assign
     // sysCall        = ('print' | 'println' | 'read' | 'wait') assign ';'
@@ -54,11 +56,11 @@ public final class Bl0jv2_Parser {
     // addSub         = multiplyDivide (('+' | '-') multiplyDivide)*
     // multiplyDivide = unary (('*' | '/' | '%' | '**') unary)*
     // unary          = ('-' | '!' | '~') unary | postfix
-    // postfix        = data (tuple | index | '++' | '--' | '.' IDENT )*       TODO ('.' IDENT)
+    // postfix        = data (tuple | index | '.' IDENT | '++' | '--' )*
     // index          = '[' assign ']'
     // tuple          = '(' assign (',' assign)* ')'
     // array          = '[' (assign (',' assign)*)? ']'
-    // data           = NUMBER | IDENT | STRING | tuple | array | lambda | new TODO (lambda, new)
+    // data           = NUMBER | IDENT | STRING | THIS | tuple | array | new | lambda   TODO (lambda)
     public Node getAST(List<Token> tokens) {
         this.tokens = tokens;
         this.pos = 0;
@@ -111,6 +113,9 @@ public final class Bl0jv2_Parser {
 
         if(peek_t() instanceof ForToken) // dont consume!!
             return for_statement(); // self-terminating via block()
+
+        if(peek_t() instanceof TryToken) // dont consume!!
+            return try_statement(); // self-terminating via block()
 
         Node node = assign_evaluation();
         consume_if(SemicolonToken.class);
@@ -170,14 +175,32 @@ public final class Bl0jv2_Parser {
     private Node define_class(){
         consume_or_throw(ClassToken.class, "'class' token expected for Class definition");
         String className = consume_or_throw(IdentityToken.class, "'IDENTITY' token expected for Class definition").name;
+        consume_or_throw(LBraceToken.class, "'{' token expected to start class body");
 
-        List<Node> stmts = new ArrayList<>();
+        List<String> fieldNames = new ArrayList<>();
+        List<FunNode> methods = new ArrayList<>();
 
-        while (!(peek_t() instanceof EOFToken))
-            stmts.add(classStatement());
+        while (!consume_if(RBraceToken.class)) {
+            if (consume_if(FieldToken.class)) {
+                String fieldName = consume_or_throw(IdentityToken.class, "field name expected after 'field'").name;
+                consume_or_throw(SemicolonToken.class, "';' token expected after field declaration");
+                fieldNames.add(fieldName);
+            } else {
+                consume_or_throw(DefToken.class, "'def' token expected for method definition inside a class body");
 
+                // methods are just functions with 'this' prepended as an
+                // implicit first parameter and a "ClassName.method" name,
+                // so the rest of the compiler treats them exactly like any
+                // other function - no separate method-calling machinery
+                FunNode raw = (FunNode) define_function();
+                List<String> paramsWithThis = new ArrayList<>();
+                paramsWithThis.add("this");
+                paramsWithThis.addAll(raw.args.args);
+                methods.add(new FunNode(className + "." + raw.name, new PARAMS_N(paramsWithThis), raw.body));
+            }
+        }
 
-        return null; //TODO just for now so
+        return new ClassNode(className, fieldNames, methods);
     }
 
     // --- STATEMENTS ---
@@ -228,6 +251,20 @@ public final class Bl0jv2_Parser {
         return new ForNode(init, condition, update, block());
     }
 
+    private Node try_statement(){
+        consume_or_throw(TryToken.class, "'try' token expected at start for try statement");
+        Node tryBody = block();
+
+        consume_or_throw(CatchToken.class, "'catch' token expected after try block");
+        consume_or_throw(LParenToken.class, "'(' token expected after 'catch'");
+        String catchVarName = consume_or_throw(IdentityToken.class,
+                "identifier expected for the caught error variable").name;
+        consume_or_throw(RParenToken.class, "')' token expected after catch variable");
+        Node catchBody = block();
+
+        return new TryNode(tryBody, catchVarName, catchBody);
+    }
+
     private Node block(){
         if(consume_if(LBraceToken.class)) {
             List<Node> stmts = new ArrayList<>();
@@ -270,7 +307,7 @@ public final class Bl0jv2_Parser {
         // checked for '=' afterwards
         Node left = ternary_evaluation();
 
-        if ((left instanceof IdentityNode || left instanceof IndexNode)
+        if ((left instanceof IdentityNode || left instanceof IndexNode || left instanceof FieldAccessNode)
                 && peek_t() instanceof OpToken op && op.op == Operator.ASSIGNMENT) {
             consume_t();
             Node right = assign_evaluation();
@@ -508,6 +545,11 @@ public final class Bl0jv2_Parser {
                 consume_or_throw(RBracketToken.class, "']' token expected at end of index expression");
                 left = new IndexNode(left, index);
             }
+            else if (peek_t() instanceof DotToken) {
+                consume_t();
+                String fieldName = consume_or_throw(IdentityToken.class, "field/method name expected after '.'").name;
+                left = new FieldAccessNode(left, fieldName);
+            }
             else if (peek_t() instanceof OpToken op && (op.op == Operator.PLUS_PLUS || op.op == Operator.MINUS_MINUS)) {
                 consume_t();
                 left = new RUnaryNode(op.op, left);
@@ -556,6 +598,14 @@ public final class Bl0jv2_Parser {
 
         if(consume_if(NilToken.class))
             return new NilNode();
+
+        if(consume_if(ThisToken.class))
+            return new IdentityNode("this");
+
+        if(consume_if(NewToken.class)) {
+            String className = consume_or_throw(IdentityToken.class, "class name expected after 'new'").name;
+            return new NewNode(className, tuple_args());
+        }
 
         if (t instanceof NumberToken numberToken) {
             pos++;
