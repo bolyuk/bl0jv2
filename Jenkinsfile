@@ -1,7 +1,7 @@
 pipeline {
     agent any
     tools {
-        jdk 'GraalVM-21'
+        jdk 'GraalVM-25'
         maven 'Default'
     }
     stages {
