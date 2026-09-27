@@ -113,13 +113,20 @@ public final class Bl0jv2_Utils {
                 case OpCodes.INDEX_GET -> writer.append(String.format("INDEX_GET r%d = r%d[r%d]", a, a, b));
                 case OpCodes.INDEX_SET -> writer.append(String.format("INDEX_SET r%d[r%d] = r%d", a, b, b + 1));
                 case OpCodes.LENGTH -> writer.append(String.format("LENGTH r%d = len(r%d)", a, a));
-                case OpCodes.TO_ARRAY -> writer.append(String.format("TO_ARRAY r%d = toArr(r%d)", a, a));
                 case OpCodes.PUSH -> writer.append(String.format("PUSH r%d, r%d", a, b));
                 case OpCodes.POP -> writer.append(String.format("POP r%d = pop(r%d)", a, b));
                 case OpCodes.TO_INT -> writer.append(String.format("TO_INT r%d = int(r%d)", a, a));
                 case OpCodes.TO_FLOAT -> writer.append(String.format("TO_FLOAT r%d = float(r%d)", a, a));
                 case OpCodes.TO_STRING -> writer.append(String.format("TO_STRING r%d = str(r%d)", a, a));
                 case OpCodes.TYPE_OF -> writer.append(String.format("TYPE_OF r%d = typeOf(r%d)", a, a));
+                case OpCodes.READ -> writer.append(String.format("READ r%d = read()", a));
+                case OpCodes.TRY_ENTER -> writer.append(String.format("TRY_ENTER catch@%d errReg=r%d", b, a));
+                case OpCodes.TRY_EXIT -> writer.append("TRY_EXIT");
+                case OpCodes.MAKE_ERR -> writer.append(String.format("MAKE_ERR r%d = err(r%d)", a, a));
+                case OpCodes.NEW_INSTANCE -> writer.append(String.format("NEW_INSTANCE r%d = new(r%d)", a, a));
+                case OpCodes.GET_FIELD -> writer.append(String.format("GET_FIELD r%d = r%d.field[const %d]", a, a, b));
+                case OpCodes.SET_FIELD -> writer.append(String.format("SET_FIELD r%d.field[const r%d] = r%d", a, b, b + 1));
+                case OpCodes.LOOKUP_METHOD -> writer.append(String.format("LOOKUP_METHOD r%d = r%d.method[const %d]", a, a, b));
                 default -> writer.append("UNKNOWN");
             }
             writer.append(String.format("%n"));

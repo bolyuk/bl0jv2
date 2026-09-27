@@ -14,6 +14,7 @@ import bl0.bl0jv2.generation.tokens.data.NilToken;
 import bl0.bl0jv2.generation.tokens.data.NumberToken;
 import bl0.bl0jv2.generation.tokens.data.StringToken;
 import bl0.bl0jv2.generation.tokens.statements.DefToken;
+import bl0.bl0jv2.generation.tokens.statements.DotToken;
 import bl0.bl0jv2.generation.tokens.statements.ElseToken;
 import bl0.bl0jv2.generation.tokens.statements.IfToken;
 import bl0.bl0jv2.generation.tokens.statements.ReturnToken;
@@ -55,11 +56,12 @@ class Bl0jv2_LexerTest {
     @Test
     void trailingDotIsNotConsumedAsPartOfTheNumber() {
         // no digit follows the '.', so it must not be swallowed into the
-        // number token as a bogus decimal point. The number token itself
-        // correctly stops at "42"; the lone '.' is then rejected on its own
-        // by the general "unexpected character" path, since '.' isn't a
-        // token in its own right (yet)
-        assertThrows(Bl0j_LexerException.class, () -> lexer.getTokens("42."));
+        // number token as a bogus decimal point - the number stops at "42"
+        // and '.' is lexed on its own (as a DotToken, used for field access)
+        List<Token> tokens = lexer.getTokens("42.");
+        assertInstanceOf(NumberToken.class, tokens.get(0));
+        assertEquals("42", ((NumberToken) tokens.get(0)).value);
+        assertInstanceOf(DotToken.class, tokens.get(1));
     }
 
     @Test

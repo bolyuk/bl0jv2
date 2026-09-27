@@ -2,6 +2,7 @@ package bl0.bl0jv2.generation;
 
 import bl0.bl0jv2.data.NativeMethods;
 import bl0.bl0jv2.exceptions.Bl0j_LexerException;
+import bl0.bl0jv2.generation.tokens.ClassToken;
 import bl0.bl0jv2.generation.tokens.EOFToken;
 import bl0.bl0jv2.generation.tokens.NativeCallToken;
 import bl0.bl0jv2.generation.tokens.OpToken;
@@ -89,6 +90,9 @@ public final class Bl0jv2_Lexer {
                     break;
                 case '~':
                     tokens.add(new OpToken(line, line_index, Operator.BIT_NOT));
+                    break;
+                case '.':
+                    tokens.add(new DotToken(line, line_index));
                     break;
                 case '(':
                     tokens.add(new LParenToken(line, line_index));
@@ -185,9 +189,16 @@ public final class Bl0jv2_Lexer {
                             case "else" -> tokens.add(new ElseToken(line, start_index));
                             case "while" -> tokens.add(new WhileToken(line, start_index));
                             case "for" -> tokens.add(new ForToken(line, start_index));
+                            case "try" -> tokens.add(new TryToken(line, start_index));
+                            case "catch" -> tokens.add(new CatchToken(line, start_index));
 
                             case "def" -> tokens.add(new DefToken(line, start_index));
                             case "return" -> tokens.add(new ReturnToken(line, start_index));
+
+                            case "class" -> tokens.add(new ClassToken(line, start_index));
+                            case "field" -> tokens.add(new FieldToken(line, start_index));
+                            case "new" -> tokens.add(new NewToken(line, start_index));
+                            case "this" -> tokens.add(new ThisToken(line, start_index));
 
                             case "println" -> tokens.add(new NativeCallToken(line, start_index, NativeMethods.PRINT_LN));
                             case "print" -> tokens.add(new NativeCallToken(line, start_index, NativeMethods.PRINT));
