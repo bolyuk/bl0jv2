@@ -10,6 +10,8 @@ import bl0.bl0jv2.generation.tokens.blocks.LBraceToken;
 import bl0.bl0jv2.generation.tokens.blocks.RBraceToken;
 import bl0.bl0jv2.generation.tokens.blocks.LParenToken;
 import bl0.bl0jv2.generation.tokens.blocks.RParenToken;
+import bl0.bl0jv2.generation.tokens.blocks.LBracketToken;
+import bl0.bl0jv2.generation.tokens.blocks.RBracketToken;
 import bl0.bl0jv2.generation.tokens.data.*;
 import bl0.bl0jv2.generation.tokens.statements.*;
 
@@ -65,16 +67,40 @@ public final class Bl0jv2_Lexer {
                         tokens.add(new OpToken(line, line_index, Operator.ASSIGNMENT));
                     break;
                 case '>':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.GREATER_EQUALS : Operator.GREATER));
+                    if (peekIfNext('>'))
+                        tokens.add(new OpToken(line, line_index, Operator.SHIFT_RIGHT));
+                    else
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.GREATER_EQUALS : Operator.GREATER));
                     break;
                 case '<':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.LESS_EQUALS : Operator.LESS));
+                    if (peekIfNext('<'))
+                        tokens.add(new OpToken(line, line_index, Operator.SHIFT_LEFT));
+                    else
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.LESS_EQUALS : Operator.LESS));
+                    break;
+                case '&':
+                    tokens.add(new OpToken(line, line_index, peekIfNext('&') ? Operator.AND : Operator.BIT_AND));
+                    break;
+                case '|':
+                    tokens.add(new OpToken(line, line_index, peekIfNext('|') ? Operator.OR : Operator.BIT_OR));
+                    break;
+                case '^':
+                    tokens.add(new OpToken(line, line_index, Operator.BIT_XOR));
+                    break;
+                case '~':
+                    tokens.add(new OpToken(line, line_index, Operator.BIT_NOT));
                     break;
                 case '(':
                     tokens.add(new LParenToken(line, line_index));
                     break;
                 case ')':
                     tokens.add(new RParenToken(line, line_index));
+                    break;
+                case '[':
+                    tokens.add(new LBracketToken(line, line_index));
+                    break;
+                case ']':
+                    tokens.add(new RBracketToken(line, line_index));
                     break;
                 case '+':
                     tokens.add(new OpToken(line, line_index, peekIfNext('+') ? Operator.PLUS_PLUS : Operator.PLUS));
@@ -86,7 +112,12 @@ public final class Bl0jv2_Lexer {
                     tokens.add(new OpToken(line, line_index, peekIfNext('*') ? Operator.STAR_STAR : Operator.STAR));
                     break;
                 case '/':
-                    tokens.add(new OpToken(line, line_index, Operator.DIV));
+                    if (peekIfNext('/')) {
+                        // line comment: skip everything up to (not incl.) the newline
+                        while (pos + 1 < len && lookAhead() != '\n')
+                            pos++;
+                    } else
+                        tokens.add(new OpToken(line, line_index, Operator.DIV));
                     break;
                 case '!':
                     if (peekIfNext('='))
@@ -97,22 +128,38 @@ public final class Bl0jv2_Lexer {
                 default:
                     if (c == '\'') {
                         int start_index = line_index;
-                        String buf = "";
+                        StringBuilder buf = new StringBuilder();
+                        boolean closed = false;
                         while (pos + 1 < len) {
-                            if (!isNext('\'')) {
-                                buf += peek();
-                                line_index++;
-                            } else {
+                            if (isNext('\'')) {
                                 pos++; // consume '
+                                closed = true;
                                 break;
                             }
+                            char ch = peek();
+                            line_index++;
+                            if (ch == '\\' && pos + 1 < len) {
+                                char escaped = peek();
+                                line_index++;
+                                buf.append(unescape(escaped, line, line_index));
+                            } else
+                                buf.append(ch);
                         }
-                        tokens.add(new StringToken(line, start_index, buf));
+                        if (!closed)
+                            gen_exception(line, start_index, "unterminated string literal");
+                        tokens.add(new StringToken(line, start_index, buf.toString()));
                     } else if (isNumber(c)) {
                         int start_index = line_index;
                         String buf = "" + c;
+                        boolean isFloat = false;
                         while (pos + 1 < len) {
                             if (isNumber(lookAhead())) {
+                                buf += peek();
+                                line_index++;
+                            } else if (!isFloat && lookAhead() == '.' && isNumber(lookAhead2())) {
+                                // only treat '.' as a decimal point when a digit
+                                // follows it, so a trailing '.' is left alone
+                                isFloat = true;
                                 buf += peek();
                                 line_index++;
                             } else
@@ -123,7 +170,7 @@ public final class Bl0jv2_Lexer {
                         int start_index = line_index;
                         String buf = "" + c;
                         while (pos + 1 < len) {
-                            if (isIdentity(lookAhead())) {
+                            if (isIdentityContinuation(lookAhead())) {
                                 buf += peek();
                                 line_index++;
                             } else
@@ -137,6 +184,7 @@ public final class Bl0jv2_Lexer {
                             case "if" -> tokens.add(new IfToken(line, start_index));
                             case "else" -> tokens.add(new ElseToken(line, start_index));
                             case "while" -> tokens.add(new WhileToken(line, start_index));
+                            case "for" -> tokens.add(new ForToken(line, start_index));
 
                             case "def" -> tokens.add(new DefToken(line, start_index));
                             case "return" -> tokens.add(new ReturnToken(line, start_index));
@@ -171,10 +219,31 @@ public final class Bl0jv2_Lexer {
         throw new Bl0j_LexerException(line, line_index, context + reason);
     }
 
+    private char unescape(char escaped, int line, int line_index) {
+        return switch (escaped) {
+            case 'n' -> '\n';
+            case 't' -> '\t';
+            case 'r' -> '\r';
+            case '0' -> '\0';
+            case '\'' -> '\'';
+            case '\\' -> '\\';
+            default -> {
+                gen_exception(line, line_index, "unknown escape sequence - \\" + escaped);
+                yield escaped; // unreachable, gen_exception always throws
+            }
+        };
+    }
+
     private char lookAhead() {
         if (pos + 1 >= len)
             return '\0';
         return data[pos+1];
+    }
+
+    private char lookAhead2() {
+        if (pos + 2 >= len)
+            return '\0';
+        return data[pos+2];
     }
 
     private char peek() {
@@ -202,5 +271,9 @@ public final class Bl0jv2_Lexer {
 
     private boolean isIdentity(char c) {
         return  Character.isAlphabetic(c) || c == '_';
+    }
+
+    private boolean isIdentityContinuation(char c) {
+        return isIdentity(c) || isNumber(c);
     }
 }

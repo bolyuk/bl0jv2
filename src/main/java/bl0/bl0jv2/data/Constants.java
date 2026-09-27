@@ -8,4 +8,5 @@ public final class Constants {
     public static final int BOOL = 0x03;
     public static final int FUN = 0x04;
     public static final int BYTE = 0x05;
+    public static final int FLOAT = 0x06;
 }

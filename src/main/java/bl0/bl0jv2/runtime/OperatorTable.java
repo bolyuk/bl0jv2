@@ -23,15 +23,19 @@ public class OperatorTable {
         throw new Bl0j_VM_Exception("no operator for " + left.getClass().getSimpleName() + " and " + right.getClass().getSimpleName());
     }
 
+    // matches/applies strictly in the operands' actual left-to-right order:
+    // silently swapping mismatched operands to fit the registered (l, r)
+    // pair breaks order-sensitive operators like string concatenation
+    // ('apples' + 5 must not become the same result as 5 + 'apples').
+    // Operators where either order is legitimate (e.g. int * string repeat)
+    // simply register both (l, r) and (r, l) explicitly.
     private record Operator(Class<?> l, Class<?> r, BiFunction<Object, Object, Object> fun) {
         boolean matches(Object left, Object right) {
-            return (l.isInstance(left) && r.isInstance(right)) ||
-                    (l.isInstance(right) && r.isInstance(left));
+            return l.isInstance(left) && r.isInstance(right);
         }
 
         Object apply(Object left, Object right) {
-            if (l.isInstance(left)) return fun.apply(left, right);
-            else return fun.apply(right, left);  // меняем порядок
+            return fun.apply(left, right);
         }
     }
 }

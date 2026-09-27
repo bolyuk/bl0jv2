@@ -186,8 +186,13 @@ public class Bl0jv2_CLI {
                 vm.feed_compiled_file(ByteBuffer.wrap(bytes));
                 vm.set_out_writer(writer);
                 System.out.println();
-                vm.run_instructions();
-                writer.flush();
+                // flush in finally: a crash mid-program must not discard
+                // whatever it already printed before the exception
+                try {
+                    vm.run_instructions();
+                } finally {
+                    writer.flush();
+                }
             }
         }
 

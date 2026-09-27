@@ -20,4 +20,14 @@ public enum Operator {
     PLUS_PLUS,
     MINUS_MINUS,
     STAR_STAR,
+
+    BIT_AND,        // &
+    BIT_OR,         // |
+    BIT_XOR,        // ^
+    BIT_NOT,        // ~
+    SHIFT_LEFT,     // <<
+    SHIFT_RIGHT,    // >>
+
+    AND,            // && (short-circuit)
+    OR,             // || (short-circuit)
 }

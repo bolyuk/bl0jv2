@@ -13,6 +13,8 @@ import bl0.bl0jv2.generation.tokens.blocks.LBraceToken;
 import bl0.bl0jv2.generation.tokens.blocks.RBraceToken;
 import bl0.bl0jv2.generation.tokens.blocks.LParenToken;
 import bl0.bl0jv2.generation.tokens.blocks.RParenToken;
+import bl0.bl0jv2.generation.tokens.blocks.LBracketToken;
+import bl0.bl0jv2.generation.tokens.blocks.RBracketToken;
 import bl0.bl0jv2.generation.tokens.data.*;
 import bl0.bl0jv2.generation.tokens.statements.*;
 
@@ -26,7 +28,7 @@ public final class Bl0jv2_Parser {
     private String sourceCode;
 
     // program        = statement*
-    // statement      =  if | fun | class | while | sysCall | assign ';'       TODO
+    // statement      =  if | for | fun | class | while | sysCall | assign ';' TODO (class)
     // class          = 'def' 'class' IDENT '{' fun* '}'                       TODO
     // new            = 'new' IDENT tuple                                      TODO
     // fun            = 'def' 'fun' IDENT funcBody block
@@ -34,19 +36,28 @@ public final class Bl0jv2_Parser {
     // argBody        = '(' (IDENT (',' IDENT)*)? ')'
     // if             = 'if' condition block ('else' block)?
     // while          = 'while' condition block
+    // for            = 'for' '(' assign ';' assign ';' assign ')' block
     // block          = '{' statement* '}' | statement
     // condition      = assign
     // sysCall        = ('print' | 'println' | 'read' | 'wait') assign ';'
-    // assign         = IDENT '=' assign | ternary | postfix '=' assign        TODO
-    // ternary        = equality ('?' ternary ':' ternary)?
+    // assign         = (IDENT | index) '=' assign | ternary
+    // ternary        = or ('?' ternary ':' ternary)?
+    // or             = and ('||' and)*               (short-circuit)
+    // and            = bitOr ('&&' bitOr)*            (short-circuit)
+    // bitOr          = bitXor ('|' bitXor)*
+    // bitXor         = bitAnd ('^' bitAnd)*
+    // bitAnd         = equality ('&' equality)*
     // equality       = comparison (('==' | '!=') comparison)*
-    // comparison     = addSub (('<' | '>' | '<=' | '>=') addSub)*
+    // comparison     = shift (('<' | '>' | '<=' | '>=') shift)*
+    // shift          = addSub (('<<' | '>>') addSub)*
     // addSub         = multiplyDivide (('+' | '-') multiplyDivide)*
-    // multiplyDivide = unary (('*' | '/' | '%') unary)*
-    // unary          = ('-' | '!') unary | postfix
-    // postfix        = data (tuple | '++' | '--' | '.' IDENT )*               TODO
+    // multiplyDivide = unary (('*' | '/' | '%' | '**') unary)*
+    // unary          = ('-' | '!' | '~') unary | postfix
+    // postfix        = data (tuple | index | '++' | '--' | '.' IDENT )*       TODO ('.' IDENT)
+    // index          = '[' assign ']'
     // tuple          = '(' assign (',' assign)* ')'
-    // data           = NUMBER | IDENT | STRING | tuple | lambda | new         TODO
+    // array          = '[' (assign (',' assign)*)? ']'
+    // data           = NUMBER | IDENT | STRING | tuple | array | lambda | new TODO (lambda, new)
     public Node getAST(List<Token> tokens) {
         this.tokens = tokens;
         this.pos = 0;
@@ -77,22 +88,32 @@ public final class Bl0jv2_Parser {
 
     private Node statement(){
 
-        if(peek_t() instanceof NativeCallToken)
-           return native_call_statement();
+        // stray/empty statement terminators must be skipped before checking
+        // what kind of statement follows, otherwise this check would see a
+        // stale ';' instead of the real next token
+        while (consume_if(SemicolonToken.class));
 
-        if(consume_if(ReturnToken.class))
-            return new ReturnNode(assign_evaluation());
+        if(peek_t() instanceof NativeCallToken)
+           return native_call_statement(); // self-consumes its trailing ';'
+
+        if(consume_if(ReturnToken.class)) {
+            Node returnNode = new ReturnNode(assign_evaluation());
+            consume_if(SemicolonToken.class);
+            return returnNode;
+        }
 
         if(peek_t() instanceof IfToken) // dont consume!!
-            return if_statement();
+            return if_statement(); // self-terminating via block()
 
         if(peek_t() instanceof WhileToken) // dont consume!!
-            return while_statement();
+            return while_statement(); // self-terminating via block()
 
-        // TODO probably not needed
-        consume_if(SemicolonToken.class); // TODO check if it possible to kill semicolons in another place
+        if(peek_t() instanceof ForToken) // dont consume!!
+            return for_statement(); // self-terminating via block()
 
-        return assign_evaluation();
+        Node node = assign_evaluation();
+        consume_if(SemicolonToken.class);
+        return node;
     }
 
     // --- DEFINITIONS ---
@@ -188,6 +209,24 @@ public final class Bl0jv2_Parser {
         return new WhileNode(condition_evaluation(), block());
     }
 
+    // for (init; condition; update) block - unlike while's condition, the
+    // parens are mandatory here since three clauses need clear separators
+    private Node for_statement(){
+        consume_or_throw(ForToken.class, "'for' token expected at start for for statement");
+        consume_or_throw(LParenToken.class, "'(' token expected after 'for'");
+
+        Node init = assign_evaluation();
+        consume_or_throw(SemicolonToken.class, "';' token expected after for-loop initializer");
+
+        Node condition = assign_evaluation();
+        consume_or_throw(SemicolonToken.class, "';' token expected after for-loop condition");
+
+        Node update = assign_evaluation();
+        consume_or_throw(RParenToken.class, "')' token expected after for-loop update");
+
+        return new ForNode(init, condition, update, block());
+    }
+
     private Node block(){
         if(consume_if(LBraceToken.class)) {
             List<Node> stmts = new ArrayList<>();
@@ -219,17 +258,25 @@ public final class Bl0jv2_Parser {
     }
 
     private Node assign_evaluation(){
-        if(peek_t() instanceof IdentityToken && peek_t(1) instanceof OpToken op && op.op == Operator.ASSIGNMENT){
-            Node left = data();
+        // a plain IDENT is the common case and doesn't need a full
+        // expression parse to know it might be an assignment target, but an
+        // indexed target (arr[i] = ...) only reveals itself after parsing
+        // the postfix chain, so the left side is always parsed first and
+        // checked for '=' afterwards
+        Node left = ternary_evaluation();
+
+        if ((left instanceof IdentityNode || left instanceof IndexNode)
+                && peek_t() instanceof OpToken op && op.op == Operator.ASSIGNMENT) {
             consume_t();
             Node right = assign_evaluation();
             return new BinaryNode(left, op.op, right);
         }
-        return ternary_evaluation();
+
+        return left;
     }
 
     private Node ternary_evaluation(){
-        Node left = equality_evaluation();
+        Node left = or_evaluation();
 
         if(consume_if(Ternary_IfToken.class)){
             var body = ternary_evaluation();
@@ -239,6 +286,79 @@ public final class Bl0jv2_Parser {
             var elseBody = ternary_evaluation();
 
             return new Ternary_IfNode(left, body, elseBody);
+        }
+
+        return left;
+    }
+
+    // || and && are short-circuiting (see the compiler), unlike every other
+    // binary operator here, but that's purely a codegen concern - parsing
+    // them is a plain left-associative binary chain like the rest
+    private Node or_evaluation(){
+        Node left = and_evaluation();
+
+        while (pos < tokens.size()) {
+            Token t = peek_t();
+            if (t instanceof OpToken op && op.op == Operator.OR) {
+                consume_t();
+                left = new BinaryNode(left, op.op, and_evaluation());
+            } else break;
+        }
+
+        return left;
+    }
+
+    private Node and_evaluation(){
+        Node left = bit_or_evaluation();
+
+        while (pos < tokens.size()) {
+            Token t = peek_t();
+            if (t instanceof OpToken op && op.op == Operator.AND) {
+                consume_t();
+                left = new BinaryNode(left, op.op, bit_or_evaluation());
+            } else break;
+        }
+
+        return left;
+    }
+
+    private Node bit_or_evaluation(){
+        Node left = bit_xor_evaluation();
+
+        while (pos < tokens.size()) {
+            Token t = peek_t();
+            if (t instanceof OpToken op && op.op == Operator.BIT_OR) {
+                consume_t();
+                left = new BinaryNode(left, op.op, bit_xor_evaluation());
+            } else break;
+        }
+
+        return left;
+    }
+
+    private Node bit_xor_evaluation(){
+        Node left = bit_and_evaluation();
+
+        while (pos < tokens.size()) {
+            Token t = peek_t();
+            if (t instanceof OpToken op && op.op == Operator.BIT_XOR) {
+                consume_t();
+                left = new BinaryNode(left, op.op, bit_and_evaluation());
+            } else break;
+        }
+
+        return left;
+    }
+
+    private Node bit_and_evaluation(){
+        Node left = equality_evaluation();
+
+        while (pos < tokens.size()) {
+            Token t = peek_t();
+            if (t instanceof OpToken op && op.op == Operator.BIT_AND) {
+                consume_t();
+                left = new BinaryNode(left, op.op, equality_evaluation());
+            } else break;
         }
 
         return left;
@@ -259,12 +379,26 @@ public final class Bl0jv2_Parser {
     }
 
     private Node comparison_evaluation(){
-        Node left = add_sub_evaluation();
+        Node left = shift_evaluation();
 
         while (pos < tokens.size()) {
             Token t = peek_t();
             if (t instanceof OpToken op &&
                     (op.op == Operator.LESS || op.op == Operator.LESS_EQUALS || op.op == Operator.GREATER || op.op == Operator.GREATER_EQUALS)) {
+                consume_t();
+                left = new BinaryNode(left, op.op, shift_evaluation());
+            } else break;
+        }
+
+        return left;
+    }
+
+    private Node shift_evaluation(){
+        Node left = add_sub_evaluation();
+
+        while (pos < tokens.size()) {
+            Token t = peek_t();
+            if (t instanceof OpToken op && (op.op == Operator.SHIFT_LEFT || op.op == Operator.SHIFT_RIGHT)) {
                 consume_t();
                 left = new BinaryNode(left, op.op, add_sub_evaluation());
             } else break;
@@ -294,7 +428,7 @@ public final class Bl0jv2_Parser {
         while (pos < tokens.size()) {
             Token t = peek_t();
             if (t instanceof OpToken op &&
-                    (op.op == Operator.STAR || op.op == Operator.DIV || op.op == Operator.REMAINDER)) {
+                    (op.op == Operator.STAR || op.op == Operator.DIV || op.op == Operator.REMAINDER || op.op == Operator.STAR_STAR)) {
                 consume_t();
                 left = new BinaryNode(left, op.op, unary_evaluation());
             } else break;
@@ -306,7 +440,7 @@ public final class Bl0jv2_Parser {
     private Node unary_evaluation() {
         Token t = peek_t();
         if (t instanceof OpToken op &&
-                (op.op == Operator.MINUS || op.op == Operator.NOT)) {
+                (op.op == Operator.MINUS || op.op == Operator.NOT || op.op == Operator.BIT_NOT)) {
             consume_t();
             return new LUnaryNode(op.op, unary_evaluation());
         }
@@ -319,6 +453,12 @@ public final class Bl0jv2_Parser {
         while (true) {
             if (peek_t() instanceof LParenToken)
                 left = new FunCall(left, tuple_args());
+            else if (peek_t() instanceof LBracketToken) {
+                consume_t();
+                Node index = assign_evaluation();
+                consume_or_throw(RBracketToken.class, "']' token expected at end of index expression");
+                left = new IndexNode(left, index);
+            }
             else if (peek_t() instanceof OpToken op && (op.op == Operator.PLUS_PLUS || op.op == Operator.MINUS_MINUS)) {
                 consume_t();
                 left = new RUnaryNode(op.op, left);
@@ -345,6 +485,23 @@ public final class Bl0jv2_Parser {
         return args;
     }
 
+    private Node array_literal(){
+        consume_or_throw(LBracketToken.class, "'[' token expected at start of array literal");
+        List<Node> elements = new ArrayList<>();
+
+        if (consume_if(RBracketToken.class))
+            return new ArrayLiteralNode(elements);
+
+        elements.add(assign_evaluation());
+
+        while (consume_if(SeparatorToken.class))
+            elements.add(assign_evaluation());
+
+        consume_or_throw(RBracketToken.class, "']' token expected at end of array literal");
+
+        return new ArrayLiteralNode(elements);
+    }
+
     private Node data() {
         Token t = peek_t();
 
@@ -353,6 +510,8 @@ public final class Bl0jv2_Parser {
 
         if (t instanceof NumberToken numberToken) {
             pos++;
+            if (numberToken.value.indexOf('.') >= 0)
+                return new FloatNode(Double.parseDouble(numberToken.value));
             return new NumberNode(Integer.parseInt(numberToken.value));
         }
 
@@ -393,6 +552,9 @@ public final class Bl0jv2_Parser {
                 return first;
             }
         }
+
+        if (t instanceof LBracketToken)
+            return array_literal();
 
         gen_exception(t,"unexpected token - "+t);
         return null;

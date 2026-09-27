@@ -51,6 +51,9 @@ public final class Bl0jv2_Utils {
                     writer.append(String.format("[%d] BYTE   = 0x%02X %n", i, bytes.get()));
                 }
 
+                case Constants.FLOAT ->
+                    writer.append(String.format("[%d] FLOAT  = %s  (8 bytes)%n", i, bytes.getDouble()));
+
                 default -> throw new RuntimeException("Unknown const type: " + type);
             }
         }
@@ -79,6 +82,13 @@ public final class Bl0jv2_Utils {
                 case OpCodes.LR_MUL -> writer.append(String.format("MUL r%d = r%d * r%d", a, a, b));
                 case OpCodes.LR_DIV -> writer.append(String.format("DIV r%d = r%d / r%d", a, a, b));
                 case OpCodes.LR_REM -> writer.append(String.format("REM r%d = r%d / r%d", a, a, b));
+                case OpCodes.LR_POW -> writer.append(String.format("POW r%d = r%d ** r%d", a, a, b));
+                case OpCodes.LR_AND -> writer.append(String.format("AND r%d = r%d & r%d", a, a, b));
+                case OpCodes.LR_OR -> writer.append(String.format("OR  r%d = r%d | r%d", a, a, b));
+                case OpCodes.LR_XOR -> writer.append(String.format("XOR r%d = r%d ^ r%d", a, a, b));
+                case OpCodes.LR_SHL -> writer.append(String.format("SHL r%d = r%d << r%d", a, a, b));
+                case OpCodes.LR_SHR -> writer.append(String.format("SHR r%d = r%d >> r%d", a, a, b));
+                case OpCodes.BIT_NOT -> writer.append(String.format("BIT_NOT r%d", a));
 
                 case OpCodes.JUMP -> writer.append(String.format("JUMP %d", a));
                 case OpCodes.JUMP_IF -> writer.append(String.format("JUMP_IF r%d -> %d", a, b));
@@ -97,6 +107,17 @@ public final class Bl0jv2_Utils {
                 case OpCodes.CALL_NATIVE -> writer.append(String.format("CALL_NATIVE r%d r%d", a, b));
                 case OpCodes.CALL -> writer.append(String.format("CALL r%d args@%d", a, b));
                 case OpCodes.RETURN -> writer.append(String.format("RETURN r%d", a));
+                case OpCodes.NEW_ARRAY -> writer.append(String.format("NEW_ARRAY r%d elements@%d count=%d", a, a + 1, b));
+                case OpCodes.INDEX_GET -> writer.append(String.format("INDEX_GET r%d = r%d[r%d]", a, a, b));
+                case OpCodes.INDEX_SET -> writer.append(String.format("INDEX_SET r%d[r%d] = r%d", a, b, b + 1));
+                case OpCodes.LENGTH -> writer.append(String.format("LENGTH r%d = len(r%d)", a, a));
+                case OpCodes.TO_ARRAY -> writer.append(String.format("TO_ARRAY r%d = toArr(r%d)", a, a));
+                case OpCodes.PUSH -> writer.append(String.format("PUSH r%d, r%d", a, b));
+                case OpCodes.POP -> writer.append(String.format("POP r%d = pop(r%d)", a, b));
+                case OpCodes.TO_INT -> writer.append(String.format("TO_INT r%d = int(r%d)", a, a));
+                case OpCodes.TO_FLOAT -> writer.append(String.format("TO_FLOAT r%d = float(r%d)", a, a));
+                case OpCodes.TO_STRING -> writer.append(String.format("TO_STRING r%d = str(r%d)", a, a));
+                case OpCodes.TYPE_OF -> writer.append(String.format("TYPE_OF r%d = typeOf(r%d)", a, a));
                 default -> writer.append("UNKNOWN");
             }
             writer.append(String.format("%n"));
