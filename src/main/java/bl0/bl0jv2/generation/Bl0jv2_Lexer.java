@@ -199,6 +199,8 @@ public final class Bl0jv2_Lexer {
                             case "field" -> tokens.add(new FieldToken(line, start_index));
                             case "new" -> tokens.add(new NewToken(line, start_index));
                             case "this" -> tokens.add(new ThisToken(line, start_index));
+                            case "static" -> tokens.add(new StaticToken(line, start_index));
+                            case "import" -> tokens.add(new ImportToken(line, start_index));
 
                             case "println" -> tokens.add(new NativeCallToken(line, start_index, NativeMethods.PRINT_LN));
                             case "print" -> tokens.add(new NativeCallToken(line, start_index, NativeMethods.PRINT));

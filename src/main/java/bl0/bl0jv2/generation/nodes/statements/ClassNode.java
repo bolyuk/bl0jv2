@@ -8,10 +8,12 @@ public class ClassNode extends Node {
     public final String name;
     public final List<String> fieldNames;
     public final List<FunNode> methods;
+    public final List<FunNode> staticMethods;
 
-    public ClassNode(String name, List<String> fieldNames, List<FunNode> methods) {
+    public ClassNode(String name, List<String> fieldNames, List<FunNode> methods, List<FunNode> staticMethods) {
         this.name = name;
         this.fieldNames = fieldNames;
         this.methods = methods;
+        this.staticMethods = staticMethods;
     }
 }
