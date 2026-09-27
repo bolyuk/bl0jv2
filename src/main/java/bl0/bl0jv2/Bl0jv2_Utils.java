@@ -108,6 +108,8 @@ public final class Bl0jv2_Utils {
                 case OpCodes.CALL -> writer.append(String.format("CALL r%d args@%d", a, b));
                 case OpCodes.RETURN -> writer.append(String.format("RETURN r%d", a));
                 case OpCodes.NEW_ARRAY -> writer.append(String.format("NEW_ARRAY r%d elements@%d count=%d", a, a + 1, b));
+                case OpCodes.NEW_TUPLE -> writer.append(String.format("NEW_TUPLE r%d elements@%d count=%d", a, a + 1, b));
+                case OpCodes.UNPACK -> writer.append(String.format("UNPACK r%d into @%d count=%d", a, a + 1, b));
                 case OpCodes.INDEX_GET -> writer.append(String.format("INDEX_GET r%d = r%d[r%d]", a, a, b));
                 case OpCodes.INDEX_SET -> writer.append(String.format("INDEX_SET r%d[r%d] = r%d", a, b, b + 1));
                 case OpCodes.LENGTH -> writer.append(String.format("LENGTH r%d = len(r%d)", a, a));

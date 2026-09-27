@@ -55,5 +55,8 @@ public final class OpCodes {
     public static final byte TO_STRING = 0x24;
     public static final byte TYPE_OF = 0x25;
 
+    public static final byte NEW_TUPLE = 0x26;
+    public static final byte UNPACK = 0x27;
+
     public static final byte HALT = (byte) 0xFF;
 }

@@ -94,6 +94,8 @@ public final class Bl0jv2_jVM {
         addTable.add(Double.class,  String.class,  (a, b) -> a.toString() + b.toString());
         addTable.add(String.class,  Bl0jArray.class, (a, b) -> a.toString() + b.toString());
         addTable.add(Bl0jArray.class, String.class,  (a, b) -> a.toString() + b.toString());
+        addTable.add(String.class,  Bl0jTuple.class, (a, b) -> a.toString() + b.toString());
+        addTable.add(Bl0jTuple.class, String.class,  (a, b) -> a.toString() + b.toString());
         addTable.add(String.class,  Character.class, (a, b) -> a.toString() + b.toString());
         addTable.add(Character.class, String.class,  (a, b) -> a.toString() + b.toString());
         // integer arithmetic stays integer (10/3 truncates); any operand
@@ -165,8 +167,9 @@ public final class Bl0jv2_jVM {
 
     // numeric equality crosses int/double (5 == 5.0 is true), matching the
     // implicit promotion already used by +, -, *, /, %, ** ; everything else
-    // falls back to plain value equality
-    private static boolean valuesEqual(Object left, Object right) {
+    // falls back to plain value equality. Package-private so Bl0jTuple can
+    // reuse it for its own (recursive) content equality.
+    static boolean valuesEqual(Object left, Object right) {
         if (isNumeric(left) && isNumeric(right))
             return toDouble(left) == toDouble(right);
         return Objects.equals(left, right);
@@ -180,8 +183,17 @@ public final class Bl0jv2_jVM {
 
     private static int length(Object value) {
         if (value instanceof Bl0jArray arr) return arr.length();
+        if (value instanceof Bl0jTuple t) return t.length();
         if (value instanceof String s) return s.length();
         throw new Bl0j_VM_Exception("cannot take length of " + value.getClass().getSimpleName());
+    }
+
+    private static Bl0jArray requireMutableArray(Object target) {
+        if (target instanceof Bl0jTuple)
+            throw new Bl0j_VM_Exception("cannot mutate a tuple");
+        if (target instanceof Bl0jArray arr)
+            return arr;
+        throw new Bl0j_VM_Exception("expected an array, got " + target.getClass().getSimpleName());
     }
 
     private static int bitNot(Object value) {
@@ -242,6 +254,7 @@ public final class Bl0jv2_jVM {
         if (value instanceof Character) return "char";
         if (value instanceof String) return "string";
         if (value instanceof Bl0jArray) return "array";
+        if (value instanceof Bl0jTuple) return "tuple";
         if (value instanceof FunDef) return "function";
         if (value == NIL_OBJECT) return "nil";
         throw new Bl0j_VM_Exception("unknown type: " + value.getClass().getSimpleName());
@@ -370,11 +383,19 @@ public final class Bl0jv2_jVM {
                         reg[a] = boxRef(new Bl0jArray(elements, this));
                     }
 
+                    case OpCodes.NEW_TUPLE -> {
+                        int count = b;
+                        long[] elements = new long[count];
+                        for (int i = 0; i < count; i++) elements[i] = reg[a + 1 + i];
+                        reg[a] = boxRef(new Bl0jTuple(elements, this));
+                    }
+
                     case OpCodes.INDEX_GET -> {
                         Object target = unbox(reg[a]);
                         int index = (int) unbox(reg[b]);
                         reg[a] = switch (target) {
                             case Bl0jArray array -> array.getRaw(index);
+                            case Bl0jTuple tuple -> tuple.getRaw(index);
                             case String s -> NanBox.ofChar(charAt(s, index));
                             default -> throw new Bl0j_VM_Exception("cannot index " + target.getClass().getSimpleName());
                         };
@@ -382,7 +403,7 @@ public final class Bl0jv2_jVM {
 
                     // index and value sit at reg[b] and reg[b+1]
                     case OpCodes.INDEX_SET -> {
-                        Bl0jArray array = (Bl0jArray) unbox(reg[a]);
+                        Bl0jArray array = requireMutableArray(unbox(reg[a]));
                         int index = (int) unbox(reg[b]);
                         array.setRaw(index, reg[b + 1]);
                     }
@@ -393,8 +414,24 @@ public final class Bl0jv2_jVM {
                     // mutates the Bl0jArray object the reference points at,
                     // not the register holding that reference - reg[a]
                     // (the array's own slot) is never overwritten
-                    case OpCodes.PUSH -> ((Bl0jArray) unbox(reg[a])).push(reg[b]);
-                    case OpCodes.POP -> reg[a] = ((Bl0jArray) unbox(reg[b])).pop();
+                    case OpCodes.PUSH -> requireMutableArray(unbox(reg[a])).push(reg[b]);
+                    case OpCodes.POP -> reg[a] = requireMutableArray(unbox(reg[b])).pop();
+
+                    // count consecutive elements land in reg[a+1 .. a+count],
+                    // mirroring NEW_ARRAY/NEW_TUPLE's own convention
+                    case OpCodes.UNPACK -> {
+                        Object target = unbox(reg[a]);
+                        int count = b;
+                        int len = length(target);
+                        if (len != count)
+                            throw new Bl0j_VM_Exception("cannot unpack " + len + " values into " + count + " targets");
+                        for (int i = 0; i < count; i++)
+                            reg[a + 1 + i] = switch (target) {
+                                case Bl0jArray arr -> arr.getRaw(i);
+                                case Bl0jTuple tup -> tup.getRaw(i);
+                                default -> throw new Bl0j_VM_Exception("cannot unpack " + target.getClass().getSimpleName());
+                            };
+                    }
 
                     case OpCodes.TO_INT -> reg[a] = box(toInt(unbox(reg[a])));
                     case OpCodes.TO_FLOAT -> reg[a] = box(toFloat(unbox(reg[a])));

@@ -185,6 +185,7 @@ public final class Bl0jv2_Compiler {
         if ((r = compileTypeCheck(funCall, "isArray", "array")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isNil", "nil")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isChar", "char")) != null) return r;
+        if ((r = compileTypeCheck(funCall, "isTuple", "tuple")) != null) return r;
         return null;
     }
 
@@ -243,6 +244,41 @@ public final class Bl0jv2_Compiler {
 
             _emit(OpCodes.NEW_ARRAY, startReg, arrayLiteral.elements.size());
             return startReg;
+        }
+
+        if(node instanceof TupleNode tupleNode){
+            int[] valRegs = new int[tupleNode.values.size()];
+
+            for(int i=0;i<tupleNode.values.size();i++)
+                valRegs[i] = compileInner(tupleNode.values.get(i));
+
+            int startReg = regIndex++;
+
+            for(var val : valRegs) {
+                _emit(OpCodes.MOV, regIndex, val);
+                regIndex++;
+            }
+
+            _emit(OpCodes.NEW_TUPLE, startReg, tupleNode.values.size());
+            return startReg;
+        }
+
+        if(node instanceof DestructuringAssignNode destr){
+            int rightReg = compileInner(destr.right);
+            int arity = destr.targets.size();
+
+            int base = regIndex++;
+            _emit(OpCodes.MOV, base, rightReg);
+            regIndex += arity; // reserved for UNPACK's output, filled below
+
+            _emit(OpCodes.UNPACK, base, arity);
+
+            for (int i = 0; i < arity; i++) {
+                int targetReg = compileInner(destr.targets.get(i));
+                _emit(OpCodes.MOV, targetReg, base + 1 + i);
+            }
+
+            return base;
         }
 
         if(node instanceof IndexNode indexNode){

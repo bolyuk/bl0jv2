@@ -40,7 +40,8 @@ public final class Bl0jv2_Parser {
     // block          = '{' statement* '}' | statement
     // condition      = assign
     // sysCall        = ('print' | 'println' | 'read' | 'wait') assign ';'
-    // assign         = (IDENT | index) '=' assign | ternary
+    // assign         = IDENT (',' IDENT)+ '=' assign (',' assign)*           (destructuring)
+    //                | (IDENT | index) '=' assign | ternary
     // ternary        = or ('?' ternary ':' ternary)?
     // or             = and ('||' and)*               (short-circuit)
     // and            = bitOr ('&&' bitOr)*            (short-circuit)
@@ -258,6 +259,10 @@ public final class Bl0jv2_Parser {
     }
 
     private Node assign_evaluation(){
+        Node destructuring = try_parse_destructuring_assignment();
+        if (destructuring != null)
+            return destructuring;
+
         // a plain IDENT is the common case and doesn't need a full
         // expression parse to know it might be an assignment target, but an
         // indexed target (arr[i] = ...) only reveals itself after parsing
@@ -273,6 +278,50 @@ public final class Bl0jv2_Parser {
         }
 
         return left;
+    }
+
+    // a, b = <expr> (, <expr>)*   -   e.g. 'x, y = f();' or 'a, b = b, a;'
+    // (a swap, no temp variable needed - the whole right side is evaluated
+    // before anything on the left is touched). Only a raw lookahead scan
+    // over IDENT (',' IDENT)+ '=' decides whether this applies; nothing is
+    // consumed unless the pattern actually matches, so a plain 'f(a, b)'
+    // call-argument list or '[a, b]' array literal is never misread as one
+    // (the token right after the last IDENT there is ')'/']', not '=').
+    private Node try_parse_destructuring_assignment(){
+        if (!(peek_t() instanceof IdentityToken start))
+            return null;
+
+        List<String> names = new ArrayList<>();
+        names.add(start.name);
+
+        int lookahead = 1;
+        while (peek_safe(lookahead) instanceof SeparatorToken && peek_safe(lookahead + 1) instanceof IdentityToken idTok) {
+            names.add(idTok.name);
+            lookahead += 2;
+        }
+
+        if (names.size() < 2 || !(peek_safe(lookahead) instanceof OpToken op && op.op == Operator.ASSIGNMENT))
+            return null;
+
+        for (int i = 0; i < names.size(); i++) {
+            consume_t(); // IDENT
+            if (i < names.size() - 1)
+                consume_t(); // ','
+        }
+        consume_t(); // '='
+
+        List<Node> rightValues = new ArrayList<>();
+        rightValues.add(assign_evaluation());
+        while (consume_if(SeparatorToken.class))
+            rightValues.add(assign_evaluation());
+
+        Node right = rightValues.size() == 1 ? rightValues.get(0) : new TupleNode(rightValues);
+
+        List<Node> targets = new ArrayList<>();
+        for (String name : names)
+            targets.add(new IdentityNode(name));
+
+        return new DestructuringAssignNode(targets, right);
     }
 
     private Node ternary_evaluation(){
@@ -614,5 +663,13 @@ public final class Bl0jv2_Parser {
 
     private Token lastToken(){
         return tokens.isEmpty() ? null : tokens.get(tokens.size()-1);
+    }
+
+    // unlike peek_t(extra), never throws on out-of-bounds - needed for
+    // speculative lookahead (e.g. destructuring-assignment detection) that
+    // must be able to fail quietly and fall back to normal parsing
+    private Token peek_safe(int extra) {
+        int index = pos + extra;
+        return index < tokens.size() ? tokens.get(index) : null;
     }
 }
