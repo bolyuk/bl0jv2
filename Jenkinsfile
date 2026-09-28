@@ -32,7 +32,7 @@ pipeline {
                             "https://git.bolyuk.org/api/v1/repos/bolyuk/bl0jv2/releases" \
                             -H "Content-Type: application/json" \
                             -d "{\\"tag_name\\":\\"$TAG\\",\\"target_commitish\\":\\"master\\",\\"name\\":\\"$TAG\\",\\"body\\":\\"Automated build from Jenkins, commit $GIT_COMMIT\\",\\"draft\\":false,\\"prerelease\\":false}" \
-                            | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+                            | jq -r '.id')
                         curl -s -u "$GITEA_USER:$GITEA_TOKEN" -X POST \
                             "https://git.bolyuk.org/api/v1/repos/bolyuk/bl0jv2/releases/${RELEASE_ID}/assets?name=bl0jv2" \
                             -F "attachment=@target/bl0jv2"
