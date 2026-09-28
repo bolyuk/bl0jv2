@@ -109,6 +109,17 @@ public final class Bl0jv2_Compiler {
 
                 int classConstIndex = constant(new ClassDef(classNode.name, classNode.fieldNames, methodNames, methodConstIndices));
                 classMapping.put(classNode.name, new ClassInfo(classConstIndex, hasInit));
+
+                // static methods are registered as plain functions under
+                // their mangled name and resolved entirely at compile time
+                // (ClassName.method(...)) - they never go through runtime
+                // instance dispatch, so they're deliberately left out of
+                // the ClassDef's own method table above
+                for (FunNode staticMethod : classNode.staticMethods) {
+                    lazy_functions.add(staticMethod);
+                    int constIndex = constant(new FunDef(staticMethod.name, -1, (short)0, (short)0));
+                    functionMapping.put(staticMethod.name, constIndex);
+                }
             }
         }
     }
@@ -300,6 +311,35 @@ public final class Bl0jv2_Compiler {
             if (builtin != null) return builtin;
 
             if (funCall.left instanceof FieldAccessNode fieldAccess) {
+                // ClassName.method(args): resolved entirely at compile
+                // time (the "receiver" is a literal class name, not a
+                // runtime value), so this is just an ordinary call to the
+                // mangled "ClassName.method" function - no LOOKUP_METHOD,
+                // no 'this'
+                if (fieldAccess.target instanceof IdentityNode idNode && classMapping.containsKey(idNode.name)) {
+                    String mangledName = idNode.name + "." + fieldAccess.fieldName;
+                    Integer staticConstIndex = functionMapping.get(mangledName);
+                    if (staticConstIndex == null)
+                        throw new Bl0j_CompilerException(
+                                "class " + idNode.name + " has no static method '" + fieldAccess.fieldName + "'");
+
+                    int[] staticValRegs = new int[funCall.args.size()];
+                    for (int i = 0; i < funCall.args.size(); i++)
+                        staticValRegs[i] = compileInner(funCall.args.get(i));
+
+                    int staticMethodReg = regIndex++;
+                    _emit(OpCodes.LOAD_CONST, staticMethodReg, staticConstIndex);
+
+                    int staticStartReg = regIndex++;
+                    for (var val : staticValRegs) {
+                        _emit(OpCodes.MOV, regIndex, val);
+                        regIndex++;
+                    }
+
+                    _emit(OpCodes.CALL, staticMethodReg, staticStartReg);
+                    return staticStartReg;
+                }
+
                 int objReg = compileInner(fieldAccess.target);
                 return compileMethodCall(objReg, fieldAccess.fieldName, funCall.args);
             }

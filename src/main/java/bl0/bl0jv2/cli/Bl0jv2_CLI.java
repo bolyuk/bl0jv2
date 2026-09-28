@@ -5,7 +5,9 @@ import bl0.bl0jv2.runtime.Bl0jv2_jVM;
 import bl0.bl0jv2.data.C;
 import bl0.bl0jv2.generation.Bl0jv2_Compiler;
 import bl0.bl0jv2.generation.Bl0jv2_Lexer;
+import bl0.bl0jv2.generation.Bl0jv2_Linker;
 import bl0.bl0jv2.generation.Bl0jv2_Parser;
+import bl0.bl0jv2.generation.nodes.PROGRAM_N;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -159,7 +161,11 @@ public class Bl0jv2_CLI {
             timer.mark("parser");
             System.out.println("parser done");
 
-            bytes = compiler.compile(ast);
+            if (!(ast instanceof PROGRAM_N program))
+                throw new IllegalStateException("parser did not produce a program");
+            var linked = Bl0jv2_Linker.resolveImports(program, source);
+
+            bytes = compiler.compile(linked);
             timer.mark("compiler");
             System.out.printf("compiler done: (%d bytes)%n", bytes.length);
 

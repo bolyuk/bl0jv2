@@ -117,6 +117,12 @@ public final class Bl0jv2_Parser {
         if(peek_t() instanceof TryToken) // dont consume!!
             return try_statement(); // self-terminating via block()
 
+        if(consume_if(ImportToken.class)) {
+            String path = consume_or_throw(StringToken.class, "string path expected after 'import'").value;
+            consume_or_throw(SemicolonToken.class, "';' token expected after import path");
+            return new ImportNode(path);
+        }
+
         Node node = assign_evaluation();
         consume_if(SemicolonToken.class);
         return node;
@@ -179,19 +185,28 @@ public final class Bl0jv2_Parser {
 
         List<String> fieldNames = new ArrayList<>();
         List<FunNode> methods = new ArrayList<>();
+        List<FunNode> staticMethods = new ArrayList<>();
 
         while (!consume_if(RBraceToken.class)) {
             if (consume_if(FieldToken.class)) {
                 String fieldName = consume_or_throw(IdentityToken.class, "field name expected after 'field'").name;
                 consume_or_throw(SemicolonToken.class, "';' token expected after field declaration");
                 fieldNames.add(fieldName);
+            } else if (consume_if(StaticToken.class)) {
+                consume_or_throw(DefToken.class, "'def' token expected for static method definition");
+                // a static method is just a regular "ClassName.method"
+                // function with no implicit 'this' - resolved entirely at
+                // compile time via ClassName.method(...), never through
+                // runtime instance dispatch
+                FunNode raw = (FunNode) define_function();
+                staticMethods.add(new FunNode(className + "." + raw.name, raw.args, raw.body));
             } else {
                 consume_or_throw(DefToken.class, "'def' token expected for method definition inside a class body");
 
-                // methods are just functions with 'this' prepended as an
-                // implicit first parameter and a "ClassName.method" name,
-                // so the rest of the compiler treats them exactly like any
-                // other function - no separate method-calling machinery
+                // instance methods are just functions with 'this' prepended
+                // as an implicit first parameter and a "ClassName.method"
+                // name, so the rest of the compiler treats them exactly
+                // like any other function - no separate calling machinery
                 FunNode raw = (FunNode) define_function();
                 List<String> paramsWithThis = new ArrayList<>();
                 paramsWithThis.add("this");
@@ -200,7 +215,7 @@ public final class Bl0jv2_Parser {
             }
         }
 
-        return new ClassNode(className, fieldNames, methods);
+        return new ClassNode(className, fieldNames, methods, staticMethods);
     }
 
     // --- STATEMENTS ---
