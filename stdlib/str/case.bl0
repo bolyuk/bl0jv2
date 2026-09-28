@@ -1,0 +1,39 @@
+// no char-case primitive exists, so casing goes through a lookup against
+// paired alphabet strings instead.
+
+def indexOfChar(s, c) {
+    i = 0;
+    while (i < len(s)) {
+        if (s[i] == c) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+def upper(s) {
+    lowerAlpha = 'abcdefghijklmnopqrstuvwxyz';
+    upperAlpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    result = '';
+    i = 0;
+    while (i < len(s)) {
+        idx = indexOfChar(lowerAlpha, s[i]);
+        if (idx >= 0) { result = result + upperAlpha[idx]; }
+        else { result = result + s[i]; }
+        i = i + 1;
+    }
+    return result;
+}
+
+def lower(s) {
+    lowerAlpha = 'abcdefghijklmnopqrstuvwxyz';
+    upperAlpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    result = '';
+    i = 0;
+    while (i < len(s)) {
+        idx = indexOfChar(upperAlpha, s[i]);
+        if (idx >= 0) { result = result + lowerAlpha[idx]; }
+        else { result = result + s[i]; }
+        i = i + 1;
+    }
+    return result;
+}

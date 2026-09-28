@@ -4,6 +4,7 @@ import bl0.bl0jv2.data.C;
 import bl0.bl0jv2.data.ClassDef;
 import bl0.bl0jv2.data.Constants;
 import bl0.bl0jv2.data.FunDef;
+import bl0.bl0jv2.data.NativeMethods;
 import bl0.bl0jv2.data.OpCodes;
 import bl0.bl0jv2.exceptions.Bl0j_CompilerException;
 import bl0.bl0jv2.generation.nodes.BinaryNode;
@@ -18,9 +19,14 @@ import bl0.bl0jv2.generation.nodes.unary.UnaryNode;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public final class Bl0jv2_Compiler {
     private final List<Byte> bytecode = new ArrayList<>();
@@ -28,60 +34,166 @@ public final class Bl0jv2_Compiler {
     private int regIndex = 0;
     private int regCount = 0;
 
-    private final HashMap<String, Integer> identityMapping = new HashMap<>();
-    private final List<FunNode> lazy_functions = new ArrayList<>();
+    // a function/lambda/method queued for its body to be compiled once all
+    // of its own leading capture names (if any) are already known.
+    // captureCount of the first N declared params are captured cells, not
+    // ordinary caller-supplied arguments; enclosingChain is the lexical
+    // scope chain that was live when a lambda literal was discovered
+    // (null for a regular function/method, which has no enclosing scope
+    // to close over - matches this language's existing "no nested def"
+    // rule).
+    private record PendingFunction(FunNode fun, int captureCount, List<FunctionScope> enclosingChain) {
+        PendingFunction(FunNode fun) {
+            this(fun, 0, null);
+        }
+    }
+
+    private final List<PendingFunction> lazy_functions = new ArrayList<>();
     private final HashMap<String, Integer> functionMapping = new HashMap<>();
 
-    // className -> (its constant-pool index, whether it declares 'init')
+    // one lexical scope per function/lambda currently reachable while
+    // compiling - only ever grown/shrunk at the top of each
+    // compileFunctions() iteration (see there), never nested within a
+    // single recursive compileInner call, since lambda bodies are always
+    // compiled later, as their own separate iteration
+    private static final class FunctionScope {
+        final Map<String, Integer> identityMapping = new HashMap<>();
+        // names captured by some nested lambda, or (for a lambda's own
+        // scope) names that ARE its own captured leading parameters
+        final Set<String> cellNames = new HashSet<>();
+        // exempted from 'boxed's blanket cell treatment - currently just
+        // a try/catch error variable, whose value the VM writes directly
+        // into its register on a caught error, bypassing any cell
+        final Set<String> plainNames = new HashSet<>();
+        // true when this function/lambda's own body contains a lambda
+        // anywhere (at any depth) - decided once, up front, so that a
+        // local later found to be captured never needs its earlier
+        // (already-compiled) accesses retroactively rewritten
+        final boolean boxed;
+
+        FunctionScope(boolean boxed) {
+            this.boxed = boxed;
+        }
+
+        boolean isCell(String name) {
+            if (plainNames.contains(name)) return false;
+            return boxed || cellNames.contains(name);
+        }
+    }
+
+    private final List<FunctionScope> scopeChain = new ArrayList<>();
+
+    private FunctionScope currentScope() {
+        return scopeChain.get(scopeChain.size() - 1);
+    }
+
+    private record VarRef(int reg, boolean isCell) {}
+
+    private int lambdaCounter = 0;
+
+    // className -> (its constant-pool index, whether it declares 'init',
+    // and its static field names in declaration order - resolved to a
+    // compile-time index the same way a local variable resolves to a
+    // register, since 'ClassName.field' is always a literal class name).
+    // constFieldNames never leaves the compiler - const-ness is a
+    // compile-time-only check (see compileAssign), not part of the
+    // compiled ClassDef.
     private final HashMap<String, ClassInfo> classMapping = new HashMap<>();
-    private record ClassInfo(int constIndex, boolean hasInit) {}
+    private record ClassInfo(String name, int constIndex, boolean hasInit, List<String> staticFieldNames, List<String> constFieldNames) {
+        int staticFieldIndex(String fieldName) {
+            return staticFieldNames.indexOf(fieldName);
+        }
+    }
+
+    // which class (if any) owns the method currently being compiled in
+    // compileFunctions(), and whether it's literally that class's own
+    // init() - derived from the mangled "ClassName.methodName" FunNode
+    // name, the same way fetchFunctions() already strips the class-name
+    // prefix. Used only to enforce 'const field' (see compileAssign).
+    private String currentClassName;
+    private boolean currentMethodIsInit;
+
+    // a FieldAccessNode's target is a "ClassName.thing" static access (as
+    // opposed to an instance access) exactly when it's a bare identifier
+    // naming a known class - shared by static method calls and static
+    // field read/write, which all resolve entirely at compile time on that
+    // basis
+    private ClassInfo staticTargetOf(Node target) {
+        if (!(target instanceof IdentityNode idNode))
+            return null;
+        return classMapping.get(idNode.name);
+    }
+
+    // number of TRY_ENTERs currently open (incremented/decremented only
+    // around a try body, not its catch body - see TryNode below)
+    private int tryDepth = 0;
+
+    // innermost loop on top; break/continue patch into whichever loop is
+    // currently being compiled rather than jumping to a fixed address,
+    // since that address isn't known until the loop finishes compiling.
+    // tryDepthAtStart lets break/continue know how many TRY_ENTERs were
+    // opened *inside* this loop (as opposed to enclosing it) and so need a
+    // matching TRY_EXIT before jumping out, the same way RETURN unwinds
+    // handlers registered inside the frame it's leaving.
+    private final ArrayDeque<LoopContext> loopStack = new ArrayDeque<>();
+    private record LoopContext(List<Integer> breakPatches, List<Integer> continuePatches, int tryDepthAtStart) {
+        LoopContext(int tryDepthAtStart) {
+            this(new ArrayList<>(), new ArrayList<>(), tryDepthAtStart);
+        }
+    }
 
     public Bl0jv2_Compiler() {}
-
-    // parsed once per JVM (the prelude source never changes at runtime),
-    // then its top-level statements (currently just function definitions)
-    // are prepended ahead of every user program
-    private static List<Node> preludeNodes;
-
-    private static List<Node> preludeNodes() {
-        if (preludeNodes == null) {
-            var lexer = new Bl0jv2_Lexer();
-            var parser = new Bl0jv2_Parser();
-            Node ast = parser.getAST(lexer.getTokens(Bl0jv2_Prelude.SOURCE));
-            preludeNodes = ((PROGRAM_N) ast).nodes;
-        }
-        return preludeNodes;
-    }
 
     public byte[] compile(Node node) {
         bytecode.clear();
         constants.clear();
-        identityMapping.clear();
         lazy_functions.clear();
         functionMapping.clear();
         classMapping.clear();
+        loopStack.clear();
+        tryDepth = 0;
+        scopeChain.clear();
+        lambdaCounter = 0;
+        currentClassName = null;
+        currentMethodIsInit = false;
         regIndex = 0;
         regCount = 0;
 
         if(!(node instanceof PROGRAM_N program))
             throw new Bl0j_CompilerException("node is not a ProgramNode");
 
-        List<Node> withPrelude = new ArrayList<>(preludeNodes());
-        withPrelude.addAll(program.nodes);
-        PROGRAM_N merged = new PROGRAM_N(withPrelude);
+        // the top-level program is itself a scope, exactly like any
+        // function's body - so a lambda written directly at the top level
+        // has an enclosing scope to close over, same as one inside a
+        // named function
+        scopeChain.add(new FunctionScope(containsLambda(program)));
 
-        fetchFunctions(merged);
-        compileInner(merged);
+        fetchFunctions(program);
+        compileInner(program);
         _emit(OpCodes.HALT);
         compileFunctions();
 
         return build_header_bytecode();
     }
 
+    // -1 = no default (the field starts nil) - both when no initializer
+    // was written at all, and when it was explicitly '= nil': there's no
+    // NIL constant-pool entry type to point at (LOAD_NIL is its own
+    // opcode, not a constant), so the two cases collapse into one sentinel
+    private int fieldDefaultConstIndex(Node defaultNode) {
+        if (defaultNode == null || defaultNode instanceof NilNode)
+            return -1;
+        if (defaultNode instanceof NumberNode n) return constant(n.value);
+        if (defaultNode instanceof FloatNode f) return constant(f.value);
+        if (defaultNode instanceof StringNode s) return constant(s.value);
+        if (defaultNode instanceof BooleanNode b) return constant(b.value);
+        throw new Bl0j_CompilerException("unexpected field default node: " + defaultNode);
+    }
+
     private void fetchFunctions(PROGRAM_N program) {
         for(var node : program.nodes) {
             if(node instanceof FunNode funNode){
-                lazy_functions.add(funNode);
+                lazy_functions.add(new PendingFunction(funNode));
                 int constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
                 functionMapping.put(funNode.name, constIndex);
             }
@@ -97,7 +209,7 @@ public final class Bl0jv2_Compiler {
                 boolean hasInit = false;
 
                 for (FunNode method : classNode.methods) {
-                    lazy_functions.add(method);
+                    lazy_functions.add(new PendingFunction(method));
                     int constIndex = constant(new FunDef(method.name, -1, (short)0, (short)0));
                     functionMapping.put(method.name, constIndex);
 
@@ -107,8 +219,12 @@ public final class Bl0jv2_Compiler {
                     if (plainName.equals("init")) hasInit = true;
                 }
 
-                int classConstIndex = constant(new ClassDef(classNode.name, classNode.fieldNames, methodNames, methodConstIndices));
-                classMapping.put(classNode.name, new ClassInfo(classConstIndex, hasInit));
+                List<Integer> fieldDefaultConstIndices = new ArrayList<>();
+                for (Node defaultNode : classNode.fieldDefaultNodes)
+                    fieldDefaultConstIndices.add(fieldDefaultConstIndex(defaultNode));
+
+                int classConstIndex = constant(new ClassDef(classNode.name, classNode.fieldNames, fieldDefaultConstIndices, methodNames, methodConstIndices, classNode.staticFieldNames.size()));
+                classMapping.put(classNode.name, new ClassInfo(classNode.name, classConstIndex, hasInit, classNode.staticFieldNames, classNode.constFieldNames));
 
                 // static methods are registered as plain functions under
                 // their mangled name and resolved entirely at compile time
@@ -116,7 +232,7 @@ public final class Bl0jv2_Compiler {
                 // instance dispatch, so they're deliberately left out of
                 // the ClassDef's own method table above
                 for (FunNode staticMethod : classNode.staticMethods) {
-                    lazy_functions.add(staticMethod);
+                    lazy_functions.add(new PendingFunction(staticMethod));
                     int constIndex = constant(new FunDef(staticMethod.name, -1, (short)0, (short)0));
                     functionMapping.put(staticMethod.name, constIndex);
                 }
@@ -124,34 +240,81 @@ public final class Bl0jv2_Compiler {
         }
     }
 
+    // index-based (not for-each): compiling one function's body can itself
+    // discover a lambda literal and append a new PendingFunction to
+    // lazy_functions, which this loop must still pick up
     private void compileFunctions(){
         regCount = regIndex;
         int adress;
         int arity;
 
-        for (var fun : lazy_functions) {
-            identityMapping.clear();
+        for (int idx = 0; idx < lazy_functions.size(); idx++) {
+            PendingFunction pending = lazy_functions.get(idx);
+            FunNode fun = pending.fun();
+
+            // a regular function/method has no enclosing scope (this
+            // language has no nested 'def'); a lambda's own chain was
+            // snapshotted at the point it was discovered, inside whatever
+            // was compiling it at the time
+            scopeChain.clear();
+            if (pending.enclosingChain() != null)
+                scopeChain.addAll(pending.enclosingChain());
+            FunctionScope scope = new FunctionScope(containsLambda(fun.body));
+            scopeChain.add(scope);
+
+            // a mangled "ClassName.methodName" name (only ever true for
+            // instance/static methods, never a plain function or a
+            // "<lambda:N>" name - neither contains a class-name prefix
+            // that's actually in classMapping) - used only to enforce
+            // 'const field' (this.field = ... allowed only inside init())
+            int dot = fun.name.indexOf('.');
+            if (dot >= 0 && classMapping.containsKey(fun.name.substring(0, dot))) {
+                currentClassName = fun.name.substring(0, dot);
+                currentMethodIsInit = fun.name.substring(dot + 1).equals("init");
+            } else {
+                currentClassName = null;
+                currentMethodIsInit = false;
+            }
+
             regIndex = 1; // first reg for return value
 
             adress = _instr_len();
             arity = fun.args.args.size();
 
-            for (String arg : fun.args.args)
-                map(arg);
+            for (int i = 0; i < fun.args.args.size(); i++) {
+                String argName = fun.args.args.get(i);
+                boolean isCaptured = i < pending.captureCount();
+                // mark BEFORE resolve() allocates it, so isCell() already
+                // reports the truth about this incoming value
+                if (isCaptured) scope.cellNames.add(argName);
+                VarRef ref = resolve(argName);
 
-            int bodyStart = adress * 3;
+                // a regular param of a scope that boxes everything: the
+                // incoming value is raw (CALL just copies it in), so wrap
+                // it in a fresh cell right away. A captured param's
+                // incoming value is already a cell reference - MAKE_CLOSURE
+                // packed the real cell in, nothing more to do here.
+                if (!isCaptured && ref.isCell()) {
+                    int temp = regIndex++;
+                    _emit(OpCodes.MOV, temp, ref.reg());
+                    _emit(OpCodes.MAKE_CELL, ref.reg());
+                    _emit(OpCodes.CELL_SET, ref.reg(), temp);
+                }
+            }
+
+            int bodyStart = adress * C.INSTR_WIDTH;
             compileInner(fun.body);
             // an empty body emits nothing, so there is no instruction of
-            // *this* function to inspect - peeking at bytecode.size()-3 would
-            // read the tail of whatever was emitted before it (e.g. another
-            // function's own RETURN) and could wrongly skip this function's
-            // implicit return
+            // *this* function to inspect - peeking at the last instruction's
+            // opcode byte would read the tail of whatever was emitted
+            // before it (e.g. another function's own RETURN) and could
+            // wrongly skip this function's implicit return
             boolean bodyEmittedSomething = bytecode.size() > bodyStart;
-            if(!bodyEmittedSomething || bytecode.get(bytecode.size()-3) != OpCodes.RETURN)
+            if(!bodyEmittedSomething || bytecode.get(bytecode.size() - C.INSTR_WIDTH) != OpCodes.RETURN)
                 _emit(OpCodes.RETURN, 0);
 
             int constIndex = functionMapping.get(fun.name);
-            constants.set(constIndex, new FunDef(fun.name, adress,(short) arity ,(short) regIndex));;
+            constants.set(constIndex, new FunDef(fun.name, adress, (short) arity, (short) regIndex));
         }
 
     }
@@ -208,14 +371,17 @@ public final class Bl0jv2_Compiler {
         return result;
     }
 
-    // read(): no argument at all, so there's nothing to (mis)mutate - a
-    // fresh register just receives whatever READ produces
+    // read(): a real native method like print/println/wait, just callable
+    // in expression position - CALL_NATIVE writes its result back into its
+    // operand register, which here is a throwaway nil since read() itself
+    // takes no argument
     private Integer compileRead(FunCall funCall) {
         if (!isBuiltinCall(funCall, "read", 0))
             return null;
 
         int result = regIndex++;
-        _emit(OpCodes.READ, result);
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.READ, result);
         return result;
     }
 
@@ -316,12 +482,13 @@ public final class Bl0jv2_Compiler {
                 // runtime value), so this is just an ordinary call to the
                 // mangled "ClassName.method" function - no LOOKUP_METHOD,
                 // no 'this'
-                if (fieldAccess.target instanceof IdentityNode idNode && classMapping.containsKey(idNode.name)) {
-                    String mangledName = idNode.name + "." + fieldAccess.fieldName;
+                ClassInfo staticTarget = staticTargetOf(fieldAccess.target);
+                if (staticTarget != null) {
+                    String mangledName = staticTarget.name() + "." + fieldAccess.fieldName;
                     Integer staticConstIndex = functionMapping.get(mangledName);
                     if (staticConstIndex == null)
                         throw new Bl0j_CompilerException(
-                                "class " + idNode.name + " has no static method '" + fieldAccess.fieldName + "'");
+                                "class " + staticTarget.name() + " has no static method '" + fieldAccess.fieldName + "'");
 
                     int[] staticValRegs = new int[funCall.args.size()];
                     for (int i = 0; i < funCall.args.size(); i++)
@@ -361,6 +528,49 @@ public final class Bl0jv2_Compiler {
 
             _emit(OpCodes.CALL, method, startReg);
             return startReg;
+        }
+
+        if(node instanceof LambdaNode lambdaNode){
+            // which of the body's free names actually resolve to
+            // something in an enclosing scope decides the real capture
+            // list; anything else just becomes a fresh local once the
+            // body is compiled for real, exactly as it would outside a
+            // lambda
+            FreeVarScan scan = new FreeVarScan();
+            scan.bound.addAll(lambdaNode.params.args);
+            scanFree(lambdaNode.body, scan);
+
+            List<String> captures = new ArrayList<>();
+            for (String name : scan.free)
+                if (existsInScopeChain(name))
+                    captures.add(name);
+
+            // captures become the lambda's own leading (implicit)
+            // parameters, exactly like 'this' for an instance method -
+            // this reuses the ordinary param-mapping prologue in
+            // compileFunctions() with no special casing there
+            String lambdaName = "<lambda:" + (lambdaCounter++) + ">";
+            List<String> allParams = new ArrayList<>(captures);
+            allParams.addAll(lambdaNode.params.args);
+            FunNode lambdaFun = new FunNode(lambdaName, new PARAMS_N(allParams), lambdaNode.body);
+
+            int constIndex = constant(new FunDef(lambdaName, -1, (short) 0, (short) 0));
+            functionMapping.put(lambdaName, constIndex);
+            lazy_functions.add(new PendingFunction(lambdaFun, captures.size(), new ArrayList<>(scopeChain)));
+
+            // MAKE_CLOSURE: FunDef ref, then each captured name's current
+            // (guaranteed cell) register from THIS scope's perspective
+            int closureReg = regIndex++;
+            _emit(OpCodes.LOAD_CONST, closureReg, constIndex);
+
+            for (String captured : captures) {
+                VarRef ref = resolve(captured);
+                _emit(OpCodes.MOV, regIndex, ref.reg());
+                regIndex++;
+            }
+
+            _emit(OpCodes.MAKE_CLOSURE, closureReg, captures.size());
+            return closureReg;
         }
 
         if(node instanceof ArrayLiteralNode arrayLiteral){
@@ -409,9 +619,11 @@ public final class Bl0jv2_Compiler {
 
             _emit(OpCodes.UNPACK, base, arity);
 
+            // targets are always plain identifiers (see
+            // DestructuringAssignNode's own doc comment)
             for (int i = 0; i < arity; i++) {
-                int targetReg = compileInner(destr.targets.get(i));
-                _emit(OpCodes.MOV, targetReg, base + 1 + i);
+                String name = ((IdentityNode) destr.targets.get(i)).name;
+                writeToIdentity(name, base + 1 + i);
             }
 
             return base;
@@ -429,6 +641,21 @@ public final class Bl0jv2_Compiler {
         }
 
         if(node instanceof FieldAccessNode fieldAccess){
+            // ClassName.field: like a static method call, the receiver is a
+            // literal class name, so the field's index is resolved right
+            // here instead of going through runtime name lookup
+            ClassInfo staticTarget = staticTargetOf(fieldAccess.target);
+            if (staticTarget != null) {
+                int fieldIndex = staticTarget.staticFieldIndex(fieldAccess.fieldName);
+                if (fieldIndex < 0)
+                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field '" + fieldAccess.fieldName + "'");
+
+                int classReg = regIndex++;
+                _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());
+                _emit(OpCodes.GET_STATIC_FIELD, classReg, fieldIndex);
+                return classReg;
+            }
+
             int objReg = compileInner(fieldAccess.target);
             int result = regIndex++;
             _emit(OpCodes.MOV, result, objReg);
@@ -468,12 +695,24 @@ public final class Bl0jv2_Compiler {
             int startJump = _instr_len();
             int condReg = compileInner(whileNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) - 1;
+            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
 
+            LoopContext loop = new LoopContext(tryDepth);
+            loopStack.push(loop);
             compileInner(whileNode.body); // -1
+            loopStack.pop();
+
+            // continue lands here and falls straight into the backward
+            // jump below - same effect as looping normally
+            int continueTarget = _instr_len();
+            for (int patch : loop.continuePatches())
+                patchAddr(patch, continueTarget);
 
             _emit(OpCodes.JUMP, startJump);
-            bytecode.set(patchJumpIfNot, _instr_len());
+            int loopEnd = _instr_len();
+            patchAddr(patchJumpIfNot, loopEnd);
+            for (int patch : loop.breakPatches())
+                patchAddr(patch, loopEnd);
 
             return -1;
         }
@@ -487,32 +726,84 @@ public final class Bl0jv2_Compiler {
             int startJump = _instr_len();
             int condReg = compileInner(forNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) - 1;
+            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
 
+            LoopContext loop = new LoopContext(tryDepth);
+            loopStack.push(loop);
             compileInner(forNode.body);
+            loopStack.pop();
+
+            // continue must still run the update before re-checking the
+            // condition, so its target is the update's own start address -
+            // only known now, right before compiling it
+            int continueTarget = _instr_len();
+            for (int patch : loop.continuePatches())
+                patchAddr(patch, continueTarget);
+
             compileInner(forNode.update);
 
             _emit(OpCodes.JUMP, startJump);
-            bytecode.set(patchJumpIfNot, _instr_len());
+            int loopEnd = _instr_len();
+            patchAddr(patchJumpIfNot, loopEnd);
+            for (int patch : loop.breakPatches())
+                patchAddr(patch, loopEnd);
 
             return -1;
         }
 
+        if(node instanceof BreakNode){
+            if (loopStack.isEmpty())
+                throw new Bl0j_CompilerException("'break' outside of a loop");
+            LoopContext loop = loopStack.peek();
+            // unwind any handler(s) opened by a try inside this loop that
+            // the break is jumping past - otherwise they'd stay on the
+            // VM's handlerStack long after this loop is gone, exactly the
+            // stale-handler bug RETURN already has to guard against
+            for (int i = 0; i < tryDepth - loop.tryDepthAtStart(); i++)
+                _emit(OpCodes.TRY_EXIT);
+            int patch = _emit(OpCodes.JUMP) + A_OFFSET; // patched once the loop end is known
+            loop.breakPatches().add(patch);
+            return -1;
+        }
+
+        if(node instanceof ContinueNode){
+            if (loopStack.isEmpty())
+                throw new Bl0j_CompilerException("'continue' outside of a loop");
+            LoopContext loop = loopStack.peek();
+            for (int i = 0; i < tryDepth - loop.tryDepthAtStart(); i++)
+                _emit(OpCodes.TRY_EXIT);
+            int patch = _emit(OpCodes.JUMP) + A_OFFSET;
+            loop.continuePatches().add(patch);
+            return -1;
+        }
+
         if(node instanceof TryNode tryNode){
-            int errReg = map(tryNode.catchVarName);
+            // exempted from cell treatment: the VM writes the caught error
+            // straight into this register on a catch (see TRY_ENTER's
+            // handling), bypassing any cell, so this name must stay a
+            // plain register even in an otherwise-boxed scope. A nested
+            // lambda inside the catch body therefore can't capture it -
+            // narrow, deliberate limitation rather than a silent bug.
+            currentScope().plainNames.add(tryNode.catchVarName);
+            int errReg = resolve(tryNode.catchVarName).reg();
 
             // b (the catch address) is patched once we know where the
             // catch block actually starts, same pattern as if/ternary
-            int patchCatchAddr = _emit(OpCodes.TRY_ENTER, errReg) - 1;
+            int patchCatchAddr = _emit(OpCodes.TRY_ENTER, errReg) + B_OFFSET;
 
+            // only the try body itself runs with this handler active - a
+            // break/continue compiled inside it needs to know to emit a
+            // matching TRY_EXIT before jumping out (see LoopContext)
+            tryDepth++;
             compileInner(tryNode.tryBody);
+            tryDepth--;
             _emit(OpCodes.TRY_EXIT);
 
-            int patchJumpOverCatch = _emit(OpCodes.JUMP) - 2;
-            bytecode.set(patchCatchAddr, _instr_len());
+            int patchJumpOverCatch = _emit(OpCodes.JUMP) + A_OFFSET;
+            patchAddr(patchCatchAddr, _instr_len());
 
             compileInner(tryNode.catchBody);
-            bytecode.set(patchJumpOverCatch, _instr_len());
+            patchAddr(patchJumpOverCatch, _instr_len());
 
             return -1;
         }
@@ -521,18 +812,18 @@ public final class Bl0jv2_Compiler {
             int resultReg = regIndex++;
             int condReg = compileInner(ternaryIfNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) - 1;
+            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
             int bodyReg = compileInner(ternaryIfNode.body);
 
             _emit(OpCodes.MOV, resultReg, bodyReg);
 
-            int patchJump = _emit(OpCodes.JUMP) - 2;
-            bytecode.set(patchJumpIfNot, _instr_len());
+            int patchJump = _emit(OpCodes.JUMP) + A_OFFSET;
+            patchAddr(patchJumpIfNot, _instr_len());
 
             int elseReg = compileInner(ternaryIfNode.elseBody);
 
             _emit(OpCodes.MOV, resultReg, elseReg);
-            bytecode.set(patchJump, _instr_len());
+            patchAddr(patchJump, _instr_len());
 
             return resultReg;
         }
@@ -540,18 +831,18 @@ public final class Bl0jv2_Compiler {
         if (node instanceof IfNode ifNode) {
             int condReg = compileInner(ifNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) - 1;
+            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
             compileInner(ifNode.body);
 
             if (ifNode.elseBody != null) {
 
-                int patchJump = _emit(OpCodes.JUMP) - 2;
-                bytecode.set(patchJumpIfNot, _instr_len());
+                int patchJump = _emit(OpCodes.JUMP) + A_OFFSET;
+                patchAddr(patchJumpIfNot, _instr_len());
 
                 compileInner(ifNode.elseBody);
-                bytecode.set(patchJump, _instr_len());
+                patchAddr(patchJump, _instr_len());
             } else {
-                bytecode.set(patchJumpIfNot, _instr_len());
+                patchAddr(patchJumpIfNot, _instr_len());
             }
 
             return -1;
@@ -567,7 +858,15 @@ public final class Bl0jv2_Compiler {
                     _emit(OpCodes.LOAD_CONST, reg, constIndex);
                     return reg;
                 }
-                return map(n.name);
+
+                VarRef ref = resolve(n.name);
+                if (ref.isCell()) {
+                    int result = regIndex++;
+                    _emit(OpCodes.MOV, result, ref.reg());
+                    _emit(OpCodes.CELL_GET, result);
+                    return result;
+                }
+                return ref.reg();
             }
 
 
@@ -592,45 +891,8 @@ public final class Bl0jv2_Compiler {
 
         if (node instanceof BinaryNode n) {
 
-            if (n.op == Operator.ASSIGNMENT) {
-                if (n.left instanceof IndexNode indexNode) {
-                    int arrReg = compileInner(indexNode.left);
-                    int indexRegRaw = compileInner(indexNode.index);
-                    int valueRegRaw = compileInner(n.right);
-
-                    // index and value need to sit in two consecutive
-                    // registers (mirrors INDEX_GET's own 2-operand limit)
-                    int base = regIndex++;
-                    _emit(OpCodes.MOV, base, indexRegRaw);
-                    _emit(OpCodes.MOV, regIndex, valueRegRaw);
-                    regIndex++;
-
-                    _emit(OpCodes.INDEX_SET, arrReg, base);
-                    return base + 1;
-                }
-
-                if (n.left instanceof FieldAccessNode fieldAccess) {
-                    int objReg = compileInner(fieldAccess.target);
-                    int valueRegRaw = compileInner(n.right);
-
-                    // the field name's const index and the value need to
-                    // sit in two consecutive registers, same trick as
-                    // INDEX_SET above (SET_FIELD only has 2 operand slots
-                    // but needs object + name + value)
-                    int base = regIndex++;
-                    _emit(OpCodes.SET, base, constant(fieldAccess.fieldName));
-                    _emit(OpCodes.MOV, regIndex, valueRegRaw);
-                    regIndex++;
-
-                    _emit(OpCodes.SET_FIELD, objReg, base);
-                    return base + 1;
-                }
-
-                int varReg = compileInner(n.left);
-                int valueReg = compileInner(n.right);
-                _emit(OpCodes.MOV, varReg, valueReg);
-                return varReg;
-            }
+            if (n.op == Operator.ASSIGNMENT)
+                return compileAssign(n.left, n.right);
 
             // short-circuit: unlike every other binary operator here, the
             // right side must not even be evaluated once the left side
@@ -642,11 +904,11 @@ public final class Bl0jv2_Compiler {
                 _emit(OpCodes.MOV, result, leftReg);
 
                 byte shortCircuitJump = n.op == Operator.AND ? OpCodes.JUMP_IF_NOT : OpCodes.JUMP_IF;
-                int patchJump = _emit(shortCircuitJump, result) - 1;
+                int patchJump = _emit(shortCircuitJump, result) + B_OFFSET;
 
                 int rightReg = compileInner(n.right);
                 _emit(OpCodes.MOV, result, rightReg);
-                bytecode.set(patchJump, _instr_len());
+                patchAddr(patchJump, _instr_len());
 
                 return result;
             }
@@ -734,51 +996,294 @@ public final class Bl0jv2_Compiler {
         throw new Bl0j_CompilerException("Unexpected node type: " + node);
     }
 
-    // instructions are fixed-width [opcode, a, b], each a single byte, so
-    // every operand (register index, constant index, jump address, native
-    // id, ...) must fit in 0..255 - silently truncating a larger value would
-    // corrupt registers or jump targets instead of failing loudly
-    private static final int MAX_BYTE_OPERAND = 0xFF;
-
+    // instructions are fixed-width [opcode:1][a:2][b:2] (C.INSTR_WIDTH
+    // bytes), so every operand (register index, constant index, jump
+    // address, native id, ...) must fit in 0..65535 - silently truncating a
+    // larger value would corrupt registers or jump targets instead of
+    // failing loudly
     private void checkOperand(int value, String what) {
-        if (value < 0 || value > MAX_BYTE_OPERAND)
+        if (value < 0 || value > C.MAX_OPERAND)
             throw new Bl0j_CompilerException(
-                    what + " (" + value + ") exceeds the byte-sized bytecode format's limit of " + MAX_BYTE_OPERAND);
+                    what + " (" + value + ") exceeds the bytecode format's per-operand limit of " + C.MAX_OPERAND);
     }
 
-    private void  _emit(int op, int a, int b) {
+    // offsets of each operand's first byte, relative to an instruction's
+    // own start index - used by callers that patch a jump target in after
+    // emitting it (see patchAddr)
+    private static final int A_OFFSET = 1;
+    private static final int B_OFFSET = 3;
+
+    // returns the index of the instruction's own first (opcode) byte, not
+    // the index right after it - callers that need to patch an operand
+    // later add A_OFFSET/B_OFFSET to find it, which is far less error-prone
+    // than counting backward from where bytecode.size() happened to land
+    private int _emit(int op, int a, int b) {
         checkOperand(a, "operand 'a'");
         checkOperand(b, "operand 'b'");
+        int start = bytecode.size();
         bytecode.add((byte) op);
+        bytecode.add((byte) (a >> 8));
         bytecode.add((byte) a);
+        bytecode.add((byte) (b >> 8));
         bytecode.add((byte) b);
+        return start;
     }
 
     private int _emit(int op, int a) {
-        checkOperand(a, "operand 'a'");
-        bytecode.add((byte) op);
-        bytecode.add((byte) a);
-        bytecode.add((byte)0x00);
-        return bytecode.size();
+        return _emit(op, a, 0);
     }
 
     private int _emit(int op) {
-        bytecode.add((byte) op);
-        bytecode.add((byte)0x00);
-        bytecode.add((byte)0x00);
-        return bytecode.size();
+        return _emit(op, 0, 0);
     }
 
-    private byte _instr_len(){
-        if(bytecode.size() % 3 != 0)
+    // writes a 2-byte big-endian address into an already-emitted
+    // instruction's operand slot - used once a forward jump's real target
+    // is known (see WhileNode/ForNode/IfNode/TryNode/break/continue)
+    private void patchAddr(int index, int addr) {
+        checkOperand(addr, "patched address");
+        bytecode.set(index, (byte) (addr >> 8));
+        bytecode.set(index + 1, (byte) addr);
+    }
+
+    private int _instr_len(){
+        if(bytecode.size() % C.INSTR_WIDTH != 0)
             throw new Bl0j_CompilerException("Invalid instruction len: " + bytecode.size());
-        int len = bytecode.size() / 3;
+        int len = bytecode.size() / C.INSTR_WIDTH;
         checkOperand(len, "instruction address");
-        return (byte) len;
+        return len;
     }
 
-    private int map(String name){
-       return identityMapping.computeIfAbsent(name, (ignored) -> regIndex++);
+    // resolves a name against the CURRENT (innermost) scope only - never
+    // searches outward. A lambda body's free variables are already
+    // guaranteed to be among its own declared params (captures prepended
+    // by the LambdaNode handling below, via scanFree's up-front analysis),
+    // so this never needs to reach into an enclosing, already-compiled
+    // scope; a name genuinely not found here is a brand new local.
+    private VarRef resolve(String name) {
+        FunctionScope scope = currentScope();
+        Integer reg = scope.identityMapping.get(name);
+        if (reg != null)
+            return new VarRef(reg, scope.isCell(name));
+
+        int newReg = regIndex++;
+        scope.identityMapping.put(name, newReg);
+        return new VarRef(newReg, scope.isCell(name));
+    }
+
+    // writes valueReg into 'name', handling first-establishment of a cell
+    // (MAKE_CELL) vs. an already-live one (just CELL_SET) - shared by plain
+    // assignment and destructuring targets, which are always bare names
+    private void writeToIdentity(String name, int valueReg) {
+        FunctionScope scope = currentScope();
+        boolean firstBinding = !scope.identityMapping.containsKey(name);
+        VarRef ref = resolve(name);
+
+        if (ref.isCell()) {
+            if (firstBinding) _emit(OpCodes.MAKE_CELL, ref.reg());
+            _emit(OpCodes.CELL_SET, ref.reg(), valueReg);
+            return;
+        }
+        _emit(OpCodes.MOV, ref.reg(), valueReg);
+    }
+
+    // compiles an assignment target=valueNode, preserving each target
+    // kind's original left-to-right evaluation order (target parts before
+    // the value, matching INDEX_SET/SET_FIELD's existing operand packing).
+    // Returns a register holding the assigned value.
+    private int compileAssign(Node target, Node valueNode) {
+        if (target instanceof IndexNode indexNode) {
+            int arrReg = compileInner(indexNode.left);
+            int indexRegRaw = compileInner(indexNode.index);
+            int valueRegRaw = compileInner(valueNode);
+
+            int base = regIndex++;
+            _emit(OpCodes.MOV, base, indexRegRaw);
+            _emit(OpCodes.MOV, regIndex, valueRegRaw);
+            regIndex++;
+
+            _emit(OpCodes.INDEX_SET, arrReg, base);
+            return valueRegRaw;
+        }
+
+        if (target instanceof FieldAccessNode fieldAccess) {
+            ClassInfo staticTarget = staticTargetOf(fieldAccess.target);
+            if (staticTarget != null) {
+                int fieldIndex = staticTarget.staticFieldIndex(fieldAccess.fieldName);
+                if (fieldIndex < 0)
+                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field '" + fieldAccess.fieldName + "'");
+
+                int classReg = regIndex++;
+                _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());
+                int valueRegRaw = compileInner(valueNode);
+
+                int base = regIndex++;
+                _emit(OpCodes.SET, base, fieldIndex);
+                _emit(OpCodes.MOV, regIndex, valueRegRaw);
+                regIndex++;
+
+                _emit(OpCodes.SET_STATIC_FIELD, classReg, base);
+                return valueRegRaw;
+            }
+
+            // const field: writable only via 'this.field = ...' inside the
+            // declaring class's own init() - compile-time-only check, so
+            // 'obj.field = ...' from outside (or from any other method)
+            // is deliberately not caught here; this language has no field
+            // privacy at all, so const is a same-class self-discipline
+            // check, not access control
+            if (fieldAccess.target instanceof IdentityNode idNode && idNode.name.equals("this") && currentClassName != null) {
+                ClassInfo owner = classMapping.get(currentClassName);
+                if (owner != null && owner.constFieldNames().contains(fieldAccess.fieldName) && !currentMethodIsInit)
+                    throw new Bl0j_CompilerException("cannot assign to const field '" + fieldAccess.fieldName + "' outside " + currentClassName + ".init()");
+            }
+
+            int objReg = compileInner(fieldAccess.target);
+            int valueRegRaw = compileInner(valueNode);
+
+            // the field name's const index and the value need to sit in
+            // two consecutive registers, same trick as INDEX_SET above
+            // (SET_FIELD only has 2 operand slots but needs object + name
+            // + value)
+            int base = regIndex++;
+            _emit(OpCodes.SET, base, constant(fieldAccess.fieldName));
+            _emit(OpCodes.MOV, regIndex, valueRegRaw);
+            regIndex++;
+
+            _emit(OpCodes.SET_FIELD, objReg, base);
+            return valueRegRaw;
+        }
+
+        if (target instanceof IdentityNode idNode) {
+            int valueRegRaw = compileInner(valueNode);
+            writeToIdentity(idNode.name, valueRegRaw);
+            return valueRegRaw;
+        }
+
+        throw new Bl0j_CompilerException("cannot assign to " + target);
+    }
+
+    // is 'name' bound anywhere in the enclosing scope chain (excluding
+    // names explicitly exempted from capture, like a try/catch error
+    // variable)? Used to decide, for a lambda literal's free variables,
+    // which ones are real captures versus brand new locals of its own.
+    private boolean existsInScopeChain(String name) {
+        for (int i = scopeChain.size() - 1; i >= 0; i--) {
+            FunctionScope s = scopeChain.get(i);
+            if (s.identityMapping.containsKey(name) && !s.plainNames.contains(name))
+                return true;
+        }
+        return false;
+    }
+
+    // does this subtree contain a LambdaNode anywhere (at any depth,
+    // including inside a nested lambda's own body)? Decides, once and up
+    // front, whether a function/lambda's own locals default to being
+    // cell-backed - cheap presence check, no bound/free bookkeeping needed.
+    private boolean containsLambda(Node node) {
+        if (node == null) return false;
+        return switch (node) {
+            case LambdaNode n -> true;
+            case ReturnNode n -> containsLambda(n.right);
+            case NativeCallNode n -> containsLambda(n.right);
+            case FunCall n -> containsLambda(n.left) || n.args.stream().anyMatch(this::containsLambda);
+            case ArrayLiteralNode n -> n.elements.stream().anyMatch(this::containsLambda);
+            case TupleNode n -> n.values.stream().anyMatch(this::containsLambda);
+            case IndexNode n -> containsLambda(n.left) || containsLambda(n.index);
+            case FieldAccessNode n -> containsLambda(n.target);
+            case NewNode n -> n.args.stream().anyMatch(this::containsLambda);
+            case DestructuringAssignNode n -> containsLambda(n.right) || n.targets.stream().anyMatch(this::containsLambda);
+            case WhileNode n -> containsLambda(n.condition) || containsLambda(n.body);
+            case ForNode n -> containsLambda(n.init) || containsLambda(n.condition) || containsLambda(n.body) || containsLambda(n.update);
+            case TryNode n -> containsLambda(n.tryBody) || containsLambda(n.catchBody);
+            case Ternary_IfNode n -> containsLambda(n.condition) || containsLambda(n.body) || containsLambda(n.elseBody);
+            case IfNode n -> containsLambda(n.condition) || containsLambda(n.body) || (n.elseBody != null && containsLambda(n.elseBody));
+            case BinaryNode n -> containsLambda(n.left) || containsLambda(n.right);
+            case LUnaryNode n -> containsLambda(n.left);
+            case RUnaryNode n -> containsLambda(n.right);
+            case PROGRAM_N n -> n.nodes.stream().anyMatch(this::containsLambda);
+            default -> false; // DataNode leaves, BreakNode, ContinueNode, ...
+        };
+    }
+
+    // tracks, while walking a lambda body, which names are bound (params,
+    // or first touched as an assignment target) versus free (referenced
+    // before/without ever being locally bound) - first-use order matters,
+    // so 'free' is a LinkedHashSet.
+    private static final class FreeVarScan {
+        final Set<String> bound = new HashSet<>();
+        final LinkedHashSet<String> free = new LinkedHashSet<>();
+    }
+
+    // collects a lambda body's free names: identifiers read or assigned
+    // that aren't its own params and aren't themselves assigned earlier in
+    // the SAME body first. Over-approximates only in the direction of
+    // "maybe free" - a name that turns out not to exist in any enclosing
+    // scope just becomes a fresh local once the body is actually compiled,
+    // exactly as it would outside a lambda.
+    private void scanFree(Node node, FreeVarScan s) {
+        if (node == null) return;
+        switch (node) {
+            case IdentityNode n -> { if (!s.bound.contains(n.name)) s.free.add(n.name); }
+            case ReturnNode n -> scanFree(n.right, s);
+            case NativeCallNode n -> scanFree(n.right, s);
+            case FunCall n -> { scanFree(n.left, s); for (var arg : n.args) scanFree(arg, s); }
+            case ArrayLiteralNode n -> { for (var e : n.elements) scanFree(e, s); }
+            case TupleNode n -> { for (var v : n.values) scanFree(v, s); }
+            case IndexNode n -> { scanFree(n.left, s); scanFree(n.index, s); }
+            case FieldAccessNode n -> scanFree(n.target, s); // fieldName isn't an identifier reference
+            case NewNode n -> { for (var a : n.args) scanFree(a, s); }
+            case DestructuringAssignNode n -> {
+                scanFree(n.right, s);
+                for (var t : n.targets) bindAssignTarget(t, s);
+            }
+            case WhileNode n -> { scanFree(n.condition, s); scanFree(n.body, s); }
+            case ForNode n -> { scanFree(n.init, s); scanFree(n.condition, s); scanFree(n.body, s); scanFree(n.update, s); }
+            case TryNode n -> {
+                scanFree(n.tryBody, s);
+                s.bound.add(n.catchVarName);
+                scanFree(n.catchBody, s);
+            }
+            case Ternary_IfNode n -> { scanFree(n.condition, s); scanFree(n.body, s); scanFree(n.elseBody, s); }
+            case IfNode n -> { scanFree(n.condition, s); scanFree(n.body, s); scanFree(n.elseBody, s); }
+            case BinaryNode n -> {
+                if (n.op == Operator.ASSIGNMENT) {
+                    scanFree(n.right, s);
+                    bindAssignTarget(n.left, s);
+                } else {
+                    scanFree(n.left, s);
+                    scanFree(n.right, s);
+                }
+            }
+            case LUnaryNode n -> scanFree(n.left, s);
+            case RUnaryNode n -> scanFree(n.right, s);
+            case PROGRAM_N n -> { for (var st : n.nodes) scanFree(st, s); }
+            case LambdaNode n -> {
+                // a name a NESTED lambda needs (and doesn't declare itself)
+                // is potentially free relative to THIS lambda too, so it
+                // must keep recursing rather than stop at the boundary -
+                // this is what lets a multi-level nested lambda's captures
+                // thread all the way through each enclosing lambda's own
+                // parameter list
+                Set<String> savedBound = new HashSet<>(s.bound);
+                s.bound.addAll(n.params.args);
+                scanFree(n.body, s);
+                s.bound.clear();
+                s.bound.addAll(savedBound);
+            }
+            default -> {} // NumberNode/FloatNode/StringNode/BooleanNode/NilNode, BreakNode, ContinueNode, ...
+        }
+    }
+
+    private void bindAssignTarget(Node target, FreeVarScan s) {
+        if (target instanceof IdentityNode idNode) {
+            s.bound.add(idNode.name);
+        } else if (target instanceof IndexNode idxNode) {
+            scanFree(idxNode.left, s);
+            scanFree(idxNode.index, s);
+        } else if (target instanceof FieldAccessNode faNode) {
+            scanFree(faNode.target, s);
+        }
     }
 
     private int constant(Object value) {
@@ -841,10 +1346,14 @@ public final class Bl0jv2_Compiler {
                         dos.write(nameBytes);
 
                         dos.writeShort(cd.fieldNames().size());
-                        for (String field : cd.fieldNames()) {
-                            byte[] fieldBytes = field.getBytes(StandardCharsets.UTF_8);
+                        for (int i = 0; i < cd.fieldNames().size(); i++) {
+                            byte[] fieldBytes = cd.fieldNames().get(i).getBytes(StandardCharsets.UTF_8);
                             dos.writeShort(fieldBytes.length);
                             dos.write(fieldBytes);
+
+                            int defaultIdx = cd.fieldDefaultConstIndices().get(i);
+                            dos.writeBoolean(defaultIdx >= 0);
+                            if (defaultIdx >= 0) dos.writeShort(defaultIdx);
                         }
 
                         dos.writeShort(cd.methodNames().size());
@@ -854,6 +1363,8 @@ public final class Bl0jv2_Compiler {
                             dos.write(methodBytes);
                             dos.writeShort(cd.methodConstIndices().get(i));
                         }
+
+                        dos.writeShort(cd.staticFieldCount());
                     }
                     default -> throw new  Bl0j_CompilerException("unknown constant type - "+c.getClass().getName());
                 }

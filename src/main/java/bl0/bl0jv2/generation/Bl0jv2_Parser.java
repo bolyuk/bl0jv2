@@ -28,12 +28,18 @@ public final class Bl0jv2_Parser {
     private String sourceCode;
 
     // program        = statement*
-    // statement      =  if | for | try | fun | class | while | sysCall | assign ';'
-    // class          = 'def' 'class' IDENT '{' (field | fun)* '}'             (no inheritance)
-    // field          = 'field' IDENT ';'
+    // statement      =  if | for | try | fun | class | while | break | continue | sysCall | assign ';'
+    // break          = 'break' ';'
+    // continue       = 'continue' ';'
+    // class          = 'def' 'class' IDENT '{' (field | constField | staticField | fun | staticFun)* '}'   (no inheritance)
+    // field          = 'field' IDENT ('=' literal)? ';'
+    // constField     = 'const' 'field' IDENT ('=' literal)? ';'   (this.field = ... only allowed inside init(); compile-time only, see Bl0jv2_Compiler)
+    // literal        = NUMBER | STRING | BOOL | 'nil'          (field initializer only - not full 'data')
+    // staticField    = 'static' 'field' IDENT ';'
+    // staticFun      = 'static' 'def' IDENT funcBody block
     // new            = 'new' IDENT tuple
     // fun            = 'def' 'fun' IDENT funcBody block
-    // lambda         = funcBody  '->' (assign | block)                        TODO (later)
+    // lambda         = '(' (IDENT (',' IDENT)*)? ')' '->' (assign | block)
     // argBody        = '(' (IDENT (',' IDENT)*)? ')'
     // if             = 'if' condition block ('else' block)?
     // while          = 'while' condition block
@@ -60,7 +66,7 @@ public final class Bl0jv2_Parser {
     // index          = '[' assign ']'
     // tuple          = '(' assign (',' assign)* ')'
     // array          = '[' (assign (',' assign)*)? ']'
-    // data           = NUMBER | IDENT | STRING | THIS | tuple | array | new | lambda   TODO (lambda)
+    // data           = NUMBER | IDENT | STRING | THIS | tuple | array | new | lambda
     public Node getAST(List<Token> tokens) {
         this.tokens = tokens;
         this.pos = 0;
@@ -116,6 +122,16 @@ public final class Bl0jv2_Parser {
 
         if(peek_t() instanceof TryToken) // dont consume!!
             return try_statement(); // self-terminating via block()
+
+        if(consume_if(BreakToken.class)) {
+            consume_if(SemicolonToken.class);
+            return new BreakNode();
+        }
+
+        if(consume_if(ContinueToken.class)) {
+            consume_if(SemicolonToken.class);
+            return new ContinueNode();
+        }
 
         if(consume_if(ImportToken.class)) {
             String path = consume_or_throw(StringToken.class, "string path expected after 'import'").value;
@@ -184,22 +200,36 @@ public final class Bl0jv2_Parser {
         consume_or_throw(LBraceToken.class, "'{' token expected to start class body");
 
         List<String> fieldNames = new ArrayList<>();
+        List<Node> fieldDefaultNodes = new ArrayList<>();
+        List<String> constFieldNames = new ArrayList<>();
         List<FunNode> methods = new ArrayList<>();
         List<FunNode> staticMethods = new ArrayList<>();
+        List<String> staticFieldNames = new ArrayList<>();
 
         while (!consume_if(RBraceToken.class)) {
-            if (consume_if(FieldToken.class)) {
-                String fieldName = consume_or_throw(IdentityToken.class, "field name expected after 'field'").name;
-                consume_or_throw(SemicolonToken.class, "';' token expected after field declaration");
-                fieldNames.add(fieldName);
+            if (consume_if(ConstToken.class)) {
+                consume_or_throw(FieldToken.class, "'field' token expected after 'const'");
+                constFieldNames.add(parseFieldDeclaration(fieldNames, fieldDefaultNodes));
+            } else if (consume_if(FieldToken.class)) {
+                parseFieldDeclaration(fieldNames, fieldDefaultNodes);
             } else if (consume_if(StaticToken.class)) {
-                consume_or_throw(DefToken.class, "'def' token expected for static method definition");
-                // a static method is just a regular "ClassName.method"
-                // function with no implicit 'this' - resolved entirely at
-                // compile time via ClassName.method(...), never through
-                // runtime instance dispatch
-                FunNode raw = (FunNode) define_function();
-                staticMethods.add(new FunNode(className + "." + raw.name, raw.args, raw.body));
+                if (consume_if(FieldToken.class)) {
+                    // a static field is shared by the class itself, not by
+                    // each instance - always defaults to nil, same as an
+                    // instance field, since there's no static-initializer
+                    // concept yet; assign it explicitly if you need a value
+                    String fieldName = consume_or_throw(IdentityToken.class, "field name expected after 'static field'").name;
+                    consume_or_throw(SemicolonToken.class, "';' token expected after field declaration");
+                    staticFieldNames.add(fieldName);
+                } else {
+                    consume_or_throw(DefToken.class, "'def' token expected for static method definition");
+                    // a static method is just a regular "ClassName.method"
+                    // function with no implicit 'this' - resolved entirely at
+                    // compile time via ClassName.method(...), never through
+                    // runtime instance dispatch
+                    FunNode raw = (FunNode) define_function();
+                    staticMethods.add(new FunNode(className + "." + raw.name, raw.args, raw.body));
+                }
             } else {
                 consume_or_throw(DefToken.class, "'def' token expected for method definition inside a class body");
 
@@ -215,7 +245,53 @@ public final class Bl0jv2_Parser {
             }
         }
 
-        return new ClassNode(className, fieldNames, methods, staticMethods);
+        return new ClassNode(className, fieldNames, fieldDefaultNodes, constFieldNames, methods, staticMethods, staticFieldNames);
+    }
+
+    // 'field' has already been consumed - parses IDENT ('=' literal)? ';'
+    // and appends to the running field lists; returns the field's name so
+    // the 'const field' branch can also record it separately
+    private String parseFieldDeclaration(List<String> fieldNames, List<Node> fieldDefaultNodes) {
+        String fieldName = consume_or_throw(IdentityToken.class, "field name expected after 'field'").name;
+
+        Node defaultNode = null;
+        if (peek_t() instanceof OpToken op && op.op == Operator.ASSIGNMENT) {
+            pos++;
+            defaultNode = field_default_literal();
+        }
+
+        consume_or_throw(SemicolonToken.class, "';' token expected after field declaration");
+        fieldNames.add(fieldName);
+        fieldDefaultNodes.add(defaultNode);
+        return fieldName;
+    }
+
+    // field x = <literal>;  -  deliberately restricted to a literal leaf,
+    // not the full 'data' production (no identifiers, 'new', tuples/
+    // arrays, or lambdas): this becomes a compile-time default baked into
+    // the class definition, not code that runs at construction time
+    private Node field_default_literal(){
+        Token t = peek_t();
+
+        if (t instanceof NumberToken numberToken) {
+            pos++;
+            if (numberToken.value.indexOf('.') >= 0)
+                return new FloatNode(Double.parseDouble(numberToken.value));
+            return new NumberNode(Integer.parseInt(numberToken.value));
+        }
+        if (t instanceof StringToken stringToken) {
+            pos++;
+            return new StringNode(stringToken.value);
+        }
+        if (t instanceof BooleanToken booleanToken) {
+            pos++;
+            return new BooleanNode(booleanToken.value);
+        }
+        if (consume_if(NilToken.class))
+            return new NilNode();
+
+        gen_exception(t, "field initializer must be a literal (number, string, bool, or nil) - got " + t);
+        return null;
     }
 
     // --- STATEMENTS ---
@@ -374,6 +450,41 @@ public final class Bl0jv2_Parser {
             targets.add(new IdentityNode(name));
 
         return new DestructuringAssignNode(targets, right);
+    }
+
+    // (params) -> expr | (params) -> { block }. Only a raw lookahead scan
+    // over '(' (IDENT (',' IDENT)*)? ')' '->' decides this is a lambda,
+    // same speculative-and-non-consuming approach as destructuring
+    // assignment - a plain parenthesized expression or tuple like
+    // '(a, b)' is never misread as one, since the token right after ')'
+    // there isn't '->'.
+    private Node try_parse_lambda(){
+        int i = 1; // tokens[pos] is the '(' itself, not yet consumed
+        List<String> params = new ArrayList<>();
+
+        if (!(peek_safe(i) instanceof RParenToken)) {
+            if (!(peek_safe(i) instanceof IdentityToken first))
+                return null;
+            params.add(first.name);
+            i++;
+
+            while (peek_safe(i) instanceof SeparatorToken && peek_safe(i + 1) instanceof IdentityToken idTok) {
+                params.add(idTok.name);
+                i += 2;
+            }
+        }
+
+        if (!(peek_safe(i) instanceof RParenToken))
+            return null;
+        i++;
+
+        if (!(peek_safe(i) instanceof ArrowToken))
+            return null;
+
+        pos += i + 1; // consume everything through '->'
+
+        Node body = peek_t() instanceof LBraceToken ? block() : new ReturnNode(assign_evaluation());
+        return new LambdaNode(new PARAMS_N(params), body);
     }
 
     private Node ternary_evaluation(){
@@ -645,6 +756,10 @@ public final class Bl0jv2_Parser {
         }
 
         if (t instanceof LParenToken) {
+            Node lambda = try_parse_lambda();
+            if (lambda != null)
+                return lambda;
+
             pos++;
             Node first = assign_evaluation();
 

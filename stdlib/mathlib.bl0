@@ -1,0 +1,48 @@
+// math helpers. import 'stdlib/mathlib.bl0'; (path relative to the
+// importing file) - not auto-included like the prelude, so a program that
+// never imports this pays nothing towards the 255-instruction ceiling.
+
+def abs(x) {
+    if (x < 0) { return -x; }
+    return x;
+}
+
+def min(a, b) {
+    if (a < b) { return a; }
+    return b;
+}
+
+def max(a, b) {
+    if (a > b) { return a; }
+    return b;
+}
+
+// int() truncates toward zero, not toward negative infinity, so floor(-2.5)
+// needs an explicit correction that int(-2.5) alone doesn't give
+def floor(x) {
+    truncated = int(x);
+    if (float(truncated) > x) { return truncated - 1; }
+    return truncated;
+}
+
+def ceil(x) {
+    truncated = int(x);
+    if (float(truncated) < x) { return truncated + 1; }
+    return truncated;
+}
+
+def round(x) {
+    return floor(x + 0.5);
+}
+
+// there's no dedicated sqrt opcode - ** already promotes to Math.pow for a
+// fractional exponent, so x ** 0.5 covers it without needing one
+def sqrt(x) {
+    return x ** 0.5;
+}
+
+def clamp(x, lo, hi) {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}

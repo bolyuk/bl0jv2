@@ -1,6 +1,8 @@
 package bl0.bl0jv2;
 
+import bl0.bl0jv2.exceptions.Bl0j_CompilerException;
 import bl0.bl0jv2.exceptions.Bl0j_ParserException;
+import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 import org.junit.jupiter.api.Test;
 
 import static bl0.bl0jv2.Bl0jv2_TestRunner.run;
@@ -93,5 +95,68 @@ class Bl0jv2_ControlFlowTest {
     @Test
     void forLoopParensAreMandatory() {
         assertThrows(Bl0j_ParserException.class, () -> run("for i = 0; i < 3; i = i + 1 {}"));
+    }
+
+    // --- break / continue ---
+
+    @Test
+    void breakStopsAWhileLoopEarly() {
+        assertEquals("5", run("i = 0; while (i < 10) { i = i + 1; if (i == 5) { break; } } print i;"));
+    }
+
+    @Test
+    void continueSkipsTheRestOfAWhileIteration() {
+        assertEquals("12", run(
+                "i = 0; sum = 0; " +
+                "while (i < 5) { i = i + 1; if (i == 3) { continue; } sum = sum + i; } " +
+                "print sum;"));
+    }
+
+    @Test
+    void breakStopsAForLoopEarly() {
+        assertEquals("10", run(
+                "sum = 0; for (i = 0; i < 10; i = i + 1) { if (i == 5) { break; } sum = sum + i; } " +
+                "print sum;"));
+    }
+
+    @Test
+    void continueSkipsTheRestOfAForIterationButStillRunsTheUpdate() {
+        assertEquals("8", run(
+                "sum = 0; for (i = 0; i < 5; i = i + 1) { if (i == 2) { continue; } sum = sum + i; } " +
+                "print sum;"));
+    }
+
+    @Test
+    void breakOnlyExitsTheInnermostLoop() {
+        assertEquals("20", run(
+                "found = -1; " +
+                "for (i = 0; i < 3; i = i + 1) { " +
+                "  for (j = 0; j < 3; j = j + 1) { if (j == 1) { break; } found = i * 10 + j; } " +
+                "} " +
+                "print found;"));
+    }
+
+    @Test
+    void breakOutsideOfALoopIsACompileTimeError() {
+        assertThrows(Bl0j_CompilerException.class, () -> run("break;"));
+    }
+
+    @Test
+    void continueOutsideOfALoopIsACompileTimeError() {
+        assertThrows(Bl0j_CompilerException.class, () -> run("continue;"));
+    }
+
+    // break jumping out of a try body used to skip TRY_EXIT, leaving the
+    // handler on the VM's handlerStack forever - a later, unrelated error
+    // outside the loop would then be wrongly caught by that stale handler
+    // instead of propagating
+    @Test
+    void breakOutOfATryBlockDoesNotLeaveAStaleHandler() {
+        assertThrows(Bl0j_VM_Exception.class, () -> run(
+                "i = 0; " +
+                "while (i < 10) { " +
+                "  try { i = i + 1; if (i == 3) { break; } } catch (e) { print 'unexpected'; } " +
+                "} " +
+                "x = 1 / 0;"));
     }
 }

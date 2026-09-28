@@ -6,4 +6,5 @@ public final class NativeMethods {
     public static final byte PRINT = 0x00;
     public static final byte PRINT_LN = 0x01;
     public static final byte WAIT = 0x02;
+    public static final byte READ = 0x03;
 }

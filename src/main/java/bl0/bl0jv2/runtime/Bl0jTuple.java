@@ -2,8 +2,6 @@ package bl0.bl0jv2.runtime;
 
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
-import java.util.Arrays;
-
 /**
  * An immutable, fixed-length value, Python-tuple style. Unlike
  * {@link Bl0jArray} (compared by reference, like every other mutable

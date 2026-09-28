@@ -2,7 +2,6 @@ package bl0.bl0jv2.generation.nodes.statements;
 
 import bl0.bl0jv2.generation.nodes.Node;
 
-import java.util.ArrayList;
 import java.util.List;
 
 public class FunCall extends Node {

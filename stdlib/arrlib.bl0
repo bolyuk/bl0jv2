@@ -1,0 +1,87 @@
+// array helpers. import 'stdlib/arrlib.bl0'; (path relative to the
+// importing file).
+//
+// map/filter/reduce take a plain function name (bl0jv2 has no lambdas yet,
+// but a named function is already a first-class value - f(x) works whether
+// f came from a parameter, a variable, or a literal function name).
+
+def contains(arr, x) {
+    i = 0;
+    while (i < len(arr)) {
+        if (arr[i] == x) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+def indexOf(arr, x) {
+    i = 0;
+    while (i < len(arr)) {
+        if (arr[i] == x) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+def reverse(arr) {
+    result = [];
+    i = len(arr) - 1;
+    while (i >= 0) {
+        push(result, arr[i]);
+        i = i - 1;
+    }
+    return result;
+}
+
+// half-open range [from, to), same convention as every other index range
+// in the language
+def slice(arr, from, to) {
+    result = [];
+    i = from;
+    while (i < to) {
+        push(result, arr[i]);
+        i = i + 1;
+    }
+    return result;
+}
+
+def join(arr, sep) {
+    result = '';
+    i = 0;
+    while (i < len(arr)) {
+        if (i > 0) { result = result + sep; }
+        result = result + str(arr[i]);
+        i = i + 1;
+    }
+    return result;
+}
+
+def map(arr, f) {
+    result = [];
+    i = 0;
+    while (i < len(arr)) {
+        push(result, f(arr[i]));
+        i = i + 1;
+    }
+    return result;
+}
+
+def filter(arr, f) {
+    result = [];
+    i = 0;
+    while (i < len(arr)) {
+        if (f(arr[i])) { push(result, arr[i]); }
+        i = i + 1;
+    }
+    return result;
+}
+
+def reduce(arr, f, initial) {
+    acc = initial;
+    i = 0;
+    while (i < len(arr)) {
+        acc = f(acc, arr[i]);
+        i = i + 1;
+    }
+    return acc;
+}

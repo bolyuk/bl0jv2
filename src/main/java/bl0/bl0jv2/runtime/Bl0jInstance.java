@@ -11,12 +11,15 @@ import java.util.Arrays;
 public final class Bl0jInstance {
     public final Bl0jClass cls;
     private final long[] fields;
-    private final Bl0jv2_jVM owner;
+    // package-private: Bl0jv2_jVM.valuesEqual needs it to box 'this' before
+    // calling a user-defined equals()
+    final Bl0jv2_jVM owner;
 
     Bl0jInstance(Bl0jClass cls, Bl0jv2_jVM owner) {
         this.cls = cls;
-        this.fields = new long[cls.fieldCount()];
-        Arrays.fill(fields, NanBox.NIL);
+        // each field starts at its class's literal default (nil where none
+        // was declared) - init() is free to overwrite any of them
+        this.fields = Arrays.copyOf(cls.fieldDefaults(), cls.fieldCount());
         this.owner = owner;
     }
 
@@ -30,6 +33,11 @@ public final class Bl0jInstance {
 
     @Override
     public String toString() {
+        // a class that declares its own toString() gets to decide its own
+        // display form instead of the default field dump
+        if (cls.hasMethod("toString"))
+            return String.valueOf(owner.invoke(cls.method("toString"), owner.box(this)));
+
         StringBuilder sb = new StringBuilder(cls.name).append("{");
         var names = cls.fieldNames();
         for (int i = 0; i < names.size(); i++) {

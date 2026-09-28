@@ -3,6 +3,7 @@ package bl0.bl0jv2.runtime;
 import bl0.bl0jv2.data.FunDef;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -10,16 +11,40 @@ import java.util.Map;
  * A class's fixed shape: its declared field names (in allocation order) and
  * its methods. Shared by every instance of the class - instances only hold
  * their own field values plus a reference to this.
+ *
+ * <p>Also holds the class's own static field storage: unlike instance
+ * fields, a static field's index is resolved entirely at compile time
+ * (the access is always through a literal class name), so this is a plain
+ * long[] indexed directly - no name lookup at runtime.
  */
 public final class Bl0jClass {
     public final String name;
     private final List<String> fieldNames;
+    private final long[] fieldDefaults;
     private final Map<String, FunDef> methods;
+    private final long[] staticFields;
 
-    Bl0jClass(String name, List<String> fieldNames, Map<String, FunDef> methods) {
+    Bl0jClass(String name, List<String> fieldNames, long[] fieldDefaults, Map<String, FunDef> methods, int staticFieldCount) {
         this.name = name;
         this.fieldNames = fieldNames;
+        this.fieldDefaults = fieldDefaults;
         this.methods = methods;
+        this.staticFields = new long[staticFieldCount];
+        Arrays.fill(staticFields, NanBox.NIL);
+    }
+
+    // a fresh instance's own fields start as a copy of this - see
+    // Bl0jInstance's constructor
+    public long[] fieldDefaults() {
+        return fieldDefaults;
+    }
+
+    public long getStaticFieldRaw(int index) {
+        return staticFields[index];
+    }
+
+    public void setStaticFieldRaw(int index, long value) {
+        staticFields[index] = value;
     }
 
     public int fieldCount() {

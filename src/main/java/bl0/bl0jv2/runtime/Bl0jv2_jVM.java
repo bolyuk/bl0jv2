@@ -3,15 +3,13 @@ package bl0.bl0jv2.runtime;
 import bl0.bl0jv2.data.*;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.Writer;
+import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,7 +25,10 @@ public final class Bl0jv2_jVM {
         public String toString() { return "nil"; }
     };
 
+    private static final long[] EMPTY_CELLS = new long[0];
+
     private Writer out;
+    private BufferedReader stdin;
 
     private final OperatorTable addTable = new OperatorTable();
     private final OperatorTable subTable = new OperatorTable();
@@ -50,8 +51,6 @@ public final class Bl0jv2_jVM {
 
     // active try/catch handlers, innermost on top
     private final ArrayDeque<Handler> handlerStack = new ArrayDeque<>();
-
-    private BufferedReader stdin;
 
     private long[] consts;
     private byte[] instructions;
@@ -87,6 +86,10 @@ public final class Bl0jv2_jVM {
             }
             return 0;
         });
+        // ignores its (dummy nil) input; CALL_NATIVE below writes whatever
+        // this returns back into a register, which is what actually makes
+        // read() usable as an expression
+        nativeMethods.put(NativeMethods.READ, (ignored) -> readLine());
 
         addTable.add(Integer.class, Integer.class, (a, b) -> (int)a + (int)b);
         addTable.add(String.class,  String.class,  (a, b) -> a.toString() + b.toString());
@@ -181,12 +184,18 @@ public final class Bl0jv2_jVM {
     }
 
     // numeric equality crosses int/double (5 == 5.0 is true), matching the
-    // implicit promotion already used by +, -, *, /, %, ** ; everything else
-    // falls back to plain value equality. Package-private so Bl0jTuple can
-    // reuse it for its own (recursive) content equality.
+    // implicit promotion already used by +, -, *, /, %, ** ; a class that
+    // declares its own 'equals' method gets to decide for its own
+    // instances; everything else falls back to plain value equality.
+    // Package-private so Bl0jTuple can reuse it for its own (recursive)
+    // content equality.
     static boolean valuesEqual(Object left, Object right) {
         if (isNumeric(left) && isNumeric(right))
             return toDouble(left) == toDouble(right);
+        if (left instanceof Bl0jInstance li && li.cls.hasMethod("equals")) {
+            Object result = li.owner.invoke(li.cls.method("equals"), li.owner.box(li), li.owner.box(right));
+            return result instanceof Boolean b && b;
+        }
         return Objects.equals(left, right);
     }
 
@@ -263,6 +272,7 @@ public final class Bl0jv2_jVM {
         if (value instanceof Bl0jTuple) return "tuple";
         if (value instanceof Bl0jError) return "err";
         if (value instanceof FunDef) return "function";
+        if (value instanceof Bl0jClosure) return "function";
         if (value instanceof Bl0jClass) return "class";
         if (value instanceof Bl0jInstance instance) return instance.cls.name;
         if (value == NIL_OBJECT) return "nil";
@@ -309,7 +319,7 @@ public final class Bl0jv2_jVM {
                 case Constants.BOOL -> consts[i] = NanBox.ofBoolean(bytes.get() != 0);
                 case Constants.FUN -> consts[i] = boxRef(new FunDef(
                         get_str(bytes),
-                        bytes.getInt() & 0xFF,
+                        bytes.getInt() & 0xFFFF,
                         bytes.getShort(),
                         bytes.getShort()));
                 case Constants.BYTE -> consts[i] = NanBox.ofInt(bytes.get());
@@ -321,7 +331,13 @@ public final class Bl0jv2_jVM {
                     String className = get_str(bytes);
                     int fieldCount = bytes.getShort() & 0xFFFF;
                     List<String> fieldNames = new ArrayList<>();
-                    for (int f = 0; f < fieldCount; f++) fieldNames.add(get_str(bytes));
+                    long[] fieldDefaults = new long[fieldCount];
+                    Arrays.fill(fieldDefaults, NanBox.NIL);
+                    for (int f = 0; f < fieldCount; f++) {
+                        fieldNames.add(get_str(bytes));
+                        if (bytes.get() != 0) // hasDefault
+                            fieldDefaults[f] = consts[bytes.getShort() & 0xFFFF];
+                    }
                     int methodCount = bytes.getShort() & 0xFFFF;
                     Map<String, FunDef> methods = new HashMap<>();
                     for (int m = 0; m < methodCount; m++) {
@@ -329,7 +345,8 @@ public final class Bl0jv2_jVM {
                         int methodConstIdx = bytes.getShort() & 0xFFFF;
                         methods.put(methodName, (FunDef) unbox(consts[methodConstIdx]));
                     }
-                    consts[i] = boxRef(new Bl0jClass(className, fieldNames, methods));
+                    int staticFieldCount = bytes.getShort() & 0xFFFF;
+                    consts[i] = boxRef(new Bl0jClass(className, fieldNames, fieldDefaults, methods, staticFieldCount));
                 }
                 default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
             }
@@ -337,7 +354,7 @@ public final class Bl0jv2_jVM {
 
         int remaining = bytes.remaining();
 
-        if(remaining % 3 != 0)
+        if(remaining % C.INSTR_WIDTH != 0)
             throw new Bl0j_VM_Exception("wrong amount of instructions");
 
         instructions = new byte[remaining];
@@ -349,14 +366,45 @@ public final class Bl0jv2_jVM {
     }
 
     public void run_instructions() throws IOException {
+        execute(0, -1);
+    }
 
-            for(int addr = 0; addr < instructions.length;){
+    // synchronously calls a bl0jv2 function from native Java code (used by
+    // a class's own toString()/equals() override, which native code paths
+    // like Bl0jInstance.toString() or the == operator can't otherwise
+    // reach) and returns its unboxed result. Pushes one frame and runs
+    // until exactly that frame returns, rather than until HALT.
+    Object invoke(FunDef fun, long... args) {
+        int stopAtDepth = callStack.size();
+        long[] regs = new long[fun.regs()];
+        for (int i = 0; i < args.length; i++)
+            regs[i + 1] = args[i];
+        // resultReg=0 is safe to reuse here: every frame's own reg[0] is
+        // never assigned to a real variable by the compiler (regIndex
+        // starts at 1), so it's free scratch space for exactly this
+        callStack.push(new Frame(regs, -1, 0));
+        try {
+            execute(fun.address() * C.INSTR_WIDTH, stopAtDepth);
+        } catch (IOException e) {
+            throw new Bl0j_VM_Exception("invoke failed: " + e.getMessage());
+        }
+        return unbox(callStack.peek().regs()[0]);
+    }
+
+    // startAddr/stopAtDepth let invoke() re-enter this same loop for a
+    // synchronous nested call: run_instructions() calls this with
+    // stopAtDepth=-1 (run to HALT); invoke() passes the depth its own
+    // pushed frame will pop back to, so execution returns to Java once
+    // that one frame's RETURN runs, without disturbing the enclosing call.
+    private void execute(int startAddr, int stopAtDepth) throws IOException {
+
+            for(int addr = startAddr; addr < instructions.length;){
                 try {
                 byte opcode = (byte) (instructions[addr] & 0xFF);
 
-                int a = instructions[addr+1] & 0xFF;
-                int b = instructions[addr+2] & 0xFF;
-                addr += 3;
+                int a = ((instructions[addr+1] & 0xFF) << 8) | (instructions[addr+2] & 0xFF);
+                int b = ((instructions[addr+3] & 0xFF) << 8) | (instructions[addr+4] & 0xFF);
+                addr += C.INSTR_WIDTH;
 
                 long[] reg = callStack.peek().regs();
 
@@ -378,9 +426,9 @@ public final class Bl0jv2_jVM {
                     case OpCodes.LR_SHR -> reg[a] = box(shrTable.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.BIT_NOT -> reg[a] = NanBox.ofInt(bitNot(unbox(reg[a])));
 
-                    case OpCodes.JUMP -> addr = a * 3;
-                    case OpCodes.JUMP_IF -> { if ( (boolean) unbox(reg[a])) addr = b * 3; }
-                    case OpCodes.JUMP_IF_NOT -> { if (!(boolean) unbox(reg[a])) addr = b * 3; }
+                    case OpCodes.JUMP -> addr = a * C.INSTR_WIDTH;
+                    case OpCodes.JUMP_IF -> { if ( (boolean) unbox(reg[a])) addr = b * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT -> { if (!(boolean) unbox(reg[a])) addr = b * C.INSTR_WIDTH; }
 
                     case OpCodes.EQ -> reg[a] = NanBox.ofBoolean(valuesEqual(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.LESS -> reg[a] = NanBox.ofBoolean(toDouble(unbox(reg[a])) < toDouble(unbox(reg[b])));
@@ -391,17 +439,40 @@ public final class Bl0jv2_jVM {
                     case OpCodes.SET -> reg[a] = NanBox.ofInt(b);
                     case OpCodes.NEG  -> reg[a] = box(negate(unbox(reg[a])));
 
+                    // reg[a] holds either a plain FunDef (an ordinary named
+                    // function, called directly) or a Bl0jClosure (a
+                    // lambda) - a closure's own captured cells are
+                    // prepended before the caller's own args, landing in
+                    // exactly the leading parameter slots the compiler
+                    // reserved for them (see Bl0jv2_Compiler's LambdaNode
+                    // handling)
                     case OpCodes.CALL -> {
-                        FunDef fun = (FunDef) unbox(reg[a]);
-                        long[] args = new long[fun.arity()];
+                        Object callee = unbox(reg[a]);
+                        FunDef fun;
+                        long[] capturedCells;
+                        if (callee instanceof Bl0jClosure closure) {
+                            fun = closure.funDef();
+                            capturedCells = closure.capturedCells();
+                        } else {
+                            fun = (FunDef) callee;
+                            capturedCells = EMPTY_CELLS;
+                        }
 
-                        for (int i = 0; i < fun.arity(); i++)
-                            args[i] = reg[b + 1 + i];
+                        long[] args = new long[fun.arity()];
+                        System.arraycopy(capturedCells, 0, args, 0, capturedCells.length);
+                        for (int i = capturedCells.length; i < fun.arity(); i++)
+                            args[i] = reg[b + 1 + (i - capturedCells.length)];
 
                         gen_frame(fun, args, addr, b);
-                        addr = fun.address() * 3;
+                        addr = fun.address() * C.INSTR_WIDTH;
                     }
 
+                    // writes the native function's own return value back
+                    // into its operand register - harmless for print/
+                    // println/wait (their status code lands somewhere
+                    // nothing reads, since they're only ever used as bare
+                    // statements), and what makes a value-producing native
+                    // like read() usable as an expression at all
                     case OpCodes.CALL_NATIVE -> {
                         var nativeFun = nativeMethods.get((byte) a);
                         if (nativeFun == null)
@@ -409,6 +480,7 @@ public final class Bl0jv2_jVM {
                         Object result = nativeFun.apply(unbox(reg[b]));
                         if (result instanceof Integer code && code == -1)
                             throw new Bl0j_VM_Exception("native method " + a + " returned error");
+                        reg[b] = result == null ? NanBox.NIL : box(result);
                     }
 
                     // elements sit at reg[a+1 .. a+b], mirroring CALL's
@@ -474,14 +546,9 @@ public final class Bl0jv2_jVM {
                     case OpCodes.TO_STRING -> reg[a] = boxRef(unbox(reg[a]).toString());
                     case OpCodes.TYPE_OF -> reg[a] = boxRef(typeName(unbox(reg[a])));
 
-                    case OpCodes.READ -> {
-                        String line = readLine();
-                        reg[a] = line == null ? NanBox.NIL : boxRef(line);
-                    }
-
                     // b holds the catch block's address (patched by the
                     // compiler), a the register the caught error lands in
-                    case OpCodes.TRY_ENTER -> handlerStack.push(new Handler(b * 3, a, callStack.size()));
+                    case OpCodes.TRY_ENTER -> handlerStack.push(new Handler(b * C.INSTR_WIDTH, a, callStack.size()));
                     case OpCodes.TRY_EXIT -> handlerStack.pop();
                     case OpCodes.MAKE_ERR -> reg[a] = boxRef(new Bl0jError(String.valueOf(unbox(reg[a]))));
 
@@ -502,11 +569,44 @@ public final class Bl0jv2_jVM {
                         instance.setFieldRaw(name, reg[b + 1]);
                     }
 
+                    // b is the static field's own index, resolved at
+                    // compile time - class-ref in, value out
+                    case OpCodes.GET_STATIC_FIELD -> {
+                        Bl0jClass cls = (Bl0jClass) unbox(reg[a]);
+                        reg[a] = cls.getStaticFieldRaw(b);
+                    }
+
+                    // the field index and the value sit at reg[b] and
+                    // reg[b+1], same packing trick as SET_FIELD
+                    case OpCodes.SET_STATIC_FIELD -> {
+                        Bl0jClass cls = (Bl0jClass) unbox(reg[a]);
+                        int fieldIndex = (int) unbox(reg[b]);
+                        cls.setStaticFieldRaw(fieldIndex, reg[b + 1]);
+                    }
+
                     // mutates a's own slot: object in, resolved FunDef out
                     case OpCodes.LOOKUP_METHOD -> {
                         Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
                         String name = (String) unbox(consts[b]);
                         reg[a] = box(instance.cls.method(name));
+                    }
+
+                    case OpCodes.MAKE_CELL -> reg[a] = boxRef(new Bl0jCell());
+
+                    // mutates a's own slot: cell-ref in, its current value out
+                    case OpCodes.CELL_GET -> reg[a] = ((Bl0jCell) unbox(reg[a])).value;
+
+                    case OpCodes.CELL_SET -> ((Bl0jCell) unbox(reg[a])).value = reg[b];
+
+                    // a's own slot already holds the lambda's FunDef (from
+                    // a prior LOAD_CONST); the captured cells' own
+                    // references sit at reg[a+1..a+b], mirroring
+                    // NEW_ARRAY/NEW_TUPLE's convention
+                    case OpCodes.MAKE_CLOSURE -> {
+                        FunDef fun = (FunDef) unbox(reg[a]);
+                        long[] cells = new long[b];
+                        for (int i = 0; i < b; i++) cells[i] = reg[a + 1 + i];
+                        reg[a] = boxRef(new Bl0jClosure(fun, cells));
                     }
 
                     case OpCodes.RETURN -> {
@@ -522,6 +622,13 @@ public final class Bl0jv2_jVM {
                         Frame frame = callStack.pop();
                         callStack.peek().regs[frame.resultReg]  = reg[a];
                         addr = frame.addressToReturn;
+
+                        // the frame invoke() pushed has just returned -
+                        // hand control back to the native Java caller
+                        // instead of continuing to interpret whatever
+                        // bytecode happens to sit at addressToReturn
+                        if (stopAtDepth >= 0 && callStack.size() == stopAtDepth)
+                            return;
                     }
                     case OpCodes.HALT -> {
                         return;
@@ -529,7 +636,16 @@ public final class Bl0jv2_jVM {
                     default -> throw new Bl0j_VM_Exception("Unknown opcode: " + opcode);
                 }
                 } catch (Exception e) {
-                    if (!handlerStack.isEmpty()) {
+                    // a handler registered before this execute() call
+                    // started (i.e. outside a nested invoke()) doesn't
+                    // belong to it - let the exception propagate to the
+                    // enclosing execute() call instead of catching it here
+                    // with a callStack/handlerStack state this call isn't
+                    // entitled to unwind
+                    boolean handlerIsInThisCall = !handlerStack.isEmpty()
+                            && (stopAtDepth < 0 || handlerStack.peek().callStackDepth() > stopAtDepth);
+
+                    if (handlerIsInThisCall) {
                         Handler handler = handlerStack.pop();
                         while (callStack.size() > handler.callStackDepth())
                             callStack.pop();
@@ -538,7 +654,7 @@ public final class Bl0jv2_jVM {
                         addr = handler.catchAddr();
                         continue;
                     }
-                    throw new Bl0j_VM_Exception("Exception on address: "+addr/3+" - "+ e);
+                    throw new Bl0j_VM_Exception("Exception on address: "+addr/C.INSTR_WIDTH+" - "+ e);
                 }
             }
     }
@@ -575,7 +691,9 @@ public final class Bl0jv2_jVM {
         };
     }
 
-    private long box(Object value) {
+    // package-private so Bl0jv2_jVM.valuesEqual can box an instance/its
+    // 'other' operand before passing them into a user-defined equals()
+    long box(Object value) {
         if (value instanceof Integer i) return NanBox.ofInt(i);
         if (value instanceof Boolean b) return NanBox.ofBoolean(b);
         // Double.doubleToLongBits (not the raw variant) canonicalizes every

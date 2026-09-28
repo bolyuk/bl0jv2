@@ -1,8 +1,8 @@
 package bl0.bl0jv2;
 
+import bl0.bl0jv2.data.C;
 import bl0.bl0jv2.data.Constants;
 import bl0.bl0jv2.data.OpCodes;
-import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
 import java.io.IOException;
 import java.io.Writer;
@@ -45,7 +45,7 @@ public final class Bl0jv2_Utils {
                     int len = s.length();
 
                     writer.append(
-                            String.format("[%d] FUN = %s ad:%d ag:%d rg:%d (%d bytes)%n", i, s, bytes.getInt() & 0xFF, bytes.getShort(), bytes.getShort(), len+10));
+                            String.format("[%d] FUN = %s ad:%d ag:%d rg:%d (%d bytes)%n", i, s, bytes.getInt() & 0xFFFF, bytes.getShort(), bytes.getShort(), len+10));
                 }
                 case Constants.BYTE -> {
                     writer.append(String.format("[%d] BYTE   = 0x%02X %n", i, bytes.get()));
@@ -53,6 +53,36 @@ public final class Bl0jv2_Utils {
 
                 case Constants.FLOAT ->
                     writer.append(String.format("[%d] FLOAT  = %s  (8 bytes)%n", i, bytes.getDouble()));
+
+                // mirrors Bl0jv2_Compiler's ClassDef serialization exactly -
+                // every field must be consumed in order or every constant
+                // after this one desyncs
+                case Constants.CLASS -> {
+                    String className = get_str(bytes);
+
+                    int fieldCount = bytes.getShort() & 0xFFFF;
+                    StringBuilder fields = new StringBuilder();
+                    for (int f = 0; f < fieldCount; f++) {
+                        if (f > 0) fields.append(", ");
+                        fields.append(get_str(bytes));
+                        if (bytes.get() != 0) // hasDefault
+                            fields.append("=const[").append(bytes.getShort() & 0xFFFF).append("]");
+                    }
+
+                    int methodCount = bytes.getShort() & 0xFFFF;
+                    StringBuilder methods = new StringBuilder();
+                    for (int m = 0; m < methodCount; m++) {
+                        if (m > 0) methods.append(", ");
+                        String methodName = get_str(bytes);
+                        int methodConstIdx = bytes.getShort() & 0xFFFF;
+                        methods.append(methodName).append("->const[").append(methodConstIdx).append("]");
+                    }
+
+                    int staticFieldCount = bytes.getShort() & 0xFFFF;
+
+                    writer.append(String.format("[%d] CLASS  = %s  fields=[%s]  methods=[%s]  staticFields=%d%n",
+                            i, className, fields, methods, staticFieldCount));
+                }
 
                 default -> throw new RuntimeException("Unknown const type: " + type);
             }
@@ -66,11 +96,11 @@ public final class Bl0jv2_Utils {
 
         byte[] remaining = new byte[remaining_len];
         bytes.get(remaining);
-        while (p + 2 <= remaining.length) {
+        while (p + C.INSTR_WIDTH - 1 <= remaining.length) {
 
             byte op = (byte) (remaining[p++] & 0xFF);
-            int a  = remaining[p++] & 0xFF;
-            int b  = remaining[p++] & 0xFF;
+            int a = ((remaining[p++] & 0xFF) << 8) | (remaining[p++] & 0xFF);
+            int b = ((remaining[p++] & 0xFF) << 8) | (remaining[p++] & 0xFF);
 
             writer.append(String.format("%04d: 0x%02X ", instr, op));
 
@@ -119,7 +149,6 @@ public final class Bl0jv2_Utils {
                 case OpCodes.TO_FLOAT -> writer.append(String.format("TO_FLOAT r%d = float(r%d)", a, a));
                 case OpCodes.TO_STRING -> writer.append(String.format("TO_STRING r%d = str(r%d)", a, a));
                 case OpCodes.TYPE_OF -> writer.append(String.format("TYPE_OF r%d = typeOf(r%d)", a, a));
-                case OpCodes.READ -> writer.append(String.format("READ r%d = read()", a));
                 case OpCodes.TRY_ENTER -> writer.append(String.format("TRY_ENTER catch@%d errReg=r%d", b, a));
                 case OpCodes.TRY_EXIT -> writer.append("TRY_EXIT");
                 case OpCodes.MAKE_ERR -> writer.append(String.format("MAKE_ERR r%d = err(r%d)", a, a));
@@ -127,6 +156,12 @@ public final class Bl0jv2_Utils {
                 case OpCodes.GET_FIELD -> writer.append(String.format("GET_FIELD r%d = r%d.field[const %d]", a, a, b));
                 case OpCodes.SET_FIELD -> writer.append(String.format("SET_FIELD r%d.field[const r%d] = r%d", a, b, b + 1));
                 case OpCodes.LOOKUP_METHOD -> writer.append(String.format("LOOKUP_METHOD r%d = r%d.method[const %d]", a, a, b));
+                case OpCodes.GET_STATIC_FIELD -> writer.append(String.format("GET_STATIC_FIELD r%d = r%d.staticField[%d]", a, a, b));
+                case OpCodes.SET_STATIC_FIELD -> writer.append(String.format("SET_STATIC_FIELD r%d.staticField[r%d] = r%d", a, b, b + 1));
+                case OpCodes.MAKE_CELL -> writer.append(String.format("MAKE_CELL r%d", a));
+                case OpCodes.CELL_GET -> writer.append(String.format("CELL_GET r%d = *r%d", a, a));
+                case OpCodes.CELL_SET -> writer.append(String.format("CELL_SET *r%d = r%d", a, b));
+                case OpCodes.MAKE_CLOSURE -> writer.append(String.format("MAKE_CLOSURE r%d fun=r%d captures@%d count=%d", a, a, a + 1, b));
                 default -> writer.append("UNKNOWN");
             }
             writer.append(String.format("%n"));

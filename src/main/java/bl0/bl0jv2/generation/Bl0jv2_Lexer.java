@@ -110,7 +110,10 @@ public final class Bl0jv2_Lexer {
                     tokens.add(new OpToken(line, line_index, peekIfNext('+') ? Operator.PLUS_PLUS : Operator.PLUS));
                     break;
                 case '-':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('-') ? Operator.MINUS_MINUS : Operator.MINUS));
+                    if (peekIfNext('>'))
+                        tokens.add(new ArrowToken(line, line_index));
+                    else
+                        tokens.add(new OpToken(line, line_index, peekIfNext('-') ? Operator.MINUS_MINUS : Operator.MINUS));
                     break;
                 case '*':
                     tokens.add(new OpToken(line, line_index, peekIfNext('*') ? Operator.STAR_STAR : Operator.STAR));
@@ -189,6 +192,8 @@ public final class Bl0jv2_Lexer {
                             case "else" -> tokens.add(new ElseToken(line, start_index));
                             case "while" -> tokens.add(new WhileToken(line, start_index));
                             case "for" -> tokens.add(new ForToken(line, start_index));
+                            case "break" -> tokens.add(new BreakToken(line, start_index));
+                            case "continue" -> tokens.add(new ContinueToken(line, start_index));
                             case "try" -> tokens.add(new TryToken(line, start_index));
                             case "catch" -> tokens.add(new CatchToken(line, start_index));
 
@@ -200,6 +205,7 @@ public final class Bl0jv2_Lexer {
                             case "new" -> tokens.add(new NewToken(line, start_index));
                             case "this" -> tokens.add(new ThisToken(line, start_index));
                             case "static" -> tokens.add(new StaticToken(line, start_index));
+                            case "const" -> tokens.add(new ConstToken(line, start_index));
                             case "import" -> tokens.add(new ImportToken(line, start_index));
 
                             case "println" -> tokens.add(new NativeCallToken(line, start_index, NativeMethods.PRINT_LN));

@@ -56,7 +56,9 @@ class Bl0jv2_ConversionTest {
         assertEquals("bool", run("print typeOf(true);"));
         assertEquals("nil", run("print typeOf(nil);"));
         assertEquals("array", run("print typeOf([1]);"));
-        assertEquals("char", run("print typeOf(toArr('a')[0]);"));
+        // direct string indexing already yields a char - no need for toArr
+        // here (it's a stdlib.bl0 function now, not a language builtin)
+        assertEquals("char", run("print typeOf('a'[0]);"));
     }
 
     @Test

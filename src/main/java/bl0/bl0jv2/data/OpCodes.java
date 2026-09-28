@@ -59,7 +59,8 @@ public final class OpCodes {
     public static final byte NEW_TUPLE = 0x26;
     public static final byte UNPACK = 0x27;
 
-    public static final byte READ = 0x28;
+    // 0x28 (formerly READ) is free - read() now goes through CALL_NATIVE
+    // like every other native method, instead of its own dedicated opcode
 
     public static final byte TRY_ENTER = 0x29;
     public static final byte TRY_EXIT = 0x2A;
@@ -69,6 +70,24 @@ public final class OpCodes {
     public static final byte GET_FIELD = 0x2D;
     public static final byte SET_FIELD = 0x2E;
     public static final byte LOOKUP_METHOD = 0x2F;
+
+    // unlike GET_FIELD/SET_FIELD, b is not a constant-pool name index but
+    // the static field's own index directly - always resolved at compile
+    // time, since 'ClassName.field' is always a literal class name
+    public static final byte GET_STATIC_FIELD = 0x30;
+    public static final byte SET_STATIC_FIELD = 0x31;
+
+    // a captured (closed-over) local lives in a heap cell instead of a
+    // plain register, so the enclosing function and any closure that
+    // captures it always see the same value
+    public static final byte MAKE_CELL = 0x32;
+    public static final byte CELL_GET = 0x33;
+    public static final byte CELL_SET = 0x34;
+
+    // a's own FunDef in, closure object out; elements at a+1..a+b are the
+    // captured cells' own references, same consecutive-registers
+    // convention as NEW_ARRAY/NEW_TUPLE
+    public static final byte MAKE_CLOSURE = 0x35;
 
     public static final byte HALT = (byte) 0xFF;
 }
