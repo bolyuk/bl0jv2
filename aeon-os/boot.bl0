@@ -1,0 +1,202 @@
+// aeon-os: a tiny kernel written entirely in bl0jv2. Nothing outside this
+// file participates - the "OS" is just the Bl0jv2_jVM running boot.bl0c,
+// same as any other compiled program. Everything a kernel needs (device
+// access, interrupts, fault isolation, scheduling) is expressed in
+// bl0jv2 itself, using primitives the VM already exposes: reserve/peek/poke
+// for hardware, registerHandler/raiseInterrupt/disable/enableInterrupts for
+// interrupts, try/catch for recoverable faults, panic() for fatal ones.
+
+import '../stdlib/mathlib.bl0';
+
+// --- MMIO: a fixed "system info" register block, reserved so the general
+// allocator can never hand these addresses out for anything else ---
+SYS_INFO_BASE = 0;
+SYS_INFO_SIZE = 8;
+SYS_MAGIC = 0xAE07C0DE;
+
+reserve(SYS_INFO_BASE, SYS_INFO_SIZE);
+poke32(SYS_INFO_BASE, SYS_MAGIC);
+
+println '=== aeon-os booting ===';
+println 'sys info magic: ' + toHex(peek32(SYS_INFO_BASE));
+println 'uptime: ' + ticks() + 'ms';
+
+// --- kernel-global state lives on a class's static fields, not in a
+// top-level variable - a plain 'def' function has its own private frame and
+// can't see or mutate a top-level variable by name (only a lambda captures
+// enclosing scope); a static field is resolved by explicit qualified name
+// at compile time instead, so any function can reach it regardless of
+// nesting ---
+def class Kernel {
+    static field uptimeTicks;
+    static field faultCount;
+}
+
+Kernel.uptimeTicks = 0;
+Kernel.faultCount = 0;
+
+// --- interrupt vectors ---
+VECTOR_TIMER = 1;
+
+def onTimerTick(vector) {
+    Kernel.uptimeTicks = Kernel.uptimeTicks + 1;
+}
+
+registerHandler(onTimerTick, VECTOR_TIMER, 100);
+
+// --- scheduler: a run queue of Task instances, picked by priority. Tasks
+// can't be suspended mid-body (bl0jv2 has no coroutines/continuations, only
+// def/lambda functions), so this is a run-to-completion cooperative
+// scheduler, not preemptive multitasking - each task runs once per pick,
+// end to end, then either re-queues itself or is done ---
+def class Task {
+    field name;
+    field priority;
+    field remainingRuns;
+    field fn; // a plain function value - see Scheduler.runOnce() for why
+              // it's called through a local var rather than task.fn()
+
+    def init(name, priority, remainingRuns, fn) {
+        this.name = name;
+        this.priority = priority;
+        this.remainingRuns = remainingRuns;
+        this.fn = fn;
+    }
+}
+
+def class Scheduler {
+    field tasks;
+
+    def init() {
+        this.tasks = [];
+    }
+
+    def addTask(t) {
+        push(this.tasks, t);
+    }
+
+    // index of the highest-priority ready task, or -1 if the queue is empty
+    def pickIndex() {
+        // bl0jv2 has no bare 'return;' - every return needs a value
+        if (len(this.tasks) == 0) { return -1; }
+        best = 0;
+        i = 1;
+        while (i < len(this.tasks)) {
+            if (this.tasks[i].priority > this.tasks[best].priority) {
+                best = i;
+            }
+            i = i + 1;
+        }
+        return best;
+    }
+
+    // removes index i by swapping with the last element and popping -
+    // Bl0jArray only exposes push/pop, no arbitrary-index removal, and
+    // scheduling order doesn't depend on queue order anyway (pickIndex()
+    // rescans by priority every time)
+    def removeAt(i) {
+        last = len(this.tasks) - 1;
+        if (i != last) {
+            this.tasks[i] = this.tasks[last];
+        }
+        pop(this.tasks);
+    }
+
+    // runs the highest-priority task once. Mutating the run queue
+    // (removeAt/re-adding) is wrapped in disable/enableInterrupts: the
+    // timer handler only touches Kernel.uptimeTicks today, but a real
+    // kernel's timer handler often *does* touch the run queue directly
+    // (e.g. waking a sleeping task) - without masking, a tick landing
+    // mid-mutation here would see a half-updated queue
+    def runOnce() {
+        idx = this.pickIndex();
+        if (idx < 0) { return nil; }
+
+        t = this.tasks[idx];
+
+        disableInterrupts();
+        this.removeAt(idx);
+        enableInterrupts();
+
+        fn = t.fn;
+        try {
+            fn();
+        } catch (e) {
+            println '  [fault] task ' + t.name + ' failed: ' + e;
+            Kernel.faultCount = Kernel.faultCount + 1;
+        }
+
+        t.remainingRuns = t.remainingRuns - 1;
+        if (t.remainingRuns > 0) {
+            disableInterrupts();
+            this.addTask(t);
+            enableInterrupts();
+        }
+    }
+}
+
+// --- demo tasks ---
+def taskLogger() {
+    println '  [logger] uptime=' + Kernel.uptimeTicks + 'ms';
+}
+
+// allocates a scratch packet buffer from the general raw-memory allocator
+// (distinct from the reserved MMIO region above - this space is freely
+// handed out and reclaimed), writes/reads through it, then frees it -
+// exercises alloc/poke/peek/free rather than reserve/peek/poke
+def taskNetwork() {
+    buf = alloc(4);
+    poke32(buf, 0xC0FFEE);
+    println '  [network] received packet: ' + toHex(peek32(buf));
+    free(buf);
+}
+
+// deliberately faulty, to prove one task's error doesn't take down the
+// scheduler or the rest of the system - only panic() does that
+def taskFaulty() {
+    x = 1 / 0;
+}
+
+println '';
+println '--- starting scheduler ---';
+sched = new Scheduler();
+sched.addTask(new Task('logger', 5, 2, taskLogger));
+sched.addTask(new Task('network', 20, 2, taskNetwork));
+sched.addTask(new Task('faulty', 10, 1, taskFaulty));
+
+// named 'cycle', not 'round' - 'round' collides with mathlib.bl0's own
+// round() (imported above) and a variable can't currently shadow a
+// function name (see the aeon-os build notes)
+cycle = 0;
+while (cycle < 5) {
+    raiseInterrupt(VECTOR_TIMER);
+    sched.runOnce();
+    cycle = cycle + 1;
+}
+
+println '';
+println 'kernel uptime ticks: ' + Kernel.uptimeTicks;
+println 'faults isolated by the scheduler: ' + Kernel.faultCount;
+
+// --- shutdown: a routine integrity check, and what happens when one
+// fails. A task error is recoverable (see taskFaulty above, caught and
+// logged without disturbing anything else); a corrupted system info block
+// is not - this is what panic() is for, and unlike a task error it is
+// never caught, even by a try/catch wrapped directly around it ---
+println '';
+println '--- final integrity check ---';
+
+// simulate memory corruption: something scribbled over the reserved
+// system info block
+poke32(SYS_INFO_BASE, 0);
+
+try {
+    if (peek32(SYS_INFO_BASE) != SYS_MAGIC) {
+        panic('system info block corrupted - expected magic ' + toHex(SYS_MAGIC) +
+              ', found ' + toHex(peek32(SYS_INFO_BASE)));
+    }
+    println '=== aeon-os halted cleanly ===';
+} catch (e) {
+    // never reached - panic() bypasses this catch entirely
+    println 'recovered from: ' + e;
+}

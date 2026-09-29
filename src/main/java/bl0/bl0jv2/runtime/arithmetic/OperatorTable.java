@@ -1,4 +1,4 @@
-package bl0.bl0jv2.runtime;
+package bl0.bl0jv2.runtime.arithmetic;
 
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 

@@ -1,6 +1,7 @@
 // math helpers. import 'stdlib/mathlib.bl0'; (path relative to the
 // importing file) - not auto-included like the prelude, so a program that
-// never imports this pays nothing towards the 255-instruction ceiling.
+// never imports this pays nothing towards the per-program instruction
+// ceiling.
 
 def abs(x) {
     if (x < 0) { return -x; }
@@ -45,4 +46,27 @@ def clamp(x, lo, hi) {
     if (x < lo) { return lo; }
     if (x > hi) { return hi; }
     return x;
+}
+
+// prints an int's actual 32-bit bit pattern in hex, not its decimal value
+// with a '-' sign - matters for debugging raw addresses/registers, where
+// -1 should read as 'ffffffff', not '-1'. Uses >>> (not >>) for exactly
+// that reason: peeling nibbles off a negative int with a sign-extending
+// shift would never terminate.
+def toHex(n) {
+    digits = '0123456789abcdef';
+
+    if (n == 0) { return '0'; }
+
+    result = '';
+    remaining = n;
+    count = 0;
+    while (remaining != 0 && count < 8) {
+        nibble = remaining & 15;
+        result = digits[nibble] + result;
+        remaining = remaining >>> 4;
+        count = count + 1;
+    }
+
+    return result;
 }

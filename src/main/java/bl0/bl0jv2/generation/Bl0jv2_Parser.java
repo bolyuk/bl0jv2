@@ -58,7 +58,7 @@ public final class Bl0jv2_Parser {
     // bitAnd         = equality ('&' equality)*
     // equality       = comparison (('==' | '!=') comparison)*
     // comparison     = shift (('<' | '>' | '<=' | '>=') shift)*
-    // shift          = addSub (('<<' | '>>') addSub)*
+    // shift          = addSub (('<<' | '>>' | '>>>') addSub)*
     // addSub         = multiplyDivide (('+' | '-') multiplyDivide)*
     // multiplyDivide = unary (('*' | '/' | '%' | '**') unary)*
     // unary          = ('-' | '!' | '~') unary | postfix
@@ -67,6 +67,7 @@ public final class Bl0jv2_Parser {
     // tuple          = '(' assign (',' assign)* ')'
     // array          = '[' (assign (',' assign)*)? ']'
     // data           = NUMBER | IDENT | STRING | THIS | tuple | array | new | lambda
+    // NUMBER         = decimal digits (with an optional '.' for a float) | '0x' hex digits | '0b' binary digits
     public Node getAST(List<Token> tokens) {
         this.tokens = tokens;
         this.pos = 0;
@@ -275,9 +276,7 @@ public final class Bl0jv2_Parser {
 
         if (t instanceof NumberToken numberToken) {
             pos++;
-            if (numberToken.value.indexOf('.') >= 0)
-                return new FloatNode(Double.parseDouble(numberToken.value));
-            return new NumberNode(Integer.parseInt(numberToken.value));
+            return parseNumberLiteral(numberToken.value);
         }
         if (t instanceof StringToken stringToken) {
             pos++;
@@ -292,6 +291,27 @@ public final class Bl0jv2_Parser {
 
         gen_exception(t, "field initializer must be a literal (number, string, bool, or nil) - got " + t);
         return null;
+    }
+
+    // shared by data() and field_default_literal() - a NumberToken's own
+    // text carries an optional '0x'/'0b' prefix (see Bl0jv2_Lexer), parsed
+    // with parseUnsignedInt rather than parseInt so a full-width bit
+    // pattern like 0xFFFFFFFF is a valid literal even though it's negative
+    // as a signed int - the whole reason to write one in hex in the first
+    // place (kernel-style code: masks, addresses)
+    private Node parseNumberLiteral(String value) {
+        if (value.indexOf('.') >= 0)
+            return new FloatNode(Double.parseDouble(value));
+
+        if (value.length() > 2 && value.charAt(0) == '0') {
+            char prefix = value.charAt(1);
+            if (prefix == 'x' || prefix == 'X')
+                return new NumberNode(Integer.parseUnsignedInt(value.substring(2), 16));
+            if (prefix == 'b' || prefix == 'B')
+                return new NumberNode(Integer.parseUnsignedInt(value.substring(2), 2));
+        }
+
+        return new NumberNode(Integer.parseInt(value));
     }
 
     // --- STATEMENTS ---
@@ -610,7 +630,7 @@ public final class Bl0jv2_Parser {
 
         while (pos < tokens.size()) {
             Token t = peek_t();
-            if (t instanceof OpToken op && (op.op == Operator.SHIFT_LEFT || op.op == Operator.SHIFT_RIGHT)) {
+            if (t instanceof OpToken op && (op.op == Operator.SHIFT_LEFT || op.op == Operator.SHIFT_RIGHT || op.op == Operator.SHIFT_RIGHT_UNSIGNED)) {
                 consume_t();
                 left = new BinaryNode(left, op.op, add_sub_evaluation());
             } else break;
@@ -735,9 +755,7 @@ public final class Bl0jv2_Parser {
 
         if (t instanceof NumberToken numberToken) {
             pos++;
-            if (numberToken.value.indexOf('.') >= 0)
-                return new FloatNode(Double.parseDouble(numberToken.value));
-            return new NumberNode(Integer.parseInt(numberToken.value));
+            return parseNumberLiteral(numberToken.value);
         }
 
         if(t instanceof StringToken stringToken) {

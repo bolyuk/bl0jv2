@@ -27,6 +27,7 @@ public enum Operator {
     BIT_NOT,        // ~
     SHIFT_LEFT,     // <<
     SHIFT_RIGHT,    // >>
+    SHIFT_RIGHT_UNSIGNED, // >>> (logical, not sign-extending - matters for hardware-register-style bit work)
 
     AND,            // && (short-circuit)
     OR,             // || (short-circuit)

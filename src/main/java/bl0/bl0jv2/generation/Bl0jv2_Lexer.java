@@ -69,7 +69,7 @@ public final class Bl0jv2_Lexer {
                     break;
                 case '>':
                     if (peekIfNext('>'))
-                        tokens.add(new OpToken(line, line_index, Operator.SHIFT_RIGHT));
+                        tokens.add(new OpToken(line, line_index, peekIfNext('>') ? Operator.SHIFT_RIGHT_UNSIGNED : Operator.SHIFT_RIGHT));
                     else
                         tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.GREATER_EQUALS : Operator.GREATER));
                     break;
@@ -155,6 +155,29 @@ public final class Bl0jv2_Lexer {
                         if (!closed)
                             gen_exception(line, start_index, "unterminated string literal");
                         tokens.add(new StringToken(line, start_index, buf.toString()));
+                    } else if (isNumber(c) && c == '0' && pos + 1 < len && isRadixPrefix(lookAhead())) {
+                        // 0x.../0b... - kept with their prefix in the
+                        // token's own text; the parser picks the radix off
+                        // it (see Bl0jv2_Parser.data()). Parsed with
+                        // Integer.parseUnsignedInt there, not parseInt, so
+                        // a full-width bit pattern like 0xFFFFFFFF is a
+                        // valid literal even though it's negative as a
+                        // signed int - the whole point of writing one in
+                        // hex instead of decimal in the first place
+                        int start_index = line_index;
+                        boolean isHex = lookAhead() == 'x' || lookAhead() == 'X';
+                        String buf = "" + c + peek(); // consume the prefix char
+                        line_index++;
+
+                        while (pos + 1 < len && (isHex ? isHexDigit(lookAhead()) : isBinaryDigit(lookAhead()))) {
+                            buf += peek();
+                            line_index++;
+                        }
+
+                        if (buf.length() == 2)
+                            gen_exception(line, start_index, "expected digits after '" + buf + "'");
+
+                        tokens.add(new NumberToken(line, start_index, buf));
                     } else if (isNumber(c)) {
                         int start_index = line_index;
                         String buf = "" + c;
@@ -286,6 +309,18 @@ public final class Bl0jv2_Lexer {
 
     private boolean isNumber(char c) {
         return Character.isDigit(c);
+    }
+
+    private boolean isRadixPrefix(char c) {
+        return c == 'x' || c == 'X' || c == 'b' || c == 'B';
+    }
+
+    private boolean isHexDigit(char c) {
+        return isNumber(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    }
+
+    private boolean isBinaryDigit(char c) {
+        return c == '0' || c == '1';
     }
 
     private boolean isIdentity(char c) {

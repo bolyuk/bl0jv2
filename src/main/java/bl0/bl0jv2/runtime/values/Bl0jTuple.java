@@ -1,6 +1,7 @@
-package bl0.bl0jv2.runtime;
+package bl0.bl0jv2.runtime.values;
 
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
+import bl0.bl0jv2.runtime.Bl0jv2_jVM;
 
 /**
  * An immutable, fixed-length value, Python-tuple style. Unlike
@@ -12,7 +13,7 @@ public final class Bl0jTuple {
     private final long[] elements;
     private final Bl0jv2_jVM owner;
 
-    Bl0jTuple(long[] elements, Bl0jv2_jVM owner) {
+    public Bl0jTuple(long[] elements, Bl0jv2_jVM owner) {
         this.elements = elements;
         this.owner = owner;
     }

@@ -1,4 +1,4 @@
-package bl0.bl0jv2.runtime;
+package bl0.bl0jv2.runtime.values;
 
 import bl0.bl0jv2.data.FunDef;
 
@@ -13,7 +13,7 @@ public final class Bl0jClosure {
     private final FunDef funDef;
     private final long[] capturedCells;
 
-    Bl0jClosure(FunDef funDef, long[] capturedCells) {
+    public Bl0jClosure(FunDef funDef, long[] capturedCells) {
         this.funDef = funDef;
         this.capturedCells = capturedCells;
     }

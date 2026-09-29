@@ -49,6 +49,21 @@ class Bl0jv2_StdlibTest {
                 "print sqrt(4.0) + '|' + clamp(5, 1, 10) + '|' + clamp(-3, 1, 10) + '|' + clamp(30, 1, 10);"));
     }
 
+    @Test
+    void mathToHex(@TempDir Path dir) throws IOException {
+        assertEquals("ff|10|0", run(dir, "mathlib.bl0",
+                "print toHex(255) + '|' + toHex(16) + '|' + toHex(0);"));
+    }
+
+    // the actual point of toHex: a negative int's real 32-bit bit pattern,
+    // not '-' plus a decimal magnitude - matches what 0xDEADBEEF itself
+    // parses to (see Bl0jv2_ArithmeticTest's hex-literal tests)
+    @Test
+    void mathToHexOfANegativeIntShowsTheFullBitPatternNotASignedDecimal(@TempDir Path dir) throws IOException {
+        assertEquals("ffffffff|deadbeef", run(dir, "mathlib.bl0",
+                "print toHex(-1) + '|' + toHex(0xDEADBEEF);"));
+    }
+
     // --- arrlib ---
 
     @Test
@@ -80,11 +95,12 @@ class Bl0jv2_StdlibTest {
 
     // --- str/* ---
     // split further than mathlib/arrlib: a single strlib.bl0 with all of
-    // these functions together overflows the 255-instruction ceiling on
-    // its own (verified - it landed around 260 just from the function
-    // bodies, before any user code), so each piece is its own file and
-    // shares small dependencies (substr.bl0) via 'import' instead of
-    // duplicating them.
+    // these functions together overflowed the per-program instruction
+    // ceiling on its own when it was still 255 (it landed around 260 just
+    // from the function bodies, before any user code), so each piece is
+    // its own file and shares small dependencies (substr.bl0) via 'import'
+    // instead of duplicating them. The ceiling has since been widened, but
+    // the split is still a reasonable way to keep each import cheap.
 
     @Test
     void strTrim(@TempDir Path dir) throws IOException {

@@ -385,6 +385,255 @@ public final class Bl0jv2_Compiler {
         return result;
     }
 
+    // ticks(): a real value-producing native like read() - milliseconds
+    // elapsed since the program started, see Bl0jv2_jVM's own TICKS
+    // registration for why this is wall-clock, not instruction-count, based
+    private Integer compileTicks(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "ticks", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.TICKS, result);
+        return result;
+    }
+
+    // coreCount()/currentCore(): same zero-arg, value-producing shape as
+    // ticks()/read()
+    private Integer compileCoreCount(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "coreCount", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.CORE_COUNT, result);
+        return result;
+    }
+
+    private Integer compileCurrentCore(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "currentCore", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.CURRENT_CORE, result);
+        return result;
+    }
+
+    // newMutex(): zero-arg, value-producing, same shape as ticks()/read()
+    private Integer compileNewMutex(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "newMutex", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.NEW_MUTEX, result);
+        return result;
+    }
+
+    // lock(m)/unlock(m): 1-arg side-effecting native calls, exact same
+    // shape (and the same clobber-avoidance MOV) as compileRaiseInterrupt -
+    // without it, lock(myMutex) where myMutex is a plain variable would
+    // silently clobber it to nil after the call
+    private Integer compileLockMutex(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "lock", 1))
+            return null;
+
+        int mRegRaw = compileInner(funCall.args.get(0));
+        int mReg = regIndex++;
+        _emit(OpCodes.MOV, mReg, mRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.LOCK_MUTEX, mReg);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    private Integer compileUnlockMutex(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "unlock", 1))
+            return null;
+
+        int mRegRaw = compileInner(funCall.args.get(0));
+        int mReg = regIndex++;
+        _emit(OpCodes.MOV, mReg, mRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.UNLOCK_MUTEX, mReg);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    // peek8(addr)/peek16(addr)/peek32(addr): the width is known at compile
+    // time (which builtin name matched), so it's baked in as PEEK's b
+    // operand directly - an immediate, not a register
+    private Integer compilePeek(FunCall funCall, String name, int widthBits) {
+        if (!isBuiltinCall(funCall, name, 1))
+            return null;
+
+        int addrReg = compileInner(funCall.args.get(0));
+        int result = regIndex++;
+        _emit(OpCodes.MOV, result, addrReg);
+        _emit(OpCodes.PEEK, result, widthBits);
+        return result;
+    }
+
+    // poke8(addr, value)/poke16(addr, value)/poke32(addr, value): width and
+    // value are packed into two consecutive registers, same trick as
+    // SET_FIELD (POKE only has 2 operand slots but needs address + width +
+    // value)
+    private Integer compilePoke(FunCall funCall, String name, int widthBits) {
+        if (!isBuiltinCall(funCall, name, 2))
+            return null;
+
+        int addrReg = compileInner(funCall.args.get(0));
+        int valueRegRaw = compileInner(funCall.args.get(1));
+
+        int base = regIndex++;
+        _emit(OpCodes.SET, base, widthBits);
+        _emit(OpCodes.MOV, regIndex, valueRegRaw);
+        regIndex++;
+
+        _emit(OpCodes.POKE, addrReg, base);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    // disableInterrupts()/enableInterrupts(): zero-arg native calls, same
+    // shape as read() - a throwaway nil input/output, called purely for
+    // side effect on InterruptController's nesting-safe disable counter
+    private Integer compileDisableInterrupts(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "disableInterrupts", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.DISABLE_INTERRUPTS, result);
+        return result;
+    }
+
+    private Integer compileEnableInterrupts(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "enableInterrupts", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.ENABLE_INTERRUPTS, result);
+        return result;
+    }
+
+    // panic(msg): unlike err(msg) (which produces an ordinary catchable
+    // Bl0jError value), this throws Bl0j_VM_Panic - see its own javadoc for
+    // why that's never caught by try/catch. Compiles like raiseInterrupt:
+    // a 1-arg native call, evaluates to nil (though nothing after it ever
+    // actually runs).
+    private Integer compilePanic(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "panic", 1))
+            return null;
+
+        int msgRegRaw = compileInner(funCall.args.get(0));
+        // CALL_NATIVE overwrites its own b operand with the native call's
+        // return value, so a bare-variable argument must be copied into a
+        // fresh register first - same reasoning as compileBuiltinUnaryCall.
+        // Harmless here in practice (panic() never returns control to code
+        // that could observe the clobbered original), but wrong to skip.
+        int msgReg = regIndex++;
+        _emit(OpCodes.MOV, msgReg, msgRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.PANIC, msgReg);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    // reserve(addr, size): unlike poke's [width, value], RESERVE takes its
+    // two values directly in a/b - no packing needed, there just aren't any
+    // more values to fit in
+    private Integer compileReserve(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "reserve", 2))
+            return null;
+
+        int addrReg = compileInner(funCall.args.get(0));
+        int sizeReg = compileInner(funCall.args.get(1));
+        _emit(OpCodes.RESERVE, addrReg, sizeReg);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    // raiseInterrupt(vector): a real native method like wait, just called
+    // for its side effect - the interrupt doesn't fire synchronously, it's
+    // only queued (see InterruptController); result is a throwaway nil
+    private Integer compileRaiseInterrupt(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "raiseInterrupt", 1))
+            return null;
+
+        int vectorRegRaw = compileInner(funCall.args.get(0));
+        // CALL_NATIVE overwrites its own b operand with the native call's
+        // return value (here: nil, since raiseInterrupt returns null) - a
+        // bare-variable argument must be copied into a fresh register
+        // first, or the call silently clobbers that variable to nil. Same
+        // reasoning as compileBuiltinUnaryCall's own comment.
+        int vectorReg = regIndex++;
+        _emit(OpCodes.MOV, vectorReg, vectorRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.RAISE_INTERRUPT, vectorReg);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    // registerHandler(fn, vector, priority): fn sits directly in
+    // REGISTER_HANDLER's a operand (never mutated, so no MOV-to-fresh-
+    // register needed, unlike a builtin that writes its result back into
+    // a); vector and priority are packed into two consecutive fresh
+    // registers, same trick as poke's [width, value]
+    private Integer compileRegisterHandler(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "registerHandler", 3))
+            return null;
+
+        int fnReg = compileInner(funCall.args.get(0));
+        int vectorRegRaw = compileInner(funCall.args.get(1));
+        int priorityRegRaw = compileInner(funCall.args.get(2));
+
+        int base = regIndex++;
+        _emit(OpCodes.MOV, base, vectorRegRaw);
+        _emit(OpCodes.MOV, regIndex, priorityRegRaw);
+        regIndex++;
+
+        _emit(OpCodes.REGISTER_HANDLER, fnReg, base);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    // dispatch(fn, core, arg): hands fn off to run on a specific worker
+    // core, fire-and-forget. Exact same shape as registerHandler - fn
+    // directly in DISPATCH's a operand (never mutated), core and arg
+    // packed into two consecutive fresh registers
+    private Integer compileDispatch(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "dispatch", 3))
+            return null;
+
+        int fnReg = compileInner(funCall.args.get(0));
+        int coreRegRaw = compileInner(funCall.args.get(1));
+        int argRegRaw = compileInner(funCall.args.get(2));
+
+        int base = regIndex++;
+        _emit(OpCodes.MOV, base, coreRegRaw);
+        _emit(OpCodes.MOV, regIndex, argRegRaw);
+        regIndex++;
+
+        _emit(OpCodes.DISPATCH, fnReg, base);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
     // isInt(x) etc: expands to typeOf(x) == "<expectedType>" rather than
     // needing one opcode per predicate - TYPE_OF is the actual primitive,
     // these are just compile-time sugar over it
@@ -441,9 +690,30 @@ public final class Bl0jv2_Compiler {
         if ((r = compileBuiltinUnaryCall(funCall, "str", OpCodes.TO_STRING)) != null) return r;
         if ((r = compileBuiltinUnaryCall(funCall, "typeOf", OpCodes.TYPE_OF)) != null) return r;
         if ((r = compileBuiltinUnaryCall(funCall, "err", OpCodes.MAKE_ERR)) != null) return r;
+        if ((r = compileBuiltinUnaryCall(funCall, "free", OpCodes.FREE)) != null) return r;
+        if ((r = compileBuiltinUnaryCall(funCall, "alloc", OpCodes.ALLOC)) != null) return r;
+        if ((r = compileReserve(funCall)) != null) return r;
+        if ((r = compilePeek(funCall, "peek8", 8)) != null) return r;
+        if ((r = compilePeek(funCall, "peek16", 16)) != null) return r;
+        if ((r = compilePeek(funCall, "peek32", 32)) != null) return r;
+        if ((r = compilePoke(funCall, "poke8", 8)) != null) return r;
+        if ((r = compilePoke(funCall, "poke16", 16)) != null) return r;
+        if ((r = compilePoke(funCall, "poke32", 32)) != null) return r;
         if ((r = compilePush(funCall)) != null) return r;
         if ((r = compilePop(funCall)) != null) return r;
         if ((r = compileRead(funCall)) != null) return r;
+        if ((r = compileTicks(funCall)) != null) return r;
+        if ((r = compileCoreCount(funCall)) != null) return r;
+        if ((r = compileCurrentCore(funCall)) != null) return r;
+        if ((r = compileNewMutex(funCall)) != null) return r;
+        if ((r = compileLockMutex(funCall)) != null) return r;
+        if ((r = compileUnlockMutex(funCall)) != null) return r;
+        if ((r = compileRaiseInterrupt(funCall)) != null) return r;
+        if ((r = compileRegisterHandler(funCall)) != null) return r;
+        if ((r = compileDispatch(funCall)) != null) return r;
+        if ((r = compileDisableInterrupts(funCall)) != null) return r;
+        if ((r = compileEnableInterrupts(funCall)) != null) return r;
+        if ((r = compilePanic(funCall)) != null) return r;
         if ((r = compileTypeCheck(funCall, "isInt", "int")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isFloat", "float")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isString", "string")) != null) return r;
@@ -465,8 +735,18 @@ public final class Bl0jv2_Compiler {
         }
 
         if(node instanceof NativeCallNode nativeCallNode){
-            int valReg = compileInner(nativeCallNode.right);
+            int valRegRaw = compileInner(nativeCallNode.right);
 
+            // CALL_NATIVE overwrites its own operand register with the
+            // native call's return value (print/println return a status
+            // code, wait() too) - a bare-variable operand like 'print x;'
+            // must be copied into a fresh register first, or the call
+            // silently clobbers that variable (e.g. 'print x; print x;'
+            // would print the value, then print's own status code instead
+            // of the value again). Same reasoning as
+            // compileBuiltinUnaryCall's own comment.
+            int valReg = regIndex++;
+            _emit(OpCodes.MOV, valReg, valRegRaw);
             _emit(OpCodes.CALL_NATIVE, nativeCallNode.id, valReg);
 
             return valReg;
@@ -936,6 +1216,7 @@ public final class Bl0jv2_Compiler {
                 case BIT_XOR -> OpCodes.LR_XOR;
                 case SHIFT_LEFT -> OpCodes.LR_SHL;
                 case SHIFT_RIGHT -> OpCodes.LR_SHR;
+                case SHIFT_RIGHT_UNSIGNED -> OpCodes.LR_USHR;
                 default -> throw new Bl0j_CompilerException("Unknown op: " + n.op);
             };
 

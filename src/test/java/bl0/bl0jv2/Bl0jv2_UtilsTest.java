@@ -80,4 +80,63 @@ class Bl0jv2_UtilsTest {
         assertTrue(!output.contains("READ "));
         assertTrue(!output.contains("UNKNOWN"));
     }
+
+    @Test
+    void dumpsMemoryOpcodesByName() throws Exception {
+        String output = dump(
+                "addr = alloc(16); poke8(addr, 1); x = peek8(addr); free(addr); free(x);");
+
+        assertTrue(output.contains("ALLOC"));
+        assertTrue(output.contains("POKE"));
+        assertTrue(output.contains("PEEK"));
+        assertTrue(output.contains("FREE"));
+        assertTrue(!output.contains("UNKNOWN"));
+    }
+
+    @Test
+    void dumpsRegisterHandlerOpcodeByName() throws Exception {
+        String output = dump(
+                "def handler(v) { print v; } registerHandler(handler, 1, 5); raiseInterrupt(1);");
+
+        assertTrue(output.contains("REGISTER_HANDLER"));
+        assertTrue(output.contains("CALL_NATIVE"));
+        assertTrue(!output.contains("UNKNOWN"));
+    }
+
+    @Test
+    void dumpsReserveOpcodeByName() throws Exception {
+        String output = dump("reserve(0, 16); poke8(0, 1);");
+
+        assertTrue(output.contains("RESERVE"));
+        assertTrue(!output.contains("UNKNOWN"));
+    }
+
+    // disableInterrupts()/enableInterrupts()/panic() all go through
+    // CALL_NATIVE (no dedicated opcode), same as raiseInterrupt() - just
+    // confirms they dump without falling through to UNKNOWN
+    @Test
+    void dumpsInterruptMaskingAndPanicWithoutFallingThroughToUnknown() throws Exception {
+        String output = dump(
+                "disableInterrupts(); enableInterrupts(); if (false) { panic('unreachable'); }");
+
+        assertTrue(output.contains("CALL_NATIVE"));
+        assertTrue(!output.contains("UNKNOWN"));
+    }
+
+    // coreCount()/currentCore() also go through CALL_NATIVE, same shape as ticks()
+    @Test
+    void dumpsCoreCountAndCurrentCoreWithoutFallingThroughToUnknown() throws Exception {
+        String output = dump("print coreCount(); print currentCore();");
+
+        assertTrue(output.contains("CALL_NATIVE"));
+        assertTrue(!output.contains("UNKNOWN"));
+    }
+
+    @Test
+    void dumpsDispatchOpcodeByName() throws Exception {
+        String output = dump("def task(v) { } dispatch(task, 1, 0);");
+
+        assertTrue(output.contains("DISPATCH"));
+        assertTrue(!output.contains("UNKNOWN"));
+    }
 }

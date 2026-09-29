@@ -1,4 +1,4 @@
-package bl0.bl0jv2.runtime;
+package bl0.bl0jv2.runtime.values;
 
 import java.util.Objects;
 
@@ -11,7 +11,7 @@ import java.util.Objects;
 public final class Bl0jError {
     private final String message;
 
-    Bl0jError(String message) {
+    public Bl0jError(String message) {
         this.message = message;
     }
 

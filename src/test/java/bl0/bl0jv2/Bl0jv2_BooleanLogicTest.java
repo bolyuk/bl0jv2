@@ -109,6 +109,20 @@ class Bl0jv2_BooleanLogicTest {
     }
 
     @Test
+    void shiftRightUnsignedMatchesSignedForAPositiveValue() {
+        assertEquals("3", run("print 12 >>> 2;"));
+    }
+
+    // the whole point of >>> vs >>: a negative int's sign bit does NOT
+    // get replicated leftward - it's treated as a bit pattern, not a
+    // signed number, which is what hardware-register-style code wants
+    @Test
+    void shiftRightUnsignedDoesNotSignExtendANegativeValue() {
+        assertEquals("true", run("print (-1 >> 1) < 0;")); // signed: still negative
+        assertEquals("2147483647", run("print -1 >>> 1;")); // unsigned: 0x7FFFFFFF
+    }
+
+    @Test
     void bitwiseOperatorsBindLooserThanComparison() {
         // matches the classic C precedence gotcha: '|' binds looser than
         // '==', so this needs its own parens around the bitwise part

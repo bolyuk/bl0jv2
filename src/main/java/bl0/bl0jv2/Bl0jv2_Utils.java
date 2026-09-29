@@ -118,6 +118,7 @@ public final class Bl0jv2_Utils {
                 case OpCodes.LR_XOR -> writer.append(String.format("XOR r%d = r%d ^ r%d", a, a, b));
                 case OpCodes.LR_SHL -> writer.append(String.format("SHL r%d = r%d << r%d", a, a, b));
                 case OpCodes.LR_SHR -> writer.append(String.format("SHR r%d = r%d >> r%d", a, a, b));
+                case OpCodes.LR_USHR -> writer.append(String.format("USHR r%d = r%d >>> r%d", a, a, b));
                 case OpCodes.BIT_NOT -> writer.append(String.format("BIT_NOT r%d", a));
 
                 case OpCodes.JUMP -> writer.append(String.format("JUMP %d", a));
@@ -162,6 +163,16 @@ public final class Bl0jv2_Utils {
                 case OpCodes.CELL_GET -> writer.append(String.format("CELL_GET r%d = *r%d", a, a));
                 case OpCodes.CELL_SET -> writer.append(String.format("CELL_SET *r%d = r%d", a, b));
                 case OpCodes.MAKE_CLOSURE -> writer.append(String.format("MAKE_CLOSURE r%d fun=r%d captures@%d count=%d", a, a, a + 1, b));
+                case OpCodes.FREE -> writer.append(String.format("FREE r%d", a));
+                case OpCodes.ALLOC -> writer.append(String.format("ALLOC r%d = alloc(r%d)", a, a));
+                case OpCodes.PEEK -> writer.append(String.format("PEEK r%d = *r%d (%d-bit)", a, a, b));
+                // b is a register holding [width, value] (SET_FIELD's own
+                // packing trick), not an immediate the way PEEK's b is -
+                // the actual width isn't known until runtime
+                case OpCodes.POKE -> writer.append(String.format("POKE *r%d width=r%d value=r%d", a, b, b + 1));
+                case OpCodes.REGISTER_HANDLER -> writer.append(String.format("REGISTER_HANDLER fn=r%d vector=r%d priority=r%d", a, b, b + 1));
+                case OpCodes.RESERVE -> writer.append(String.format("RESERVE addr=r%d size=r%d", a, b));
+                case OpCodes.DISPATCH -> writer.append(String.format("DISPATCH fn=r%d core=r%d arg=r%d", a, b, b + 1));
                 default -> writer.append("UNKNOWN");
             }
             writer.append(String.format("%n"));

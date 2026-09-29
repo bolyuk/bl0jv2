@@ -1,0 +1,180 @@
+// aeon-os (SMP): real multi-core scheduling, controlled entirely from
+// bl0jv2. Builds on boot.bl0's single-threaded cooperative scheduler - the
+// VM now provides genuine parallel execution (real worker threads, one per
+// "core") via dispatch(fn, core, arg), but the scheduling POLICY (which
+// task runs where, when) still lives here, not in the VM: dispatch() is
+// pure mechanism, nothing more.
+//
+// The run queue is protected by BOTH disableInterrupts()/enableInterrupts()
+// (interrupt-handler reentrancy on whichever core is mutating it - see
+// boot.bl0) AND a real Mutex (races BETWEEN cores, which disableInterrupts()
+// does nothing for - see Bl0jMutex's own doc). Both matter here for real:
+// with genuine parallelism, two cores really can be inside addTask() at
+// the same instant.
+//
+// Known language limitations hit writing this (same ones from boot.bl0,
+// still true): a plain 'def' function can't close over a top-level
+// variable (only a lambda captures free variables) - every piece of shared
+// state here is a class's static field instead, reached by explicit
+// qualified name from any function regardless of nesting.
+
+import '../stdlib/mathlib.bl0';
+
+def class Kernel {
+    static field numCores;
+    static field completedCount;
+    static field lock;
+}
+Kernel.numCores = 4; // core 0 (scheduler) + 3 workers
+Kernel.completedCount = 0;
+Kernel.lock = newMutex();
+
+def class Scheduler {
+    static field tasks;
+    static field queueLock;
+    static field nextCore;
+}
+Scheduler.tasks = [];
+Scheduler.queueLock = newMutex();
+Scheduler.nextCore = 1;
+
+def class Task {
+    field name;
+    field priority;
+    field fn; // a plain function value - called through a local var, not
+              // task.fn(), since dot-call syntax always means method
+              // lookup in bl0jv2, never "call the value stored in this field"
+
+    def init(name, priority, fn) {
+        this.name = name;
+        this.priority = priority;
+        this.fn = fn;
+    }
+}
+
+def addTask(t) {
+    disableInterrupts();
+    lock(Scheduler.queueLock);
+    push(Scheduler.tasks, t);
+    unlock(Scheduler.queueLock);
+    enableInterrupts();
+}
+
+// index of the highest-priority queued task, or -1 if empty - caller must
+// already hold Scheduler.queueLock
+def pickIndex() {
+    if (len(Scheduler.tasks) == 0) { return -1; }
+    best = 0;
+    i = 1;
+    while (i < len(Scheduler.tasks)) {
+        if (Scheduler.tasks[i].priority > Scheduler.tasks[best].priority) {
+            best = i;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+// removes index i by swapping with the last element and popping - caller
+// must already hold Scheduler.queueLock
+def removeAt(i) {
+    last = len(Scheduler.tasks) - 1;
+    if (i != last) {
+        Scheduler.tasks[i] = Scheduler.tasks[last];
+    }
+    pop(Scheduler.tasks);
+}
+
+// simple round-robin placement across the worker cores - the "smart"
+// choice (load balancing, affinity, whatever) is exactly the kind of
+// policy decision that belongs here in bl0jv2, not baked into the VM;
+// round-robin is just the simplest policy that demonstrates the mechanism
+def nextWorkerCore() {
+    c = Scheduler.nextCore;
+    Scheduler.nextCore = Scheduler.nextCore + 1;
+    if (Scheduler.nextCore >= Kernel.numCores) { Scheduler.nextCore = 1; }
+    return c;
+}
+
+// pops the highest-priority ready task and dispatches it onto the next
+// worker core - fire-and-forget, genuinely concurrent with whatever core 0
+// (the scheduler itself) does next
+def dispatchNext() {
+    disableInterrupts();
+    lock(Scheduler.queueLock);
+    idx = pickIndex();
+    if (idx < 0) {
+        unlock(Scheduler.queueLock);
+        enableInterrupts();
+        return nil;
+    }
+    t = Scheduler.tasks[idx];
+    removeAt(idx);
+    unlock(Scheduler.queueLock);
+    enableInterrupts();
+
+    core = nextWorkerCore();
+    fn = t.fn;
+    println '  [scheduler] dispatching ' + t.name + ' -> core ' + core;
+    dispatch(fn, core, 0);
+    return nil;
+}
+
+def taskDone() {
+    lock(Kernel.lock);
+    Kernel.completedCount = Kernel.completedCount + 1;
+    unlock(Kernel.lock);
+}
+
+// --- demo tasks: each reports which real core it actually ran on, to
+// make the parallelism observable rather than taken on faith ---
+
+def taskLogger() {
+    println '    [logger] running on core ' + currentCore();
+    taskDone();
+}
+
+def taskNetwork() {
+    buf = alloc(4);
+    poke32(buf, 0xC0FFEE);
+    println '    [network] running on core ' + currentCore() + ', packet ' + toHex(peek32(buf));
+    free(buf);
+    taskDone();
+}
+
+// enough real work that genuine cross-core overlap is plausible, not just
+// three near-instant tasks that happen to interleave trivially
+def taskCompute() {
+    i = 0;
+    sum = 0;
+    while (i < 200000) { sum = sum + i; i = i + 1; }
+    println '    [compute] running on core ' + currentCore() + ', sum=' + sum;
+    taskDone();
+}
+
+println '=== aeon-os (SMP) booting: ' + Kernel.numCores + ' cores ===';
+
+addTask(new Task('logger', 5, taskLogger));
+addTask(new Task('network', 20, taskNetwork));
+addTask(new Task('compute-a', 10, taskCompute));
+addTask(new Task('compute-b', 10, taskCompute));
+addTask(new Task('compute-c', 10, taskCompute));
+
+println '';
+println '--- dispatching all ready tasks across cores ---';
+while (true) {
+    lock(Scheduler.queueLock); remaining = len(Scheduler.tasks); unlock(Scheduler.queueLock);
+    if (remaining == 0) { break; }
+    dispatchNext();
+}
+
+println '';
+println '--- waiting for all dispatched tasks to complete ---';
+while (true) {
+    lock(Kernel.lock); done = Kernel.completedCount; unlock(Kernel.lock);
+    if (done >= 5) { break; }
+}
+
+println '';
+println 'all ' + Kernel.completedCount + ' tasks completed across ' + (Kernel.numCores - 1) + ' worker cores';
+println '=== aeon-os (SMP) halted cleanly ===';

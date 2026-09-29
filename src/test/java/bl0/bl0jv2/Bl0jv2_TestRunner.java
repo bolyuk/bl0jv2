@@ -14,6 +14,7 @@ import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.function.Consumer;
 
 /**
  * Helper that drives the whole pipeline (lexer -> parser -> compiler -> VM)
@@ -32,7 +33,14 @@ public final class Bl0jv2_TestRunner {
     }
 
     public static String run(String source) {
-        return runInstructions(compile(source));
+        return runInstructions(compile(source), null);
+    }
+
+    // lets a test configure the VM (set_max_heap_entries, set_max_raw_bytes,
+    // set_in_reader, ...) before feed_compiled_file() runs - some of those
+    // setters only take effect if called before it
+    public static String run(String source, Consumer<Bl0jv2_jVM> configure) {
+        return runInstructions(compile(source), configure);
     }
 
     /**
@@ -53,17 +61,18 @@ public final class Bl0jv2_TestRunner {
                 throw new IllegalStateException("parser did not produce a program");
 
             var linked = Bl0jv2_Linker.resolveImports(program, entryFile);
-            return runInstructions(compiler.compile(linked));
+            return runInstructions(compiler.compile(linked), null);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
-    private static String runInstructions(byte[] instructions) {
+    private static String runInstructions(byte[] instructions, Consumer<Bl0jv2_jVM> configure) {
         var vm = new Bl0jv2_jVM();
         StringWriter sw = new StringWriter();
         PrintWriter writer = new PrintWriter(sw);
         vm.set_out_writer(writer);
+        if (configure != null) configure.accept(vm);
         vm.feed_compiled_file(ByteBuffer.wrap(instructions));
 
         try {

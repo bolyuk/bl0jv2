@@ -1,7 +1,8 @@
-package bl0.bl0jv2.runtime;
+package bl0.bl0jv2.runtime.values;
 
 import bl0.bl0jv2.data.FunDef;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
+import bl0.bl0jv2.runtime.NanBox;
 
 import java.util.Arrays;
 import java.util.List;
@@ -16,6 +17,13 @@ import java.util.Map;
  * fields, a static field's index is resolved entirely at compile time
  * (the access is always through a literal class name), so this is a plain
  * long[] indexed directly - no name lookup at runtime.
+ *
+ * <p>Static field storage is not safe for concurrent mutation from
+ * multiple cores - {@link #setStaticFieldRaw} is a plain array write, no
+ * locking. This matters in practice: static fields are exactly how
+ * bl0jv2 kernel code holds global state (see aeon-os's own {@code Kernel}
+ * class), so a scheduler touching them from more than one core needs its
+ * own {@code Mutex}, same as {@link Bl0jArray}.
  */
 public final class Bl0jClass {
     public final String name;
@@ -24,7 +32,7 @@ public final class Bl0jClass {
     private final Map<String, FunDef> methods;
     private final long[] staticFields;
 
-    Bl0jClass(String name, List<String> fieldNames, long[] fieldDefaults, Map<String, FunDef> methods, int staticFieldCount) {
+    public Bl0jClass(String name, List<String> fieldNames, long[] fieldDefaults, Map<String, FunDef> methods, int staticFieldCount) {
         this.name = name;
         this.fieldNames = fieldNames;
         this.fieldDefaults = fieldDefaults;

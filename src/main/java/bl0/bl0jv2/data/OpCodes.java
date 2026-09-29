@@ -89,5 +89,37 @@ public final class OpCodes {
     // convention as NEW_ARRAY/NEW_TUPLE
     public static final byte MAKE_CLOSURE = 0x35;
 
+    // dispatches at runtime on a's own type: a REF frees a managed heap
+    // value, a plain int frees a raw-memory address (see ALLOC/PEEK/POKE)
+    public static final byte FREE = 0x36;
+
+    // a single flat raw-memory arena for kernel-style code (device
+    // buffers, eventually MMIO) - addresses are plain ints, no isolation
+    // between allocations (peek/poke can address anywhere in the arena)
+    public static final byte ALLOC = 0x37;
+    public static final byte PEEK = 0x38;
+    public static final byte POKE = 0x39;
+
+    // logical (non-sign-extending) right shift, unlike LR_SHR - matters
+    // for hardware-register-style bit work, where a set high bit shouldn't
+    // fill in with 1s the way an arithmetic shift would
+    public static final byte LR_USHR = 0x3A;
+
+    // fn (FunDef or closure) in a, [vector, priority] packed into b/b+1 -
+    // same convention as POKE's [width, value]
+    public static final byte REGISTER_HANDLER = 0x3B;
+
+    // a and b are the address and size directly (both fit in plain operand
+    // slots, unlike ALLOC/POKE which need the consecutive-registers packing
+    // trick) - marks [a, b) as permanently allocated in the raw arena, see
+    // RawMemory.reserve()
+    public static final byte RESERVE = 0x3C;
+
+    // fn in a, [core, arg] packed into b/b+1 - same convention as
+    // REGISTER_HANDLER's [vector, priority]. Hands fn off to run on a
+    // specific worker core (see Bl0jv2_jVM.CoreWorker), fire-and-forget -
+    // the dispatching core never blocks on this
+    public static final byte DISPATCH = 0x3D;
+
     public static final byte HALT = (byte) 0xFF;
 }

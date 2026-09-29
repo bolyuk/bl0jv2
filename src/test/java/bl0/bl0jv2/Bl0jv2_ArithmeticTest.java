@@ -1,5 +1,6 @@
 package bl0.bl0jv2;
 
+import bl0.bl0jv2.exceptions.Bl0j_LexerException;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 import org.junit.jupiter.api.Test;
 
@@ -73,5 +74,49 @@ class Bl0jv2_ArithmeticTest {
     @Test
     void powerOperatorNegativeExponentThrows() {
         assertThrows(Bl0j_VM_Exception.class, () -> run("print 2 ** -1;"));
+    }
+
+    // --- hex / binary literals ---
+
+    @Test
+    void hexLiteral() {
+        assertEquals("255", run("print 0xFF;"));
+        assertEquals("16", run("print 0x10;"));
+    }
+
+    @Test
+    void hexLiteralIsCaseInsensitive() {
+        assertEquals("255", run("print 0xff;"));
+        assertEquals("255", run("print 0XFF;"));
+    }
+
+    @Test
+    void binaryLiteral() {
+        assertEquals("10", run("print 0b1010;"));
+    }
+
+    // the whole point of writing a bit pattern in hex instead of decimal:
+    // parseUnsignedInt (not parseInt) means a full 32-bit pattern is a
+    // valid literal even though it reads as negative in decimal - matters
+    // for masks/addresses in kernel-style code
+    @Test
+    void fullWidthHexLiteralIsValidEvenThoughItsNegativeAsASignedInt() {
+        assertEquals("-1", run("print 0xFFFFFFFF;"));
+        assertEquals("-559038737", run("print 0xDEADBEEF;"));
+    }
+
+    @Test
+    void hexLiteralIsStillAnOrdinaryInt() {
+        assertEquals("int", run("print typeOf(0x10);"));
+    }
+
+    @Test
+    void hexLiteralWorksInArithmetic() {
+        assertEquals("32", run("print 0x10 + 0x10;"));
+    }
+
+    @Test
+    void bareRadixPrefixWithNoDigitsThrows() {
+        assertThrows(Bl0j_LexerException.class, () -> run("print 0x;"));
     }
 }

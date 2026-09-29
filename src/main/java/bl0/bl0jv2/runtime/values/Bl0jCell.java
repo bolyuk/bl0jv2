@@ -1,4 +1,6 @@
-package bl0.bl0jv2.runtime;
+package bl0.bl0jv2.runtime.values;
+
+import bl0.bl0jv2.runtime.NanBox;
 
 /**
  * A single mutable NaN-boxed slot on the heap. Backs a captured (closed-over)
@@ -8,7 +10,7 @@ package bl0.bl0jv2.runtime;
  * frame.
  */
 public final class Bl0jCell {
-    long value = NanBox.NIL;
+    public long value = NanBox.NIL;
 
     @Override
     public String toString() {
