@@ -17,4 +17,8 @@ public final class NativeMethods {
     public static final byte NEW_MUTEX = 0x0B;
     public static final byte LOCK_MUTEX = 0x0C;
     public static final byte UNLOCK_MUTEX = 0x0D;
+    // one-way: a core can only lower its own privilege, never raise it -
+    // see Bl0jv2_jVM.CoreContext.privileged and its own doc
+    public static final byte DROP_TO_USER_MODE = 0x0E;
+    public static final byte IS_PRIVILEGED = 0x0F;
 }

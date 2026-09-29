@@ -1,21 +1,45 @@
 // aeon-os: a tiny kernel written entirely in bl0jv2. Nothing outside this
 // file participates - the "OS" is just the Bl0jv2_jVM running boot.bl0c,
 // same as any other compiled program. Everything a kernel needs (device
-// access, interrupts, fault isolation, scheduling) is expressed in
-// bl0jv2 itself, using primitives the VM already exposes: reserve/peek/poke
-// for hardware, registerHandler/raiseInterrupt/disable/enableInterrupts for
-// interrupts, try/catch for recoverable faults, panic() for fatal ones.
+// access, interrupts, fault isolation, scheduling, and now memory
+// management itself) is expressed in bl0jv2, using primitives the VM
+// exposes: reserve/peek/poke for hardware, registerHandler/raiseInterrupt/
+// disable/enableInterrupts for interrupts, try/catch for recoverable
+// faults, panic() for fatal ones. The VM deliberately does NOT provide a
+// general-purpose allocator (no alloc()/free() for raw memory) - real
+// hardware doesn't either, so the heap allocator below is this kernel's
+// own, built on nothing but reserve()/peek()/poke().
 
 import '../stdlib/mathlib.bl0';
 
-// --- MMIO: a fixed "system info" register block, reserved so the general
-// allocator can never hand these addresses out for anything else ---
+// --- MMIO: a fixed "system info" register block, reserved so the heap
+// allocator below can never hand these addresses out for anything else ---
 SYS_INFO_BASE = 0;
 SYS_INFO_SIZE = 8;
 SYS_MAGIC = 0xAE07C0DE;
 
 reserve(SYS_INFO_BASE, SYS_INFO_SIZE);
 poke32(SYS_INFO_BASE, SYS_MAGIC);
+
+// --- kernel heap: a minimal bump allocator, entirely in bl0jv2. No
+// free-list, no reuse - kfree() is a deliberate no-op. A real allocator
+// (free-list, buddy, slab, whatever policy this kernel wants) is exactly
+// the kind of decision that belongs here, in the OS, not baked into the
+// VM - this is the simplest one that proves the pattern works end to end ---
+def class HeapAlloc {
+    static field nextFree;
+}
+HeapAlloc.nextFree = SYS_INFO_BASE + SYS_INFO_SIZE;
+
+def kalloc(size) {
+    addr = HeapAlloc.nextFree;
+    HeapAlloc.nextFree = HeapAlloc.nextFree + size;
+    return addr;
+}
+
+def kfree(addr) {
+    // no-op - see HeapAlloc's own comment above
+}
 
 println '=== aeon-os booting ===';
 println 'sys info magic: ' + toHex(peek32(SYS_INFO_BASE));
@@ -140,15 +164,14 @@ def taskLogger() {
     println '  [logger] uptime=' + Kernel.uptimeTicks + 'ms';
 }
 
-// allocates a scratch packet buffer from the general raw-memory allocator
-// (distinct from the reserved MMIO region above - this space is freely
-// handed out and reclaimed), writes/reads through it, then frees it -
-// exercises alloc/poke/peek/free rather than reserve/peek/poke
+// allocates a scratch packet buffer from the kernel's own heap (distinct
+// from the reserved MMIO region above), writes/reads through it, then
+// frees it - exercises kalloc/poke/peek/kfree rather than reserve/peek/poke
 def taskNetwork() {
-    buf = alloc(4);
+    buf = kalloc(4);
     poke32(buf, 0xC0FFEE);
     println '  [network] received packet: ' + toHex(peek32(buf));
-    free(buf);
+    kfree(buf);
 }
 
 // deliberately faulty, to prove one task's error doesn't take down the

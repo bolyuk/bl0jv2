@@ -29,6 +29,30 @@ Kernel.numCores = 4; // core 0 (scheduler) + 3 workers
 Kernel.completedCount = 0;
 Kernel.lock = newMutex();
 
+// --- kernel heap: same minimal bump allocator as boot.bl0 (see its own
+// comment) - the VM provides no raw-memory allocator of its own, on
+// purpose, so every core sharing this heap goes through kalloc()/kfree(),
+// which serializes allocation with a real Mutex the same way addTask()
+// below serializes the run queue ---
+def class HeapAlloc {
+    static field nextFree;
+    static field lock;
+}
+HeapAlloc.nextFree = 0;
+HeapAlloc.lock = newMutex();
+
+def kalloc(size) {
+    lock(HeapAlloc.lock);
+    addr = HeapAlloc.nextFree;
+    HeapAlloc.nextFree = HeapAlloc.nextFree + size;
+    unlock(HeapAlloc.lock);
+    return addr;
+}
+
+def kfree(addr) {
+    // no-op - see boot.bl0's own HeapAlloc comment
+}
+
 def class Scheduler {
     static field tasks;
     static field queueLock;
@@ -135,10 +159,10 @@ def taskLogger() {
 }
 
 def taskNetwork() {
-    buf = alloc(4);
+    buf = kalloc(4);
     poke32(buf, 0xC0FFEE);
     println '    [network] running on core ' + currentCore() + ', packet ' + toHex(peek32(buf));
-    free(buf);
+    kfree(buf);
     taskDone();
 }
 

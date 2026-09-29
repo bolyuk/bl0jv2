@@ -5,6 +5,7 @@ import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Panic;
 import bl0.bl0jv2.runtime.arithmetic.ArithmeticOperators;
 import bl0.bl0jv2.runtime.interrupt.InterruptController;
+import bl0.bl0jv2.runtime.memory.PortIO;
 import bl0.bl0jv2.runtime.memory.RawMemory;
 import bl0.bl0jv2.runtime.values.*;
 
@@ -53,6 +54,9 @@ public final class Bl0jv2_jVM {
 
     private final ArithmeticOperators ops = new ArithmeticOperators(NIL_OBJECT);
     private final RawMemory rawMemory = new RawMemory();
+    // a second, port-addressed bus - see PortIO's own javadoc for why this
+    // is deliberately separate from rawMemory
+    private final PortIO portIO = new PortIO();
     private final InterruptController interrupts = new InterruptController();
 
     // one call stack / try-catch handler stack per core (Java thread) - see
@@ -176,11 +180,14 @@ public final class Bl0jv2_jVM {
         // throw over misuse" stance elsewhere (e.g. raising an unregistered
         // vector)
         nativeMethods.put(NativeMethods.DISABLE_INTERRUPTS, (ignored) -> {
-            currentContext().disableDepth++;
+            CoreContext ctx = currentContext();
+            requirePrivileged(ctx, "disableInterrupts");
+            ctx.disableDepth++;
             return null;
         });
         nativeMethods.put(NativeMethods.ENABLE_INTERRUPTS, (ignored) -> {
             CoreContext ctx = currentContext();
+            requirePrivileged(ctx, "enableInterrupts");
             if (ctx.disableDepth > 0)
                 ctx.disableDepth--;
             return null;
@@ -210,6 +217,19 @@ public final class Bl0jv2_jVM {
             ((Bl0jMutex) m).unlock();
             return null;
         });
+        // one-way: lowers this core's own privilege, never raises it - see
+        // CoreContext.privileged's own doc. Throws if already unprivileged,
+        // the same "not held"-style strictness as Bl0jMutex.unlock(): a
+        // ring transition is a one-shot protocol, not a nesting counter
+        // like disable/enableInterrupts above
+        nativeMethods.put(NativeMethods.DROP_TO_USER_MODE, (ignored) -> {
+            CoreContext ctx = currentContext();
+            if (!ctx.privileged)
+                throw new Bl0j_VM_Exception("cannot drop privileges: core " + ctx.coreId + " is already in user mode");
+            ctx.privileged = false;
+            return null;
+        });
+        nativeMethods.put(NativeMethods.IS_PRIVILEGED, (ignored) -> currentContext().privileged);
     }
 
     private static double toDouble(Object numeric) {
@@ -592,6 +612,38 @@ public final class Bl0jv2_jVM {
         return unbox(ctx.callStack.peek().regs()[0]);
     }
 
+    // the trap gate: invoke()s callee with this core temporarily forced
+    // into kernel mode, restoring whatever privilege level the caller
+    // actually had once the handler returns - real IRET semantics, not a
+    // blanket "always end up in kernel mode". Used by both delivery paths
+    // that cross a privilege boundary: a fired hardware interrupt (the
+    // cooperative poll in execute() below) and a synchronous SYSCALL. A
+    // plain invoke() (e.g. a user-defined toString()/equals() override) is
+    // NOT a trap gate and must never elevate privilege - only these two
+    // call sites go through this method instead of invoke() directly.
+    private Object invokeAsTrap(Object callee, long argRaw) {
+        CoreContext ctx = currentContext();
+        boolean callerWasPrivileged = ctx.privileged;
+        ctx.privileged = true;
+        try {
+            return invoke(callee, argRaw);
+        } finally {
+            ctx.privileged = callerWasPrivileged;
+        }
+    }
+
+    // throws unless this core currently holds kernel privilege - guards
+    // every opcode/native that has no real hardware analogue in user mode
+    // (port I/O, MMIO reservation, registering/dispatching work, masking
+    // interrupts). Deliberately NOT applied to PEEK/POKE: without paging
+    // there is no real memory-protection boundary to enforce yet, so
+    // gating raw memory access here would be a false sense of security
+    // rather than an actual one - see RawMemory's own doc.
+    private void requirePrivileged(CoreContext ctx, String what) {
+        if (!ctx.privileged)
+            throw new Bl0j_VM_Exception("privileged instruction '" + what + "' requires kernel mode (core " + ctx.coreId + " is in user mode)");
+    }
+
     // startAddr/stopAtDepth let invoke() re-enter this same loop for a
     // synchronous nested call: run_instructions() calls this with
     // stopAtDepth=-1 (run to HALT); invoke() passes the depth its own
@@ -629,7 +681,7 @@ public final class Bl0jv2_jVM {
                     if (ctx.disableDepth == 0) {
                         InterruptController.Fired fired = interrupts.pollNext();
                         if (fired != null)
-                            invoke(fired.handlerFn(), NanBox.ofInt(fired.vector()));
+                            invokeAsTrap(fired.handlerFn(), NanBox.ofInt(fired.vector()));
                     }
                 }
 
@@ -836,10 +888,10 @@ public final class Bl0jv2_jVM {
                         reg[a] = boxRef(new Bl0jClosure(fun, cells));
                     }
 
-                    // dispatches on reg[a]'s raw (still-boxed) tag, not its
-                    // unboxed value, since that's the only way to tell a
-                    // REF (a managed heap value) apart from a plain int (a
-                    // raw-memory address, once ALLOC/PEEK/POKE exist)
+                    // REF (a managed heap value) frees a heap slot; there is
+                    // no VM-level raw-memory allocator, so anything else
+                    // (a plain int included) is always a user error - see
+                    // RawMemory's own doc for why
                     case OpCodes.FREE -> {
                         if (NanBox.isBoxed(reg[a]) && NanBox.tagOf(reg[a]) == NanBox.TAG_REF) {
                             int idx = NanBox.asRefIndex(reg[a]);
@@ -852,20 +904,17 @@ public final class Bl0jv2_jVM {
                             } finally {
                                 heapLock.writeLock().unlock();
                             }
-                        } else if (unbox(reg[a]) instanceof Integer rawAddr) {
-                            rawMemory.free(rawAddr);
                         } else {
-                            throw new Bl0j_VM_Exception("cannot free " + typeName(unbox(reg[a])));
+                            throw new Bl0j_VM_Exception("cannot free " + typeName(unbox(reg[a])) + ": only managed values can be freed, there is no raw-memory allocator");
                         }
                         reg[a] = NanBox.NIL;
                     }
 
-                    // mutates a's own slot: requested size in, address out
-                    case OpCodes.ALLOC -> reg[a] = NanBox.ofInt(rawMemory.alloc((int) unbox(reg[a])));
-
                     // b is the width in bits (8/16/32), a compile-time
                     // immediate - not a register, unlike almost everything
-                    // else b is used for elsewhere in this VM
+                    // else b is used for elsewhere in this VM. Ungated: see
+                    // requirePrivileged's own doc for why PEEK/POKE stay
+                    // available from user mode
                     case OpCodes.PEEK -> reg[a] = NanBox.ofInt((int) rawMemory.peek((int) unbox(reg[a]), b / 8));
 
                     // width and value sit at reg[b] and reg[b+1], same
@@ -880,6 +929,7 @@ public final class Bl0jv2_jVM {
                     // packed into reg[b]/reg[b+1] - same convention as
                     // POKE's [width, value]
                     case OpCodes.REGISTER_HANDLER -> {
+                        requirePrivileged(ctx, "registerHandler");
                         int vector = (int) unbox(reg[b]);
                         int priority = (int) unbox(reg[b + 1]);
                         interrupts.registerHandler(vector, priority, unbox(reg[a]));
@@ -887,14 +937,63 @@ public final class Bl0jv2_jVM {
 
                     // a and b are the address and size directly, not packed
                     // registers - see RawMemory.reserve()
-                    case OpCodes.RESERVE -> rawMemory.reserve((int) unbox(reg[a]), (int) unbox(reg[b]));
+                    case OpCodes.RESERVE -> {
+                        requirePrivileged(ctx, "reserve");
+                        rawMemory.reserve((int) unbox(reg[a]), (int) unbox(reg[b]));
+                    }
 
                     // fn in a, [core, arg] packed into reg[b]/reg[b+1] -
                     // same convention as REGISTER_HANDLER's [vector, priority]
                     case OpCodes.DISPATCH -> {
+                        requirePrivileged(ctx, "dispatch");
                         int core = (int) unbox(reg[b]);
                         long argRaw = reg[b + 1];
                         dispatchToCore(core, unbox(reg[a]), argRaw);
+                    }
+
+                    // same operand shape as PEEK - width baked in as b's
+                    // compile-time immediate
+                    case OpCodes.PORT_IN -> {
+                        requirePrivileged(ctx, "in");
+                        reg[a] = NanBox.ofInt((int) portIO.read((int) unbox(reg[a]), b / 8));
+                    }
+
+                    // same operand shape as POKE - width and value packed
+                    // into reg[b]/reg[b+1]
+                    case OpCodes.PORT_OUT -> {
+                        requirePrivileged(ctx, "out");
+                        int width = (int) unbox(reg[b]);
+                        long value = ((Number) unbox(reg[b + 1])).longValue();
+                        portIO.write((int) unbox(reg[a]), width / 8, value);
+                    }
+
+                    // vector in a, arg in b - synchronous, unlike
+                    // raiseInterrupt (queued for the next cooperative poll).
+                    // Never gated: this IS the gate user-mode code uses to
+                    // reach kernel functionality at all - see
+                    // InterruptController.handlerFor's own doc
+                    case OpCodes.SYSCALL -> {
+                        int vector = (int) unbox(reg[a]);
+                        Object handler = interrupts.handlerFor(vector);
+                        if (handler == null)
+                            throw new Bl0j_VM_Exception("syscall: no handler registered for vector " + vector);
+                        reg[a] = box(invokeAsTrap(handler, reg[b]));
+                    }
+
+                    // addr in a, delta in b directly - not packed, same
+                    // shape as RESERVE. Mutates a's own slot to the value
+                    // that was there before the add. Ungated: real atomics
+                    // are usable from user mode too, see RawMemory's own doc
+                    case OpCodes.ATOMIC_ADD -> reg[a] = NanBox.ofInt(rawMemory.atomicAdd((int) unbox(reg[a]), (int) unbox(reg[b])));
+
+                    // addr in a, [expected, newValue] packed into reg[b]/
+                    // reg[b+1] - same trick as POKE. Mutates a's own slot to
+                    // the value that was there before the swap attempt (so
+                    // the caller can tell success from failure: old == expected)
+                    case OpCodes.ATOMIC_CAS -> {
+                        int expected = (int) unbox(reg[b]);
+                        int newValue = (int) unbox(reg[b + 1]);
+                        reg[a] = NanBox.ofInt(rawMemory.compareAndSwap((int) unbox(reg[a]), expected, newValue));
                     }
 
                     case OpCodes.RETURN -> {
@@ -1061,6 +1160,17 @@ public final class Bl0jv2_jVM {
         // core's own polling, matching how real hardware gives each CPU
         // core its own interrupt-enable flag.
         int disableDepth = 0;
+
+        // this core's own privilege ring - true (kernel) by default, so
+        // every existing program/test keeps working unchanged unless it
+        // explicitly calls dropToUserMode(). Deliberately per-core, not
+        // shared, matching disableDepth above: one core dropping to user
+        // mode must not affect another core's own privilege. There is no
+        // general way back up from false to true (see dropToUserMode's own
+        // registration) - only invokeAsTrap() may temporarily force this
+        // true for a handler's duration and restore it afterward, mirroring
+        // how real hardware only raises privilege through a trap gate
+        boolean privileged = true;
 
         CoreContext(int coreId) {
             this.coreId = coreId;

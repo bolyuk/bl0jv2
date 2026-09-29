@@ -500,6 +500,41 @@ public final class Bl0jv2_Compiler {
         return result;
     }
 
+    // in8(port)/in16(port)/in32(port): exact same shape as compilePeek -
+    // a second, port-addressed bus, kept separate from PEEK's raw-memory
+    // arena (see PortIO's own doc)
+    private Integer compilePortIn(FunCall funCall, String name, int widthBits) {
+        if (!isBuiltinCall(funCall, name, 1))
+            return null;
+
+        int portReg = compileInner(funCall.args.get(0));
+        int result = regIndex++;
+        _emit(OpCodes.MOV, result, portReg);
+        _emit(OpCodes.PORT_IN, result, widthBits);
+        return result;
+    }
+
+    // out8(port, value)/out16(port, value)/out32(port, value): exact same
+    // shape as compilePoke
+    private Integer compilePortOut(FunCall funCall, String name, int widthBits) {
+        if (!isBuiltinCall(funCall, name, 2))
+            return null;
+
+        int portReg = compileInner(funCall.args.get(0));
+        int valueRegRaw = compileInner(funCall.args.get(1));
+
+        int base = regIndex++;
+        _emit(OpCodes.SET, base, widthBits);
+        _emit(OpCodes.MOV, regIndex, valueRegRaw);
+        regIndex++;
+
+        _emit(OpCodes.PORT_OUT, portReg, base);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
     // disableInterrupts()/enableInterrupts(): zero-arg native calls, same
     // shape as read() - a throwaway nil input/output, called purely for
     // side effect on InterruptController's nesting-safe disable counter
@@ -520,6 +555,86 @@ public final class Bl0jv2_Compiler {
         int result = regIndex++;
         _emit(OpCodes.LOAD_NIL, result);
         _emit(OpCodes.CALL_NATIVE, NativeMethods.ENABLE_INTERRUPTS, result);
+        return result;
+    }
+
+    // dropToUserMode(): zero-arg, side-effecting, same shape as
+    // disableInterrupts()/enableInterrupts()
+    private Integer compileDropToUserMode(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "dropToUserMode", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.DROP_TO_USER_MODE, result);
+        return result;
+    }
+
+    // isPrivileged(): zero-arg, value-producing, same shape as coreCount()
+    private Integer compileIsPrivileged(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "isPrivileged", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.IS_PRIVILEGED, result);
+        return result;
+    }
+
+    // syscall(vector, arg): SYSCALL takes its two values directly in a/b,
+    // no packing needed (same shape as reserve's addr/size) - but unlike
+    // reserve, SYSCALL mutates a's own slot with the handler's return
+    // value, so vector must first be copied into a fresh register (same
+    // clobber-avoidance reasoning as compilePeek's MOV-before-PEEK)
+    private Integer compileSyscall(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "syscall", 2))
+            return null;
+
+        int vectorRegRaw = compileInner(funCall.args.get(0));
+        int argReg = compileInner(funCall.args.get(1));
+
+        int result = regIndex++;
+        _emit(OpCodes.MOV, result, vectorRegRaw);
+        _emit(OpCodes.SYSCALL, result, argReg);
+        return result;
+    }
+
+    // atomicAdd(addr, delta): ATOMIC_ADD takes its two values directly in
+    // a/b like reserve, and mutates a's own slot to the pre-add value like
+    // compileSyscall above
+    private Integer compileAtomicAdd(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "atomicAdd", 2))
+            return null;
+
+        int addrRegRaw = compileInner(funCall.args.get(0));
+        int deltaReg = compileInner(funCall.args.get(1));
+
+        int result = regIndex++;
+        _emit(OpCodes.MOV, result, addrRegRaw);
+        _emit(OpCodes.ATOMIC_ADD, result, deltaReg);
+        return result;
+    }
+
+    // atomicCas(addr, expected, newValue): [expected, newValue] packed into
+    // two consecutive registers, same trick as poke's [width, value];
+    // mutates a's own slot to the pre-swap value like compileAtomicAdd above
+    private Integer compileAtomicCas(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "atomicCas", 3))
+            return null;
+
+        int addrRegRaw = compileInner(funCall.args.get(0));
+        int expectedRegRaw = compileInner(funCall.args.get(1));
+        int newValueRegRaw = compileInner(funCall.args.get(2));
+
+        int result = regIndex++;
+        _emit(OpCodes.MOV, result, addrRegRaw);
+
+        int base = regIndex++;
+        _emit(OpCodes.MOV, base, expectedRegRaw);
+        _emit(OpCodes.MOV, regIndex, newValueRegRaw);
+        regIndex++;
+
+        _emit(OpCodes.ATOMIC_CAS, result, base);
         return result;
     }
 
@@ -691,7 +806,6 @@ public final class Bl0jv2_Compiler {
         if ((r = compileBuiltinUnaryCall(funCall, "typeOf", OpCodes.TYPE_OF)) != null) return r;
         if ((r = compileBuiltinUnaryCall(funCall, "err", OpCodes.MAKE_ERR)) != null) return r;
         if ((r = compileBuiltinUnaryCall(funCall, "free", OpCodes.FREE)) != null) return r;
-        if ((r = compileBuiltinUnaryCall(funCall, "alloc", OpCodes.ALLOC)) != null) return r;
         if ((r = compileReserve(funCall)) != null) return r;
         if ((r = compilePeek(funCall, "peek8", 8)) != null) return r;
         if ((r = compilePeek(funCall, "peek16", 16)) != null) return r;
@@ -699,6 +813,12 @@ public final class Bl0jv2_Compiler {
         if ((r = compilePoke(funCall, "poke8", 8)) != null) return r;
         if ((r = compilePoke(funCall, "poke16", 16)) != null) return r;
         if ((r = compilePoke(funCall, "poke32", 32)) != null) return r;
+        if ((r = compilePortIn(funCall, "in8", 8)) != null) return r;
+        if ((r = compilePortIn(funCall, "in16", 16)) != null) return r;
+        if ((r = compilePortIn(funCall, "in32", 32)) != null) return r;
+        if ((r = compilePortOut(funCall, "out8", 8)) != null) return r;
+        if ((r = compilePortOut(funCall, "out16", 16)) != null) return r;
+        if ((r = compilePortOut(funCall, "out32", 32)) != null) return r;
         if ((r = compilePush(funCall)) != null) return r;
         if ((r = compilePop(funCall)) != null) return r;
         if ((r = compileRead(funCall)) != null) return r;
@@ -713,6 +833,11 @@ public final class Bl0jv2_Compiler {
         if ((r = compileDispatch(funCall)) != null) return r;
         if ((r = compileDisableInterrupts(funCall)) != null) return r;
         if ((r = compileEnableInterrupts(funCall)) != null) return r;
+        if ((r = compileDropToUserMode(funCall)) != null) return r;
+        if ((r = compileIsPrivileged(funCall)) != null) return r;
+        if ((r = compileSyscall(funCall)) != null) return r;
+        if ((r = compileAtomicAdd(funCall)) != null) return r;
+        if ((r = compileAtomicCas(funCall)) != null) return r;
         if ((r = compilePanic(funCall)) != null) return r;
         if ((r = compileTypeCheck(funCall, "isInt", "int")) != null) return r;
         if ((r = compileTypeCheck(funCall, "isFloat", "float")) != null) return r;

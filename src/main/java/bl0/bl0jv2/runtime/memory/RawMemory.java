@@ -2,30 +2,35 @@ package bl0.bl0jv2.runtime.memory;
 
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * A single flat address space for alloc/free/peek/poke - addresses are
- * plain bl0jv2 ints, deliberately not tied to which alloc() produced them
- * (peek/poke can address anywhere in it), mirroring how real hardware/MMIO
- * has no isolation between allocations. This is a stand-in for real
- * physical memory until the VM itself moves off the JVM host.
+ * A single flat address space for peek/poke - addresses are plain bl0jv2
+ * ints, and peek/poke can address anywhere in it regardless of which (if
+ * any) reserve() call covers that address, mirroring how real hardware/MMIO
+ * has no isolation between regions. This is a stand-in for real physical
+ * memory until the VM itself moves off the JVM host.
  *
- * <p>Now that multiple VM cores can call into this concurrently: alloc/free/
- * reserve take the write lock (they mutate the allocator's own bookkeeping
- * and must be mutually exclusive with each other). peek/poke touch only the
- * raw byte[] directly, genuinely disjoint state from the allocator's
- * bookkeeping - they take the READ lock, not because they conflict with
- * each other, but purely for the JMM happens-before edge from the last
- * allocator write (without it, a poke() on one core has no visibility
- * guarantee to a peek() on another). Two cores poke()-ing the *same*
- * address concurrently stays a genuine, accepted race - same spirit as this
- * class's own "no isolation between allocations" MMIO comment above.
+ * <p>There is deliberately no VM-level allocator here (no alloc()/free()):
+ * real hardware doesn't provide one either - a real OS allocates its own
+ * structures on top of this raw addressable space, the same way it would on
+ * physical memory. reserve() only exists to carve out fixed ranges (e.g. an
+ * MMIO device's register block) that the OS's own allocator should treat as
+ * off-limits; RawMemory itself has no opinion on what the rest of the
+ * address space is used for.
+ *
+ * <p>Now that multiple VM cores can call into this concurrently: reserve()
+ * takes the write lock (it mutates reservedRegions, which must be mutually
+ * exclusive with itself). peek/poke touch only the raw byte[] directly,
+ * genuinely disjoint state from reservedRegions - they take the READ lock,
+ * not because they conflict with each other, but purely for the JMM
+ * happens-before edge from the last reserve() write (without it, a poke()
+ * on one core has no visibility guarantee to a peek() on another). Two
+ * cores poke()-ing the *same* address concurrently stays a genuine,
+ * accepted race - same spirit as this class's own "no isolation between
+ * regions" MMIO comment above.
  */
 public final class RawMemory {
     private static final int DEFAULT_BYTES = 1 << 20; // 1 MiB
@@ -33,13 +38,10 @@ public final class RawMemory {
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
     private byte[] memory;
-    private final TreeMap<Integer, Integer> allocations = new TreeMap<>(); // address -> size, currently live
-    private final List<int[]> freeList = new ArrayList<>(); // [address, size] free blocks, first-fit, no coalescing
-    private int bumpPointer;
-    // addresses reserved via reserve() - a subset of 'allocations' keys that
-    // free() refuses to release, so a fixed MMIO region can never end up
-    // back in the general free list
-    private final Set<Integer> reservedAddresses = new HashSet<>();
+    // address -> size, ranges reserved via reserve() - bookkeeping only, to
+    // reject overlapping reservations; unrelated to peek/poke, which can
+    // still touch any address regardless of reservation
+    private final TreeMap<Integer, Integer> reservedRegions = new TreeMap<>();
     // 0 = use DEFAULT_BYTES; must be set before reset() (which is what
     // actually sizes 'memory') to take effect
     private long maxBytes = 0;
@@ -48,84 +50,35 @@ public final class RawMemory {
         this.maxBytes = maxBytes;
     }
 
-    // (re)sizes the arena and clears every allocation/free-list entry - call
-    // once per program load, mirroring the managed heap's own reset in
+    // (re)sizes the arena and clears every reservation - call once per
+    // program load, mirroring the managed heap's own reset in
     // feed_compiled_file()
     public void reset() {
         memory = new byte[maxBytes > 0 ? (int) maxBytes : DEFAULT_BYTES];
-        allocations.clear();
-        freeList.clear();
-        bumpPointer = 0;
-        reservedAddresses.clear();
+        reservedRegions.clear();
     }
 
-    // first-fit over freeList (no coalescing of adjacent free blocks - an
-    // accepted simplification for this JVM-hosted prototype), falling back
-    // to the bump pointer when nothing frees up
-    public int alloc(int size) {
-        lock.writeLock().lock();
-        try {
-            if (size <= 0)
-                throw new Bl0j_VM_Exception("alloc size must be positive");
-
-            for (int i = 0; i < freeList.size(); i++) {
-                int[] block = freeList.get(i);
-                if (block[1] >= size) {
-                    int addr = block[0];
-                    if (block[1] == size) freeList.remove(i);
-                    else { block[0] += size; block[1] -= size; }
-                    allocations.put(addr, size);
-                    return addr;
-                }
-            }
-
-            if (bumpPointer + size > memory.length)
-                throw new Bl0j_VM_Exception("out of memory: raw memory limit (" + memory.length + " bytes) reached");
-            int addr = bumpPointer;
-            bumpPointer += size;
-            allocations.put(addr, size);
-            return addr;
-        } finally {
-            lock.writeLock().unlock();
-        }
-    }
-
-    public void free(int addr) {
-        lock.writeLock().lock();
-        try {
-            if (reservedAddresses.contains(addr))
-                throw new Bl0j_VM_Exception("cannot free reserved address " + addr);
-            Integer size = allocations.remove(addr);
-            if (size == null)
-                throw new Bl0j_VM_Exception("invalid free: address " + addr + " is not currently allocated");
-            freeList.add(new int[]{addr, size});
-        } finally {
-            lock.writeLock().unlock();
-        }
-    }
-
-    // reserves [addr, addr+size) as permanently allocated - for a fixed
-    // hardware address (an MMIO device's register range) that alloc() must
-    // never hand out and free() can never release. Must be at or past the
-    // current bump pointer: this simple allocator can't retroactively carve
-    // a hole out of space it may already have handed out via alloc(), so
-    // reserving always advances the bump pointer past the reserved region -
-    // any gap between the old bump pointer and addr becomes permanently
-    // unusable, the same way a real address space leaves room below a fixed
-    // device mapping.
+    // reserves [addr, addr+size) - for a fixed hardware address (an MMIO
+    // device's register range) that the OS's own allocator should never
+    // hand out for anything else. Only rejects overlap against *other*
+    // reservations and the arena's own bounds; peek/poke remain unaffected
+    // either way, matching real MMIO's "no isolation" stance.
     public void reserve(int addr, int size) {
         lock.writeLock().lock();
         try {
             if (size <= 0)
                 throw new Bl0j_VM_Exception("reserve size must be positive");
-            if (addr < bumpPointer)
-                throw new Bl0j_VM_Exception("cannot reserve address " + addr + ": already past the allocator's bump pointer (" + bumpPointer + ")");
-            if ((long) addr + size > memory.length)
+            if (addr < 0 || (long) addr + size > memory.length)
                 throw new Bl0j_VM_Exception("cannot reserve: out of raw memory range (" + memory.length + " bytes)");
 
-            allocations.put(addr, size);
-            reservedAddresses.add(addr);
-            bumpPointer = addr + size;
+            Map.Entry<Integer, Integer> prev = reservedRegions.floorEntry(addr);
+            if (prev != null && (long) prev.getKey() + prev.getValue() > addr)
+                throw new Bl0j_VM_Exception("cannot reserve [" + addr + ", " + (addr + size) + "): overlaps existing reservation [" + prev.getKey() + ", " + (prev.getKey() + prev.getValue()) + ")");
+            Map.Entry<Integer, Integer> next = reservedRegions.ceilingEntry(addr);
+            if (next != null && (long) addr + size > next.getKey())
+                throw new Bl0j_VM_Exception("cannot reserve [" + addr + ", " + (addr + size) + "): overlaps existing reservation [" + next.getKey() + ", " + (next.getKey() + next.getValue()) + ")");
+
+            reservedRegions.put(addr, size);
         } finally {
             lock.writeLock().unlock();
         }
@@ -137,10 +90,10 @@ public final class RawMemory {
     }
 
     // big-endian, matching this project's own bytecode format - not
-    // bounds-checked against any specific allocation's own size, only
-    // against the arena as a whole: peek/poke can address anywhere in it
-    // regardless of which alloc() (if any) produced that address, same as
-    // real hardware/MMIO has no isolation between allocations
+    // bounds-checked against any specific region's own size, only against
+    // the arena as a whole: peek/poke can address anywhere in it regardless
+    // of which (if any) reserve() call covers that address, same as real
+    // hardware/MMIO has no isolation between regions
     public long peek(int addr, int widthBytes) {
         lock.readLock().lock();
         try {
@@ -164,6 +117,55 @@ public final class RawMemory {
             }
         } finally {
             lock.readLock().unlock();
+        }
+    }
+
+    // fixed 32-bit word width - this VM's reference-impl stand-in for a
+    // lock-prefixed x86 instruction (`lock cmpxchg`/`lock xadd`). Takes the
+    // WRITE lock, unlike plain peek/poke: this is a genuine read-modify-
+    // write that must be indivisible with respect to every other core's own
+    // atomic op on the same word, not just visible-after-the-fact like a
+    // plain poke(). Both return the value that was there *before* the
+    // operation.
+    public int compareAndSwap(int addr, int expected, int newValue) {
+        lock.writeLock().lock();
+        try {
+            checkBounds(addr, 4);
+            int current = readWord(addr);
+            if (current == expected)
+                writeWord(addr, newValue);
+            return current;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public int atomicAdd(int addr, int delta) {
+        lock.writeLock().lock();
+        try {
+            checkBounds(addr, 4);
+            int current = readWord(addr);
+            writeWord(addr, current + delta);
+            return current;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    // no locking of their own - only ever called from inside
+    // compareAndSwap()/atomicAdd(), which already hold the write lock for
+    // their whole read-modify-write
+    private int readWord(int addr) {
+        int value = 0;
+        for (int i = 0; i < 4; i++)
+            value = (value << 8) | (memory[addr + i] & 0xFF);
+        return value;
+    }
+
+    private void writeWord(int addr, int value) {
+        for (int i = 3; i >= 0; i--) {
+            memory[addr + i] = (byte) value;
+            value >>>= 8;
         }
     }
 }

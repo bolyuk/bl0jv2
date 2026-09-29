@@ -1,5 +1,7 @@
 package bl0.bl0jv2.runtime.interrupt;
 
+import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
+
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -37,18 +39,39 @@ public final class InterruptController {
         }
     }
 
+    // 256 entries, matching a real x86 IDT's fixed size - registerHandler/
+    // raiseInterrupt/handlerFor all reject anything outside this range, so
+    // a future real-hardware backend can size its own IDT identically
+    private static final int VECTOR_COUNT = 256;
+
     private final Map<Integer, HandlerEntry> handlers = new ConcurrentHashMap<>();
     private final PriorityBlockingQueue<PendingInterrupt> pending = new PriorityBlockingQueue<>();
     private int pollInterval = 5;
 
+    private static void checkVector(int vector) {
+        if (vector < 0 || vector >= VECTOR_COUNT)
+            throw new Bl0j_VM_Exception("interrupt vector out of range [0, " + VECTOR_COUNT + "): " + vector);
+    }
+
     public void registerHandler(int vector, int priority, Object fn) {
+        checkVector(vector);
         handlers.put(vector, new HandlerEntry(fn, priority));
     }
 
     public void raiseInterrupt(int vector) {
+        checkVector(vector);
         HandlerEntry entry = handlers.get(vector);
         if (entry != null)
             pending.offer(new PendingInterrupt(vector, entry.priority()));
+    }
+
+    // synchronous lookup for syscall(): the same vector table raiseInterrupt/
+    // pollNext use for async hardware IRQs, just read without touching the
+    // pending queue at all - a syscall is delivered immediately, not queued
+    public Object handlerFor(int vector) {
+        checkVector(vector);
+        HandlerEntry entry = handlers.get(vector);
+        return entry == null ? null : entry.fn();
     }
 
     // returns the highest-priority pending interrupt's vector + handler, or

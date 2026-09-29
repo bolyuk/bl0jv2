@@ -89,14 +89,19 @@ public final class OpCodes {
     // convention as NEW_ARRAY/NEW_TUPLE
     public static final byte MAKE_CLOSURE = 0x35;
 
-    // dispatches at runtime on a's own type: a REF frees a managed heap
-    // value, a plain int frees a raw-memory address (see ALLOC/PEEK/POKE)
+    // frees a managed heap value (a REF) only - there is no VM-level raw
+    // memory allocator (see RawMemory's own javadoc), so a plain int
+    // reaching FREE is always a user error, not a raw-memory free
     public static final byte FREE = 0x36;
 
+    // 0x37 (formerly ALLOC) is free - the VM no longer provides its own
+    // raw-memory allocator; an OS built on this language allocates its own
+    // structures on top of the raw address space, the same way it would on
+    // real physical memory
+
     // a single flat raw-memory arena for kernel-style code (device
-    // buffers, eventually MMIO) - addresses are plain ints, no isolation
-    // between allocations (peek/poke can address anywhere in the arena)
-    public static final byte ALLOC = 0x37;
+    // buffers, MMIO) - addresses are plain ints, no isolation between
+    // regions (peek/poke can address anywhere in the arena)
     public static final byte PEEK = 0x38;
     public static final byte POKE = 0x39;
 
@@ -110,8 +115,8 @@ public final class OpCodes {
     public static final byte REGISTER_HANDLER = 0x3B;
 
     // a and b are the address and size directly (both fit in plain operand
-    // slots, unlike ALLOC/POKE which need the consecutive-registers packing
-    // trick) - marks [a, b) as permanently allocated in the raw arena, see
+    // slots, unlike POKE which needs the consecutive-registers packing
+    // trick) - marks [a, b) as reserved in the raw arena, see
     // RawMemory.reserve()
     public static final byte RESERVE = 0x3C;
 
@@ -120,6 +125,40 @@ public final class OpCodes {
     // specific worker core (see Bl0jv2_jVM.CoreWorker), fire-and-forget -
     // the dispatching core never blocks on this
     public static final byte DISPATCH = 0x3D;
+
+    // a second, port-addressed bus (0-65535), deliberately separate from
+    // the raw memory arena - mirrors real x86 having two independent
+    // address spaces (memory and I/O ports). Same operand shape as
+    // PEEK/POKE: PORT_IN bakes the width in as a's compile-time immediate,
+    // PORT_OUT packs [width, value] into b/b+1 exactly like POKE
+    public static final byte PORT_IN = 0x3E;
+    public static final byte PORT_OUT = 0x3F;
+
+    // vector in a, arg in b - no packing needed, same shape as RESERVE.
+    // Mutates a's own slot with the handler's return value (same
+    // convention as POP/LOOKUP_METHOD). Synchronously invokes whatever
+    // registerHandler() registered for that vector - the same 0-255 vector
+    // table hardware interrupts use (see InterruptController), just
+    // delivered immediately instead of on the next cooperative poll. This
+    // is the only way user-mode code (see the privileged/unprivileged
+    // split on Bl0jv2_jVM's CoreContext) can ask the kernel to do
+    // something on its behalf, mirroring a real `syscall`/`int n` gate.
+    public static final byte SYSCALL = 0x40;
+
+    // both operate on a fixed 32-bit word at the given address, under
+    // RawMemory's write lock for the duration of the read-modify-write -
+    // this VM's reference-impl stand-in for a lock-prefixed x86
+    // instruction. Not privilege-gated: real atomics are usable from user
+    // mode too. Both mutate a's own slot to the value that was there
+    // *before* the operation (matches lock cmpxchg's own semantics, and is
+    // how a caller tells CAS success from failure: old == expected)
+    //
+    // ATOMIC_ADD: addr in a, delta in b directly - no packing needed, same
+    // shape as RESERVE/SYSCALL
+    public static final byte ATOMIC_ADD = 0x41;
+    // ATOMIC_CAS: addr in a, [expected, newValue] packed into b/b+1 - same
+    // trick as POKE
+    public static final byte ATOMIC_CAS = 0x42;
 
     public static final byte HALT = (byte) 0xFF;
 }

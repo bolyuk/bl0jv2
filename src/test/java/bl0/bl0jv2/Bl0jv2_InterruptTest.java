@@ -1,9 +1,11 @@
 package bl0.bl0jv2;
 
+import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 import org.junit.jupiter.api.Test;
 
 import static bl0.bl0jv2.Bl0jv2_TestRunner.run;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 // registerHandler()/raiseInterrupt() - cooperative, priority-ordered
 // interrupts. set_interrupt_poll_interval(1) makes polling deterministic:
@@ -23,6 +25,22 @@ class Bl0jv2_InterruptTest {
                 vm -> vm.set_interrupt_poll_interval(1));
 
         assertEquals("H1|done", out);
+    }
+
+    // vectors are bound to [0, 256), matching a real x86 IDT's fixed size -
+    // this table is also what syscall() reuses (see Bl0jv2_PrivilegeTest),
+    // so the bound applies uniformly to registerHandler/raiseInterrupt/syscall
+    @Test
+    void registeringAVectorOutOfRangeThrows() {
+        assertThrows(Bl0j_VM_Exception.class, () -> run(
+                "def handler(v) { } registerHandler(handler, 256, 1);"));
+        assertThrows(Bl0j_VM_Exception.class, () -> run(
+                "def handler(v) { } registerHandler(handler, -1, 1);"));
+    }
+
+    @Test
+    void raisingAVectorOutOfRangeThrows() {
+        assertThrows(Bl0j_VM_Exception.class, () -> run("raiseInterrupt(256);"));
     }
 
     @Test

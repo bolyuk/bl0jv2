@@ -62,29 +62,30 @@ class Bl0jv2_MemoryTest {
                 vm -> vm.set_max_heap_entries(2)));
     }
 
-    // --- raw memory: alloc/free/peek8/16/32/poke8/16/32 ---
+    // --- raw memory: peek8/16/32/poke8/16/32 - no VM-level allocator: an
+    // address is just a literal, peek/poke never require any prior
+    // reserve()/allocation, exactly like real hardware/MMIO ---
 
     @Test
     void poke8AndPeek8RoundTrip() {
-        assertEquals("200", run("addr = alloc(4); poke8(addr, 200); print peek8(addr);"));
+        assertEquals("200", run("poke8(0, 200); print peek8(0);"));
     }
 
     @Test
     void poke16AndPeek16RoundTrip() {
-        assertEquals("40000", run("addr = alloc(4); poke16(addr, 40000); print peek16(addr);"));
+        assertEquals("40000", run("poke16(0, 40000); print peek16(0);"));
     }
 
     @Test
     void poke32AndPeek32RoundTrip() {
-        assertEquals("300000000", run("addr = alloc(4); poke32(addr, 300000000); print peek32(addr);"));
+        assertEquals("300000000", run("poke32(0, 300000000); print peek32(0);"));
     }
 
     @Test
     void differentWidthsAtAdjacentAddressesDoNotOverlap() {
         assertEquals("200|40000|300000000", run(
-                "addr = alloc(16); " +
-                "poke8(addr, 200); poke16(addr + 1, 40000); poke32(addr + 4, 300000000); " +
-                "print peek8(addr) + '|' + peek16(addr + 1) + '|' + peek32(addr + 4);"));
+                "poke8(0, 200); poke16(1, 40000); poke32(4, 300000000); " +
+                "print peek8(0) + '|' + peek16(1) + '|' + peek32(4);"));
     }
 
     @Test
@@ -102,75 +103,39 @@ class Bl0jv2_MemoryTest {
     }
 
     @Test
-    void freeingAnAddressNeverAllocatedThrows() {
-        assertThrows(Bl0j_VM_Exception.class, () -> run("free(12345);"));
-    }
-
-    @Test
-    void doubleFreeOfARawAddressThrows() {
-        assertThrows(Bl0j_VM_Exception.class, () -> run(
-                "addr = alloc(4); free(addr); free(addr);"));
-    }
-
-    @Test
-    void allocPastMaxRawBytesThrows() {
-        assertThrows(Bl0j_VM_Exception.class, () -> run(
-                "a = alloc(32); b = alloc(32); c = alloc(32);",
-                vm -> vm.set_max_raw_bytes(64)));
-    }
-
-    // proves the raw allocator's free-list actually reuses space - a
-    // bump-only allocator would throw here even though nothing leaked
-    @Test
-    void repeatedAllocFreeOfTheSameSizeReusesSpaceInsteadOfExhaustingTheArena() {
-        assertEquals("done", run(
-                "i = 0; while (i < 50) { a = alloc(32); free(a); i = i + 1; } print 'done';",
-                vm -> vm.set_max_raw_bytes(32)));
-    }
-
-    @Test
-    void freeOnAPlainIntRoutesToRawFreeNotManagedFree() {
-        // if this were misrouted to the managed-heap path, freeing a value
-        // that was never a heap REF would throw a different error (or
-        // corrupt an unrelated heap slot) instead of this clean, expected
-        // "invalid free" for an address that was never alloc()'d
+    void freeOnARawAddressThrowsSinceThereIsNoRawAllocator() {
+        // FREE only ever frees a managed heap value now - a plain int
+        // reaching it (whether or not it was ever a "real" address) is
+        // always a user error
         assertThrows(Bl0j_VM_Exception.class, () -> run("free(42);"));
     }
 
-    // --- reserve: fixed MMIO-style address ranges ---
+    // --- reserve: fixed MMIO-style address ranges - bookkeeping only, to
+    // reject overlapping reservations; peek/poke ignore it entirely ---
 
     @Test
-    void peekAndPokeWorkOnAReservedAddressWithoutAllocatingIt() {
+    void peekAndPokeWorkOnAReservedAddressJustLikeAnyOtherOne() {
         assertEquals("42", run(
                 "reserve(0, 4); poke32(0, 42); print peek32(0);"));
     }
 
     @Test
-    void allocNeverHandsOutAnAddressInsideAReservedRange() {
-        // the arena is exactly 8 bytes; reserving all of it must force
-        // alloc() to fail rather than silently overlap the reservation
+    void peekAndPokeWorkOnAnUnreservedAddressToo() {
+        // reserve() carries no special permission - it's pure bookkeeping
+        // for reserve() itself, not an access-control boundary
+        assertEquals("42", run("poke32(100, 42); print peek32(100);"));
+    }
+
+    @Test
+    void reservedRangesCannotOverlap() {
         assertThrows(Bl0j_VM_Exception.class, () -> run(
-                "reserve(0, 8); alloc(1);",
-                vm -> vm.set_max_raw_bytes(8)));
+                "reserve(0, 8); reserve(4, 8);"));
     }
 
     @Test
-    void allocStillWorksInTheSpaceAfterAReservedRange() {
-        assertEquals("32", run(
-                "reserve(0, 4); addr = alloc(4); poke32(addr, 32); print peek32(addr);",
-                vm -> vm.set_max_raw_bytes(8)));
-    }
-
-    @Test
-    void freeingAReservedAddressThrows() {
-        assertThrows(Bl0j_VM_Exception.class, () -> run("reserve(0, 4); free(0);"));
-    }
-
-    @Test
-    void reservingBehindTheBumpPointerThrows() {
-        // alloc() has already handed out [0, 4) via the bump pointer, so
-        // reserve() can't retroactively claim address 0
-        assertThrows(Bl0j_VM_Exception.class, () -> run("alloc(4); reserve(0, 4);"));
+    void adjacentNonOverlappingReservationsBothSucceed() {
+        assertEquals("done", run(
+                "reserve(0, 4); reserve(4, 4); print 'done';"));
     }
 
     @Test

@@ -83,13 +83,35 @@ class Bl0jv2_UtilsTest {
 
     @Test
     void dumpsMemoryOpcodesByName() throws Exception {
+        // no allocator anymore - peek/poke work on a literal address, FREE
+        // is exercised on a managed value (arrays), not a raw one
         String output = dump(
-                "addr = alloc(16); poke8(addr, 1); x = peek8(addr); free(addr); free(x);");
+                "poke8(0, 1); x = peek8(0); arr = [1]; free(arr);");
 
-        assertTrue(output.contains("ALLOC"));
         assertTrue(output.contains("POKE"));
         assertTrue(output.contains("PEEK"));
         assertTrue(output.contains("FREE"));
+        assertTrue(!output.contains("UNKNOWN"));
+    }
+
+    @Test
+    void dumpsPortIOOpcodesByName() throws Exception {
+        String output = dump("out8(0, 1); x = in8(0);");
+
+        assertTrue(output.contains("PORT_OUT"));
+        assertTrue(output.contains("PORT_IN"));
+        assertTrue(!output.contains("UNKNOWN"));
+    }
+
+    @Test
+    void dumpsSyscallAndAtomicOpcodesByName() throws Exception {
+        String output = dump(
+                "def handler(v) { print v; } registerHandler(handler, 2, 5); " +
+                "x = syscall(2, 0); y = atomicAdd(0, 1); z = atomicCas(0, 1, 2);");
+
+        assertTrue(output.contains("SYSCALL"));
+        assertTrue(output.contains("ATOMIC_ADD"));
+        assertTrue(output.contains("ATOMIC_CAS"));
         assertTrue(!output.contains("UNKNOWN"));
     }
 

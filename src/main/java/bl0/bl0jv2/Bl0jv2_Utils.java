@@ -164,7 +164,6 @@ public final class Bl0jv2_Utils {
                 case OpCodes.CELL_SET -> writer.append(String.format("CELL_SET *r%d = r%d", a, b));
                 case OpCodes.MAKE_CLOSURE -> writer.append(String.format("MAKE_CLOSURE r%d fun=r%d captures@%d count=%d", a, a, a + 1, b));
                 case OpCodes.FREE -> writer.append(String.format("FREE r%d", a));
-                case OpCodes.ALLOC -> writer.append(String.format("ALLOC r%d = alloc(r%d)", a, a));
                 case OpCodes.PEEK -> writer.append(String.format("PEEK r%d = *r%d (%d-bit)", a, a, b));
                 // b is a register holding [width, value] (SET_FIELD's own
                 // packing trick), not an immediate the way PEEK's b is -
@@ -173,6 +172,11 @@ public final class Bl0jv2_Utils {
                 case OpCodes.REGISTER_HANDLER -> writer.append(String.format("REGISTER_HANDLER fn=r%d vector=r%d priority=r%d", a, b, b + 1));
                 case OpCodes.RESERVE -> writer.append(String.format("RESERVE addr=r%d size=r%d", a, b));
                 case OpCodes.DISPATCH -> writer.append(String.format("DISPATCH fn=r%d core=r%d arg=r%d", a, b, b + 1));
+                case OpCodes.PORT_IN -> writer.append(String.format("PORT_IN r%d = in(r%d) (%d-bit)", a, a, b));
+                case OpCodes.PORT_OUT -> writer.append(String.format("PORT_OUT out(*r%d) width=r%d value=r%d", a, b, b + 1));
+                case OpCodes.SYSCALL -> writer.append(String.format("SYSCALL r%d = syscall(vector=r%d, arg=r%d)", a, a, b));
+                case OpCodes.ATOMIC_ADD -> writer.append(String.format("ATOMIC_ADD r%d = atomicAdd(*r%d, r%d)", a, a, b));
+                case OpCodes.ATOMIC_CAS -> writer.append(String.format("ATOMIC_CAS r%d = atomicCas(*r%d, expected=r%d, new=r%d)", a, a, b, b + 1));
                 default -> writer.append("UNKNOWN");
             }
             writer.append(String.format("%n"));
