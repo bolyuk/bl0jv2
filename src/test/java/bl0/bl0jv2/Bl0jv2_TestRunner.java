@@ -49,6 +49,15 @@ public final class Bl0jv2_TestRunner {
      * imports are resolved relative to the entry file's own location.
      */
     public static String runFile(Path entryFile) {
+        return runFile(entryFile, null);
+    }
+
+    // same as the single-arg overload, but lets a test configure the VM
+    // first (set_core_count(), in particular - needed for anything that
+    // dispatch()es a second core, e.g. stdlib/net/http.bl0's own client+
+    // server demo, which can't run on one core: httpServe() blocks the
+    // whole way through accepting a connection)
+    public static String runFile(Path entryFile, Consumer<Bl0jv2_jVM> configure) {
         try {
             String source = Files.readString(entryFile);
             var lexer = new Bl0jv2_Lexer();
@@ -61,7 +70,7 @@ public final class Bl0jv2_TestRunner {
                 throw new IllegalStateException("parser did not produce a program");
 
             var linked = Bl0jv2_Linker.resolveImports(program, entryFile);
-            return runInstructions(compiler.compile(linked), null);
+            return runInstructions(compiler.compile(linked), configure);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

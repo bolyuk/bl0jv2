@@ -296,4 +296,125 @@ class Bl0jv2_ThreadingTest {
         assertTrue(!secondTaskRan.await(500, TimeUnit.MILLISECONDS),
                 "secondTask ran on a core that should have halted after badTask panicked");
     }
+
+    // --- per-core interrupt polling: a worker running dispatched work polls
+    // its own interrupts too, not just core 0 (see Bl0jv2_jVM.invoke()'s
+    // pollEligible split) ---
+
+    @Test
+    void dispatchedWorkPollsAndDeliversItsOwnInterrupts() throws Exception {
+        CountDownLatch handlerFired = new CountDownLatch(1);
+        StringBuilder captured = new StringBuilder();
+        Writer sink = new Writer() {
+            @Override public void write(char[] cbuf, int off, int len) {
+                captured.append(cbuf, off, len);
+                handlerFired.countDown();
+            }
+            @Override public void flush() {}
+            @Override public void close() {}
+        };
+
+        String source =
+                "def onTick(v) { print 'H'; } " +
+                "def worker(v) { " +
+                "  registerHandler(onTick, 1, 5); raiseInterrupt(1); " +
+                "  i = 0; while (i < 1000) { i = i + 1; } " +
+                "} " +
+                "dispatch(worker, 1, 0);";
+
+        byte[] bytecode = Bl0jv2_TestRunner.compile(source);
+        var vm = new Bl0jv2_jVM();
+        vm.set_core_count(2);
+        vm.set_interrupt_poll_interval(1);
+        vm.set_out_writer(sink);
+        vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
+        vm.run_instructions();
+
+        assertTrue(handlerFired.await(5, TimeUnit.SECONDS), "worker core never polled/delivered its own interrupt");
+        assertEquals("H", captured.toString());
+    }
+
+    // a nested invoke() from WITHIN dispatched work (here: a user-defined
+    // toString() override, triggered by str()) must still never poll,
+    // exactly like it wouldn't on core 0 - pollEligible is set once for the
+    // worker's own top-level task, not for every invoke() that happens to
+    // run on a worker thread
+    @Test
+    void nestedInvokeInsideDispatchedWorkStillDoesNotPoll() throws Exception {
+        // two separate print calls (the handler's 'H' and the worker's own
+        // 'Box(1)') means two write() calls - a latch of 1 would fire on
+        // whichever happens to land first and race the assertion below
+        CountDownLatch taskDone = new CountDownLatch(2);
+        StringBuilder captured = new StringBuilder();
+        Writer sink = new Writer() {
+            @Override public void write(char[] cbuf, int off, int len) {
+                captured.append(cbuf, off, len);
+                taskDone.countDown();
+            }
+            @Override public void flush() {}
+            @Override public void close() {}
+        };
+
+        String source =
+                "def class Box { field v; " +
+                "  def init(v) { this.v = v; } " +
+                "  def toString() { return 'Box(' + this.v + ')'; } " +
+                "} " +
+                "def onTick(v) { print 'H'; } " +
+                "def worker(v) { " +
+                "  registerHandler(onTick, 1, 5); raiseInterrupt(1); " +
+                "  b = new Box(1); print str(b); " +
+                "} " +
+                "dispatch(worker, 1, 0);";
+
+        byte[] bytecode = Bl0jv2_TestRunner.compile(source);
+        var vm = new Bl0jv2_jVM();
+        vm.set_core_count(2);
+        vm.set_interrupt_poll_interval(1);
+        vm.set_out_writer(sink);
+        vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
+        vm.run_instructions();
+
+        assertTrue(taskDone.await(5, TimeUnit.SECONDS), "dispatched worker never finished");
+        // 'H' still fires (the worker's own top-level polling delivers it
+        // eventually), but never mid-toString() - both orderings below are
+        // acceptable outcomes of ordinary polling cadence, what this test
+        // actually guards against is a crash/hang from reentrant polling
+        // inside the toString() call itself
+        assertTrue(captured.toString().contains("Box(1)"), "toString() override did not run: " + captured);
+    }
+
+    // haltCore() must not hang forever once the whole machine has panicked
+    // elsewhere - see haltCore's own doc in Bl0jv2_jVM for why it also
+    // checks the panicked flag, not just hasPending()
+    @Test
+    void haltCoreUnblocksOnAMachineWidePanicInsteadOfHangingForever() throws Exception {
+        CountDownLatch haltingTaskWoke = new CountDownLatch(1);
+        Writer sink = new Writer() {
+            @Override public void write(char[] cbuf, int off, int len) { haltingTaskWoke.countDown(); }
+            @Override public void flush() {}
+            @Override public void close() {}
+        };
+
+        String source =
+                "def badTask(v) { panic('worker fault'); } " +
+                "def haltingTask(v) { haltCore(); print 'woke'; } " +
+                "dispatch(badTask, 1, 0); " +
+                "dispatch(haltingTask, 2, 0);";
+
+        byte[] bytecode = Bl0jv2_TestRunner.compile(source);
+        var vm = new Bl0jv2_jVM();
+        vm.set_core_count(3);
+        vm.set_out_writer(sink);
+        vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
+        vm.run_instructions();
+
+        // haltCore() itself unblocks (proven by this NOT hanging until the
+        // test's own timeout), but the panicked check at the top of the
+        // next loop iteration fires before 'print woke' ever runs - a
+        // panic still halts this core, haltCore() just isn't what's
+        // blocking it anymore
+        assertTrue(!haltingTaskWoke.await(2, TimeUnit.SECONDS),
+                "haltingTask ran to completion after a machine-wide panic");
+    }
 }

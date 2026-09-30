@@ -1,0 +1,85 @@
+import 'ip.bl0'; // brings in netByteToChar() too - see its own doc
+
+// minimal UDP over the IP layer below: an 8-byte header (src port, dst
+// port, length, checksum) plus a payload. The checksum field is always
+// left at 0 - RFC768 explicitly allows this over IPv4 ("If the computed
+// checksum is zero, it is transmitted as all ones... An all zero
+// transmitted checksum means the transmitter generated no checksum"), and
+// a real UDP checksum needs a pseudo-header (src/dst IP + protocol + UDP
+// length prepended before checksumming) that buys nothing extra on a
+// loopback link that can't corrupt data in the first place.
+//
+// message is a bl0jv2 STRING, not a byte array - the only rich text type
+// this language has, so it's the natural payload type for callers, even
+// though every header (and the frame itself) underneath is plain bytes.
+
+def class UdpPacket {
+    field srcIp;
+    field srcPort;
+    field dstIp;
+    field dstPort;
+    field message;
+}
+
+def udpBuildHeader(srcPort, dstPort, payloadLen) {
+    udpLen = 8 + payloadLen;
+    return [
+        byteAt(srcPort, 8), byteAt(srcPort, 0),
+        byteAt(dstPort, 8), byteAt(dstPort, 0),
+        byteAt(udpLen, 8), byteAt(udpLen, 0),
+        0, 0
+    ];
+}
+
+def udpSend(srcIp, srcPort, dstIp, dstPort, message) {
+    payload = [];
+    i = 0;
+    while (i < len(message)) {
+        push(payload, int(message[i]));
+        i = i + 1;
+    }
+
+    udpHeader = udpBuildHeader(srcPort, dstPort, len(payload));
+    ipHeader = ipBuildHeader(srcIp, dstIp, Ip.protoUdp, len(udpHeader) + len(payload));
+
+    frame = [];
+    i = 0;
+    while (i < len(ipHeader)) { push(frame, ipHeader[i]); i = i + 1; }
+    i = 0;
+    while (i < len(udpHeader)) { push(frame, udpHeader[i]); i = i + 1; }
+    i = 0;
+    while (i < len(payload)) { push(frame, payload[i]); i = i + 1; }
+
+    nicSend(frame);
+}
+
+def udpHasPacket() {
+    return nicHasFrame();
+}
+
+// caller must check udpHasPacket() first, same contract nicRecv() already
+// has for an empty queue
+def udpReceive() {
+    frame = nicRecv();
+    ipHeader = ipParseHeader(frame);
+
+    srcPort = u16From(frame, 20);
+    dstPort = u16From(frame, 22);
+    udpLen = u16From(frame, 24);
+    payloadLen = udpLen - 8;
+
+    message = '';
+    i = 0;
+    while (i < payloadLen) {
+        message = message + netByteToChar(frame[28 + i]);
+        i = i + 1;
+    }
+
+    pkt = new UdpPacket();
+    pkt.srcIp = ipHeader.srcAddr;
+    pkt.srcPort = srcPort;
+    pkt.dstIp = ipHeader.dstAddr;
+    pkt.dstPort = dstPort;
+    pkt.message = message;
+    return pkt;
+}

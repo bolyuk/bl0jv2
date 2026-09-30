@@ -1,11 +1,13 @@
 package bl0.bl0jv2;
 
+import bl0.bl0jv2.runtime.Bl0jv2_jVM;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.function.Consumer;
 
 import static bl0.bl0jv2.Bl0jv2_TestRunner.runFile;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,6 +29,17 @@ class Bl0jv2_StdlibTest {
         Path entry = dir.resolve("entry.bl0");
         Files.writeString(entry, "import '" + libPath(libFile) + "'; " + body);
         return runFile(entry);
+    }
+
+    // needed for anything that dispatch()es a second core (see
+    // Bl0jv2_TestRunner.runFile's own doc on why) - stdlib/net/http.bl0's
+    // client+server demo in particular, since httpServe() blocks the whole
+    // way through accepting a connection and has nothing else to run
+    // against on a single core
+    private static String run(Path dir, String libFile, String body, Consumer<Bl0jv2_jVM> configure) throws IOException {
+        Path entry = dir.resolve("entry.bl0");
+        Files.writeString(entry, "import '" + libPath(libFile) + "'; " + body);
+        return runFile(entry, configure);
     }
 
     // --- mathlib ---
@@ -128,5 +141,194 @@ class Bl0jv2_StdlibTest {
     @Test
     void strSplit(@TempDir Path dir) throws IOException {
         assertEquals("[a, b, c]", run(dir, "str/split.bl0", "print split('a,b,c', ',');"));
+    }
+
+    // --- net/* --- a toy IP/UDP stack over a virtual loopback NIC (see
+    // stdlib/net/nic.bl0's own doc for why loopback, not a real socket).
+    // initNic() must run before anything else in this group - same
+    // "not automatically done at import time" rule kernel.bl0's own
+    // initKeyboard()/initConsole() follow elsewhere in this project.
+    // raiseInterrupt() only queues delivery for the next cooperative poll
+    // (see its own doc), so every test below busy-waits a few iterations
+    // after a send before checking the receive side - the loop is a safety
+    // margin, not a real timing dependency (poll interval defaults to 5
+    // instructions, and there's always far more than that between a send
+    // and the following check).
+
+    @Test
+    void nicLoopbackRoundTrips(@TempDir Path dir) throws IOException {
+        assertEquals("true|[1, 2, 3]|false", run(dir, "net/nic.bl0",
+                "initNic(); " +
+                "nicSend([1, 2, 3]); " +
+                "i = 0; while (i < 20 && !nicHasFrame()) { i = i + 1; } " +
+                "print nicHasFrame() + '|' + nicRecv() + '|' + nicHasFrame();"));
+    }
+
+    @Test
+    void nicRecvIsFifoNotLifo(@TempDir Path dir) throws IOException {
+        assertEquals("[1, 1]|[2, 2]", run(dir, "net/nic.bl0",
+                "initNic(); " +
+                "nicSend([1, 1]); " +
+                "i = 0; while (i < 20 && !nicHasFrame()) { i = i + 1; } " +
+                "nicSend([2, 2]); " +
+                "i = 0; while (i < 20 && len(Nic.rxQueue) < 2) { i = i + 1; } " +
+                "print nicRecv() + '|' + nicRecv();"));
+    }
+
+    @Test
+    void ipChecksumIsZeroOverAnAlreadyCorrectHeaderAndNonZeroIfCorrupted(@TempDir Path dir) throws IOException {
+        assertEquals("0|true", run(dir, "net/ip.bl0",
+                "h = ipBuildHeader(0x01020304, 0x05060708, Ip.protoUdp, 3); " +
+                "before = ipChecksum(h); " +
+                "h[0] = 0xFF; " +
+                "print before + '|' + (ipChecksum(h) != 0);"));
+    }
+
+    @Test
+    void ipParseHeaderRecoversWhatWasBuilt(@TempDir Path dir) throws IOException {
+        assertEquals("16909060|84281096|17|3", run(dir, "net/ip.bl0",
+                "h = ipBuildHeader(0x01020304, 0x05060708, Ip.protoUdp, 3); " +
+                "parsed = ipParseHeader(h); " +
+                "print parsed.srcAddr + '|' + parsed.dstAddr + '|' + parsed.proto + '|' + parsed.payloadLen;"));
+    }
+
+    @Test
+    void udpSendAndReceiveRoundTripsThroughTheLoopbackNic(@TempDir Path dir) throws IOException {
+        assertEquals("true|true|5000|6000|hello|false", run(dir, "net/udp.bl0",
+                "initNic(); " +
+                "srcIp = 0x0A000001; dstIp = 0x0A000002; " +
+                "udpSend(srcIp, 5000, dstIp, 6000, 'hello'); " +
+                "i = 0; while (i < 20 && !udpHasPacket()) { i = i + 1; } " +
+                "pkt = udpReceive(); " +
+                "print (pkt.srcIp == srcIp) + '|' + (pkt.dstIp == dstIp) + '|' + pkt.srcPort + '|' + pkt.dstPort + '|' + pkt.message + '|' + udpHasPacket();"));
+    }
+
+    @Test
+    void udpPreservesArrivalOrderAcrossMultiplePackets(@TempDir Path dir) throws IOException {
+        assertEquals("first|second", run(dir, "net/udp.bl0",
+                "initNic(); " +
+                "udpSend(1, 100, 2, 200, 'first'); " +
+                "i = 0; while (i < 20 && !udpHasPacket()) { i = i + 1; } " +
+                "udpSend(1, 100, 2, 200, 'second'); " +
+                "i = 0; while (i < 20 && len(Nic.rxQueue) < 2) { i = i + 1; } " +
+                "p1 = udpReceive(); p2 = udpReceive(); " +
+                "print p1.message + '|' + p2.message;"));
+    }
+
+    // udpReceive()/tcpParseSegment() used to rebuild a payload string with
+    // char() (stdlib/str/char.bl0) - fine for a keyboard byte, wrong here:
+    // char() maps anything outside printable ASCII to '?', silently eating
+    // \r/\n on the way through. netByteToChar() (ip.bl0) is what both
+    // layers actually use now - this is the regression test for that.
+    @Test
+    void udpPreservesCrlfInThePayload(@TempDir Path dir) throws IOException {
+        assertEquals("line1\r\nline2", run(dir, "net/udp.bl0",
+                "initNic(); " +
+                "udpSend(1, 100, 2, 200, 'line1\\r\\nline2'); " +
+                "i = 0; while (i < 20 && !udpHasPacket()) { i = i + 1; } " +
+                "print udpReceive().message;"));
+    }
+
+    // --- tcp.bl0 --- a real three-way handshake, real seq/ack numbers, a
+    // real four-way close - see tcp.bl0's own header comment for exactly
+    // what's simplified away (no retransmission, no MSS segmentation) and
+    // why a lossless loopback link has no need for it. All of these run on
+    // one core: tcpConnect()'s own internal pump loop services BOTH sides
+    // (the registry it searches is shared, not per-connection - see
+    // tcpPump()'s own doc), so nothing here needs dispatch().
+
+    @Test
+    void tcpHandshakeDataExchangeAndClose(@TempDir Path dir) throws IOException {
+        assertEquals("ESTABLISHED|ESTABLISHED|GET / HTTP/1.0|HTTP/1.0 200 OK|CLOSED|CLOSED", run(dir, "net/tcp.bl0",
+                "initNic(); " +
+                "server = tcpListen(0x0A000001, 8080); " +
+                "client = tcpConnect(0x0A000002, 5000, 0x0A000001, 8080); " +
+                "tcpAccept(server); " +
+                "print server.state + '|' + client.state + '|'; " +
+                "tcpSend(client, 'GET / HTTP/1.0'); " +
+                "i = 0; while (i < 40 && !tcpHasData(server)) { i = i + 1; wait(1); } " +
+                "print tcpReceive(server) + '|'; " +
+                "tcpSend(server, 'HTTP/1.0 200 OK'); " +
+                "i = 0; while (i < 40 && !tcpHasData(client)) { i = i + 1; wait(1); } " +
+                "print tcpReceive(client) + '|'; " +
+                "tcpClose(client); tcpClose(server); " +
+                "tcpWaitClosed(client); tcpWaitClosed(server); " +
+                "print client.state + '|' + server.state;"));
+    }
+
+    // proves the seq/rcvNext bookkeeping is actually correct across MULTIPLE
+    // sends on the same connection, not just a single one - the exact bug
+    // this stack shipped with initially (SYN_SENT double-incremented
+    // sndNext by one, so every byte sent after the handshake carried the
+    // wrong sequence number and got silently dropped as "out of order")
+    @Test
+    void tcpDeliversMultipleSendsInOrder(@TempDir Path dir) throws IOException {
+        assertEquals("onetwothree", run(dir, "net/tcp.bl0",
+                "initNic(); " +
+                "server = tcpListen(1, 8080); " +
+                "client = tcpConnect(2, 5000, 1, 8080); " +
+                "tcpAccept(server); " +
+                "tcpSend(client, 'one'); " +
+                "tcpSend(client, 'two'); " +
+                "tcpSend(client, 'three'); " +
+                "received = ''; parts = 0; " +
+                "i = 0; while (parts < 3 && i < 60) { " +
+                "  if (tcpHasData(server)) { received = received + tcpReceive(server); parts = parts + 1; } " +
+                "  else { wait(1); } " +
+                "  i = i + 1; " +
+                "} " +
+                "print received;"));
+    }
+
+    // --- http.bl0 --- one request per connection, GET only, framed by
+    // connection close (see http.bl0's own doc on why that's still
+    // "HTTP/1.0", not just text-over-TCP). httpServe() blocks the whole
+    // way through accepting a connection, so - unlike every tcp.bl0 test
+    // above - this genuinely needs a second core: dispatch()'d there via
+    // vm.set_core_count(2), the same real-worker-thread mechanism
+    // aeon-os/smp_boot.bl0 demonstrates. serverIp lives on a static field,
+    // not a top-level variable, because serverTask is a plain 'def'
+    // function - see kernel.bl0's own doc (elsewhere in this project) on
+    // why a top-level variable wouldn't be visible there at all.
+    // no SYN retransmission in this stack (see tcp.bl0's own doc - a
+    // lossless loopback link has no need for it, PROVIDED both ends are
+    // already up before anyone sends anything): a fixed wait() here would
+    // be racing the server's own tcpListen() registering itself, and a
+    // client SYN that arrives before that registration is just silently
+    // dropped, forever, with nothing to retry it - so this polls
+    // TcpRegistry.conns directly for the server's own LISTEN entry to
+    // actually confirm it before httpGet() ever sends anything
+    private static final String WAIT_FOR_LISTENER =
+            "wi = 0; while (wi < 200 && len(TcpRegistry.conns) < 1) { wi = wi + 1; wait(1); } ";
+
+    @Test
+    void httpClientServerRoundTrip(@TempDir Path dir) throws IOException {
+        assertEquals("you asked for /hello", run(dir, "net/http.bl0",
+                "initNic(); " +
+                "def class Config { static field serverIp; } " +
+                "Config.serverIp = 0x0A000001; " +
+                "def handler(path) { return 'you asked for ' + path; } " +
+                "def serverTask(arg) { httpServe(Config.serverIp, 8080, handler); } " +
+                "dispatch(serverTask, 1, 0); " +
+                WAIT_FOR_LISTENER +
+                "response = httpGet(0x0A000002, 5000, Config.serverIp, 8080, '/hello'); " +
+                "print httpParseResponse(response).body;",
+                vm -> vm.set_core_count(2)));
+    }
+
+    @Test
+    void httpResponseStatusLineIsParsedSeparatelyFromTheBody(@TempDir Path dir) throws IOException {
+        assertEquals("HTTP/1.0 200 OK|you asked for /x", run(dir, "net/http.bl0",
+                "initNic(); " +
+                "def class Config { static field serverIp; } " +
+                "Config.serverIp = 0x0A000001; " +
+                "def handler(path) { return 'you asked for ' + path; } " +
+                "def serverTask(arg) { httpServe(Config.serverIp, 8080, handler); } " +
+                "dispatch(serverTask, 1, 0); " +
+                WAIT_FOR_LISTENER +
+                "response = httpGet(0x0A000002, 5000, Config.serverIp, 8080, '/x'); " +
+                "r = httpParseResponse(response); " +
+                "print r.statusLine + '|' + r.body;",
+                vm -> vm.set_core_count(2)));
     }
 }

@@ -1,45 +1,47 @@
-// aeon-os: a tiny kernel written entirely in bl0jv2. Nothing outside this
-// file participates - the "OS" is just the Bl0jv2_jVM running boot.bl0c,
-// same as any other compiled program. Everything a kernel needs (device
-// access, interrupts, fault isolation, scheduling, and now memory
-// management itself) is expressed in bl0jv2, using primitives the VM
-// exposes: reserve/peek/poke for hardware, registerHandler/raiseInterrupt/
-// disable/enableInterrupts for interrupts, try/catch for recoverable
-// faults, panic() for fatal ones. The VM deliberately does NOT provide a
+// aeon-os: a tiny kernel written entirely in bl0jv2. Driver code (heap,
+// keyboard, console, process journal) lives in aeon-os/kernel.bl0 and is
+// imported below, not copy-pasted here - see that file's own header
+// comment for what "shared" means now that exec() runs a loaded program in
+// THIS SAME Bl0jv2_jVM instance, not a separate one (see Bl0jv2_jVM's own
+// exec() doc). Everything a kernel needs (device access, interrupts, fault
+// isolation, scheduling, memory management, a HID input driver, and
+// launching+logging child processes) is expressed in bl0jv2, using
+// primitives the VM exposes: reserve/peek/poke and in/out for hardware,
+// registerHandler/raiseInterrupt/disable/enableInterrupts for interrupts,
+// exec() to launch a child process, try/catch for recoverable faults,
+// panic() for fatal ones. The VM deliberately does NOT provide a
 // general-purpose allocator (no alloc()/free() for raw memory) - real
-// hardware doesn't either, so the heap allocator below is this kernel's
+// hardware doesn't either, so kernel.bl0's heap allocator is this kernel's
 // own, built on nothing but reserve()/peek()/poke().
+//
+// This file is the closest thing aeon-os has to "the OS proper": it boots,
+// runs its own cooperative scheduler demo, then launches (and journals)
+// three child processes - two trivial ones (child_hello, child_crash)
+// proving what sharing one VM instance actually buys and costs, and
+// aeon-os/shell.bl0c itself, which is how the interactive shell is reached
+// now - not by running shell.bl0c directly. `bl0jv2 -e -k aeon-os/boot.bl0c`
+// bridges real stdin straight through: there is only ever one VM instance
+// now, so there is no "which process is currently running" redirection to
+// do (see Bl0jv2_CLI's own -k doc) - whichever exec()'d code registered a
+// keyboard handler just sees it.
 
 import '../stdlib/mathlib.bl0';
+import 'kernel.bl0';
 
-// --- MMIO: a fixed "system info" register block, reserved so the heap
-// allocator below can never hand these addresses out for anything else ---
-SYS_INFO_BASE = 0;
+// --- raw memory layout: kernel.bl0's heap counter owns address 0 (see its
+// own doc) - everything else this kernel reserves has to sit AFTER it.
+// The "system info" register block is a fixed MMIO-style block at 4-11,
+// reserved so kalloc() can never hand those addresses out for anything
+// else. initHeap() must run before the first kalloc() call anywhere in
+// the whole exec() chain that follows (boot.bl0 boots first, so it's the
+// one place this has to happen) ---
+SYS_INFO_BASE = 4;
 SYS_INFO_SIZE = 8;
 SYS_MAGIC = 0xAE07C0DE;
 
 reserve(SYS_INFO_BASE, SYS_INFO_SIZE);
 poke32(SYS_INFO_BASE, SYS_MAGIC);
-
-// --- kernel heap: a minimal bump allocator, entirely in bl0jv2. No
-// free-list, no reuse - kfree() is a deliberate no-op. A real allocator
-// (free-list, buddy, slab, whatever policy this kernel wants) is exactly
-// the kind of decision that belongs here, in the OS, not baked into the
-// VM - this is the simplest one that proves the pattern works end to end ---
-def class HeapAlloc {
-    static field nextFree;
-}
-HeapAlloc.nextFree = SYS_INFO_BASE + SYS_INFO_SIZE;
-
-def kalloc(size) {
-    addr = HeapAlloc.nextFree;
-    HeapAlloc.nextFree = HeapAlloc.nextFree + size;
-    return addr;
-}
-
-def kfree(addr) {
-    // no-op - see HeapAlloc's own comment above
-}
+initHeap(SYS_INFO_BASE + SYS_INFO_SIZE);
 
 println '=== aeon-os booting ===';
 println 'sys info magic: ' + toHex(peek32(SYS_INFO_BASE));
@@ -59,8 +61,11 @@ def class Kernel {
 Kernel.uptimeTicks = 0;
 Kernel.faultCount = 0;
 
-// --- interrupt vectors ---
-VECTOR_TIMER = 1;
+// --- interrupt vectors --- (kernel.bl0 uses Keyboard.vector=2 and
+// Console.sysWriteVector=1 for its own drivers - this one is boot.bl0's
+// own, so it picks a vector kernel.bl0 doesn't use, even though boot.bl0
+// itself never calls kernel.bl0's initKeyboard()/initConsole())
+VECTOR_TIMER = 3;
 
 def onTimerTick(vector) {
     Kernel.uptimeTicks = Kernel.uptimeTicks + 1;
@@ -200,6 +205,46 @@ while (cycle < 5) {
 println '';
 println 'kernel uptime ticks: ' + Kernel.uptimeTicks;
 println 'faults isolated by the scheduler: ' + Kernel.faultCount;
+
+// --- launching child processes: exec() (kernel.bl0's journalExec()
+// wrapper around it) loads and runs a SEPARATE compiled file, appended
+// into THIS SAME Bl0jv2_jVM's own address space (see Bl0jv2_jVM's own
+// exec() doc) - same heap, same raw memory, same devices as this kernel.
+// Every relocated address is unique, so child_hello/child_crash/shell can
+// each define their own same-named classes/functions (they do, via their
+// own kernel.bl0 import) with zero collision - but they're sharing real
+// state now, which is why they all agreed on kernel.bl0's fixed heap
+// layout (see its own doc) instead of each assuming address 0 is free.
+// Paths are resolved against the process's own working directory, not
+// this file's location (unlike import above) ---
+println '';
+println '--- launching child processes ---';
+
+journalExec('child_hello', 'aeon-os/child_hello.bl0c');
+
+// child_crash.bl0 fails with an ORDINARY runtime error on purpose (not
+// panic()) - journalExec() catches it right at the exec() call site,
+// exactly like any other exec() failure, and records it as a crash in the
+// journal rather than letting it propagate further. This kernel keeps
+// running afterward, which is the actual point: an ordinary bug in
+// exec()'d code doesn't have to be fatal to the whole machine. A REAL
+// panic() would be different - since everything now shares one VM
+// instance, panic() anywhere sets the ONE 'panicked' flag and halts
+// everything, no exceptions (see the final integrity check below, and
+// Bl0jv2_jVM's own exec() doc on why that's correct, not a limitation)
+journalExec('child_crash', 'aeon-os/child_crash.bl0c');
+
+// the interactive shell - a real child process now, not inlined code.
+// With -k, real stdin reaches it directly (see this file's own header
+// comment); without it, the shell's own busy-poll loop just never sees
+// any input and exits only if something else raises its 'exit' path -
+// running boot.bl0 non-interactively will make this journal entry hang
+// until killed, exactly like launching an interactive shell with no
+// controlling terminal would on a real system
+journalExec('shell', 'aeon-os/shell.bl0c');
+
+println '';
+printJournal();
 
 // --- shutdown: a routine integrity check, and what happens when one
 // fails. A task error is recoverable (see taskFaulty above, caught and

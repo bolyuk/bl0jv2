@@ -65,4 +65,19 @@ class Bl0jv2_PortIOTest {
         assertThrows(Bl0j_VM_Exception.class, () -> run("dropToUserMode(); out8(0, 1);"));
         assertThrows(Bl0j_VM_Exception.class, () -> run("dropToUserMode(); in8(0);"));
     }
+
+    // hostPortWrite(): the host-side (Java) counterpart to raiseInterrupt() -
+    // simulates a real device (e.g. a keyboard controller) placing a byte on
+    // its own data port from OUTSIDE the running program, for in8() to read.
+    // See Bl0jv2_KeyboardTest for the fuller "device write + raiseInterrupt()"
+    // pairing this is meant to support.
+    @Test
+    void hostPortWriteIsVisibleToIn8() {
+        assertEquals("42", run("print in8(5);", vm -> vm.hostPortWrite(5, 1, 42)));
+    }
+
+    @Test
+    void hostPortWriteRespectsWidth() {
+        assertEquals("40000", run("print in16(5);", vm -> vm.hostPortWrite(5, 2, 40000)));
+    }
 }

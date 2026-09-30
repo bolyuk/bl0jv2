@@ -1,5 +1,6 @@
 package bl0.bl0jv2;
 
+import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Panic;
 import org.junit.jupiter.api.Test;
 
@@ -45,5 +46,24 @@ class Bl0jv2_PanicTest {
     void panicMessageIsPrefixed() {
         Bl0j_VM_Panic ex = assertThrows(Bl0j_VM_Panic.class, () -> run("panic('oops');"));
         assertTrue(ex.getMessage().startsWith("panic:"));
+    }
+
+    // panic() halts the WHOLE shared machine (see Bl0jv2_jVM's own
+    // panicked-flag doc), so it must not be reachable from user mode - a
+    // userspace bug should never be able to take the kernel down with it.
+    // User-mode code gets an ordinary, catchable Bl0j_VM_Exception instead
+    // of an actual panic, the same as any other privileged native it isn't
+    // allowed to call (requirePrivileged's own doc).
+    @Test
+    void panicFromUserModeThrowsAnOrdinaryExceptionInsteadOfPanicking() {
+        assertThrows(Bl0j_VM_Exception.class, () ->
+                run("dropToUserMode(); panic('should not halt the machine');"));
+    }
+
+    @Test
+    void panicFromUserModeIsCatchable() {
+        assertEquals("recovered", run(
+                "dropToUserMode(); " +
+                "try { panic('blocked'); } catch (e) { print 'recovered'; }"));
     }
 }

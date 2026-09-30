@@ -1,0 +1,154 @@
+// aeon-os (shell): a tiny bash-like REPL, running almost entirely in USER
+// MODE. Single-core, like boot.bl0 - not smp_boot.bl0 - because nothing
+// here needs more than one core, and it sidesteps that file's own
+// cross-core interrupt-stealing hazard entirely (see its header comment).
+// Driver code (heap, keyboard, console) comes from aeon-os/kernel.bl0, not
+// copy-pasted here - see that file's own header comment for what "shared"
+// does and doesn't mean. Normally launched as a child process of
+// aeon-os/boot.bl0 (via journalExec('shell', ...) - see boot.bl0's own
+// header comment), not run directly, though running this file's own
+// compiled output standalone still works the same way it always did.
+//
+// The kernel does its one-time setup (heap, keyboard driver, console
+// device + syscall gate) while still privileged, then drops to user mode
+// ONCE, right before the shell starts. Everything from there on - the
+// REPL loop and every command it runs - executes unprivileged. `reboot`
+// proves it: it tries to bypass the console's syscall gate and write to
+// the device directly, and gets blocked, the same enforcement pattern
+// smp_boot.bl0's taskRogue demonstrates.
+//
+// Reading the keyboard needs no syscall at all: kbHasInput()/kbReadChar()
+// only ever peek8() a ring buffer in raw memory (never gated - see
+// requirePrivileged's own doc on why) - it's a read-only, kernel-populated
+// buffer userspace polls directly, the same shape a real io_uring/vDSO
+// shared ring gives userspace lock-free reads without a syscall per byte.
+// Writing to the actual console device is a different story - out8() IS
+// gated, so every command's output goes through syscall(sysWriteVector).
+//
+// A syscall handler must never itself call haltCore(): the only thing
+// that can actually turn a *pending* interrupt into a *delivered* one
+// (i.e. run its handler, which is what would make kbHasInput() true) is
+// the outermost poll-eligible execute() loop - and a syscall trap has
+// already left that loop by the time its own handler body runs. Blocking
+// there waits for a delivery that can only happen after the block ends,
+// which never happens. This is why the REPL loop below busy-polls
+// kbHasInput() directly instead of trying to wrap it in a "blocking read"
+// syscall - a design this file's author tried first, and which hangs for
+// exactly the reason above.
+
+import '../stdlib/mathlib.bl0';
+import 'kernel.bl0';
+
+// when boot.bl0 exec()s this file, it already called kernel.bl0's
+// initHeap() with ITS OWN reserved regions accounted for (see its own
+// doc) - since exec() now shares one raw memory arena (see Bl0jv2_jVM's
+// own exec() doc), calling initHeap() again here would reset that shared
+// counter and let this file's own kalloc() calls overwrite whatever the
+// kernel (or an earlier child) already allocated. peek32(0) reading back
+// 0 is how a fresh, never-initialized counter looks (see kernel.bl0's own
+// doc) - not a bulletproof test in general, but reliable for this
+// project, where every initHeap() caller reserves at least a few bytes
+// below the heap first, so a real heapBase is never actually 0. This is
+// what lets this file still run standalone (`bl0jv2 -e -k
+// aeon-os/shell.bl0c`, no boot.bl0 involved) as well as exec()'d
+if (peek32(0) == 0) {
+    initHeap(4);
+}
+initKeyboard();
+initConsole();
+
+// --- built-in commands ---
+def cmdHelp() {
+    consoleWriteLine('available commands: help, echo <text>, uptime, whoami, reboot, exit');
+}
+
+def cmdUptime() {
+    consoleWriteLine('uptime: ' + ticks() + 'ms');
+}
+
+def cmdWhoami() {
+    if (isPrivileged()) {
+        consoleWriteLine('kernel');
+    } else {
+        consoleWriteLine('user');
+    }
+}
+
+// deliberately tries to bypass the syscall gate and write to the console
+// device directly - proves the ring boundary is real, not just documented
+def cmdReboot() {
+    try {
+        out8(Console.port, 0);
+        consoleWriteLine('rebooting...');
+    } catch (e) {
+        consoleWriteLine('reboot: permission denied');
+    }
+}
+
+def class ShellState {
+    static field running;
+}
+ShellState.running = true;
+
+def runCommand(line) {
+    if (line == 'help') { cmdHelp(); return nil; }
+    if (line == 'uptime') { cmdUptime(); return nil; }
+    if (line == 'whoami') { cmdWhoami(); return nil; }
+    if (line == 'reboot') { cmdReboot(); return nil; }
+    if (line == 'exit') {
+        consoleWriteLine('bye');
+        ShellState.running = false;
+        return nil;
+    }
+    if (startsWith(line, 'echo ')) {
+        consoleWriteLine(substr(line, 5, len(line)));
+        return nil;
+    }
+    if (line == '') { return nil; }
+    consoleWriteLine(line + ': command not found');
+}
+
+println '=== aeon-os shell booting ===';
+
+dropToUserMode();
+
+println 'aeon-shell ready - type a command, press enter (try: help)';
+print '$ ';
+
+line = '';
+commandsRun = 0;
+// busy-polls kbHasInput() - no haltCore() (privileged, and see this
+// file's own header comment on why it wouldn't help here even if it
+// weren't), same accepted trade-off as smp_boot.bl0's own completion wait.
+// The wait(5) in the empty branch is what keeps this from pegging a real
+// CPU core at 100% for as long as the shell sits idle at its prompt -
+// wait() is just Thread.sleep() under the hood (see its own doc), plain
+// and unprivileged, so it's fine to call from here even after
+// dropToUserMode(). 5ms is well under any human's actual keystroke rate,
+// so it costs no perceptible input latency - and since -k sets the
+// interrupt poll interval to 1 (see Bl0jv2_CLI's own doc), a keypress that
+// arrives mid-sleep is still delivered on the very next instruction this
+// core executes once the sleep returns, not delayed any further than that
+while (ShellState.running) {
+    if (kbHasInput()) {
+        b = kbReadChar();
+        if (b == 13) {
+            println '';
+            runCommand(line);
+            line = '';
+            commandsRun = commandsRun + 1;
+            if (ShellState.running) {
+                print '$ ';
+            }
+        } else {
+            ch = char(b);
+            line = line + ch;
+            print ch;
+        }
+    } else {
+        wait(5);
+    }
+}
+
+println '';
+println '=== aeon-shell exiting after ' + commandsRun + ' commands ===';

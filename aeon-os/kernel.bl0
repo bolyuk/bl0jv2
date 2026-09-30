@@ -1,0 +1,207 @@
+// aeon-os (kernel): shared kernel-level building blocks, imported by every
+// aeon-os program that needs them (boot.bl0, shell.bl0, and anything
+// exec()'d from either) - a single source of truth instead of the same
+// driver code copy-pasted into every file that needs a heap/keyboard/
+// console. exec() (see Bl0jv2_jVM's own doc) runs a loaded program in the
+// SAME Bl0jv2_jVM instance as whatever called it - same managed heap, raw
+// memory, ports and interrupt table, not a second one - so this really is
+// shared RUNTIME state now, not just shared source: boot.bl0's own
+// reservations and this file's heap counter are things every exec()'d
+// program genuinely shares, the same way every process on one real
+// computer shares its one physical memory.
+//
+// That sharing is exactly why the heap bump-counter below lives in RAW
+// MEMORY at a fixed address instead of a managed static field: a managed
+// field is a SEPARATE piece of storage for every program that imports this
+// file, even though they're now all running in the same address space -
+// only an agreed-upon fixed address is actually common ground between
+// them, the same way real physical memory works. Every OTHER program that
+// wants a heap has to agree on that address too (see initHeap()'s own doc).
+
+// char()/startsWith()/substr() used to be reimplemented right here instead
+// of imported - stdlib/str/char.bl0 in particular replaces an old
+// byteToChar() that only covered lowercase letters, digits and 7 symbols
+// (any uppercase letter or most punctuation silently rendered as '?'; the
+// stdlib version covers the full printable ASCII range instead)
+import '../stdlib/str/char.bl0';
+import '../stdlib/str/affix.bl0';
+import '../stdlib/str/substr.bl0';
+
+// --- kernel heap: a minimal bump allocator, backed by one 32-bit counter
+// at raw address 0. No free-list, no reuse - kfree() is a deliberate
+// no-op. A real allocator (free-list, buddy, slab, whatever policy a
+// kernel wants) is exactly the kind of decision that belongs in the OS,
+// not baked into the VM - this is the simplest one that proves the
+// pattern works end to end ---
+
+// call ONCE, by whichever code boots first (boot.bl0, in this project) -
+// NOT by every importer, and NOT at import time (kernel.bl0 is spliced in
+// wherever the import statement sits, so calling kalloc() unconditionally
+// here would race the caller's own MMIO reservations, however early the
+// import happens to appear - see Bl0jv2_Linker's own doc). heapBase is the
+// first address the allocator may hand out; the caller picks it based on
+// whatever else needs to sit below it (a reserve()'d MMIO block, etc) -
+// the same reserve()-then-set-the-bump-pointer pattern this project has
+// used since before exec() existed, just via a fixed raw address instead
+// of a managed field
+def initHeap(heapBase) {
+    poke32(0, heapBase);
+}
+
+def kalloc(size) {
+    return atomicAdd(0, size);
+}
+
+def kfree(addr) {
+    // no-op - see this section's own header comment
+}
+
+// --- keyboard: a tiny HID driver stack - port -> interrupt handler -> ring
+// buffer -> consumer API, the same shape a real PS/2 keyboard driver has.
+// This VM has no real keyboard behind a port (see PortIO's own doc), so
+// the "device" is simulated from the host side - Bl0jv2_jVM.hostPortWrite()
+// + raiseInterrupt() from a test, or the CLI's own -k flag bridging real
+// stdin the same way (see Bl0jv2_CLI's own doc) - the driver code below
+// has no idea, and doesn't need to: it only ever sees a byte arrive on a
+// port and an interrupt fire, exactly as it would from real hardware.
+//
+// The ring buffer's storage is raw memory from the kernel heap (kalloc()),
+// not a managed Bl0jArray - Bl0jArray only exposes push()/pop(), which is
+// LIFO (last typed key read first), wrong order for an input stream ---
+def class Keyboard {
+    static field dataPort;
+    static field vector; // static field, not a top-level variable, because
+                          // initKeyboard() (a plain 'def' function) needs
+                          // to read it - see this file's own header
+                          // comment on why a top-level variable wouldn't
+                          // be visible there at all
+    static field bufferAddr;
+    static field bufferSize;
+    static field head; // next slot the ISR writes to
+    static field tail; // next slot a reader consumes from
+}
+Keyboard.dataPort = 0;
+Keyboard.vector = 2;
+Keyboard.bufferSize = 32;
+Keyboard.head = 0;
+Keyboard.tail = 0;
+
+// one slot is always left empty so head==tail can mean "empty" without
+// also meaning "full" - a classic ring-buffer trade-off, not a bug. A full
+// buffer drops the newest byte rather than overwriting unread input -
+// simplest policy a real driver could still make a different call here
+def onKeyboardIRQ(vector) {
+    nextHead = (Keyboard.head + 1) % Keyboard.bufferSize;
+    if (nextHead == Keyboard.tail) {
+        return nil;
+    }
+    poke8(Keyboard.bufferAddr + Keyboard.head, in8(Keyboard.dataPort));
+    Keyboard.head = nextHead;
+}
+
+// call once, after the importer has reserved whatever fixed regions it
+// needs and set HeapAlloc.nextFree past them - NOT at import time: this
+// calls kalloc() (to size the ring buffer) and registerHandler(), and
+// doing that unconditionally the moment kernel.bl0 is spliced in would
+// race the importer's own MMIO reservation, however early in the
+// importing file the import statement happens to sit (imports splice in
+// at that exact position, see Bl0jv2_Linker's own doc - there is no
+// "imports always run last" rule to lean on instead)
+def initKeyboard() {
+    Keyboard.bufferAddr = kalloc(Keyboard.bufferSize);
+    registerHandler(onKeyboardIRQ, Keyboard.vector, 50);
+}
+
+def kbHasInput() {
+    return Keyboard.head != Keyboard.tail;
+}
+
+// caller must check kbHasInput() first - reading an empty buffer is a
+// caller error, same spirit as pop() on an empty array elsewhere in bl0jv2
+def kbReadChar() {
+    c = peek8(Keyboard.bufferAddr + Keyboard.tail);
+    Keyboard.tail = (Keyboard.tail + 1) % Keyboard.bufferSize;
+    return c;
+}
+
+// --- console device: only kernel code may out8() to it directly (see
+// requirePrivileged's own doc) - unprivileged code goes through
+// sysConsoleWrite()/consoleWrite()/consoleWriteLine() instead ---
+def class Console {
+    static field port;
+    static field sysWriteVector;
+}
+Console.port = 1; // distinct from the keyboard's own port (0)
+Console.sysWriteVector = 1;
+
+// runs ELEVATED (syscall()'s trap gate - see invokeAsTrap), regardless of
+// which ring the calling command was in. Prints what it wrote via plain
+// print(), same PoC stance as smp_boot.bl0's sysPutc: this reference VM
+// has no real display behind the port, so this is how the write becomes
+// observable at all
+def sysConsoleWrite(byteValue) {
+    out8(Console.port, byteValue);
+    print char(byteValue);
+}
+
+// call once - see initKeyboard()'s own doc on why this isn't done at
+// import time either (registerHandler() itself isn't order-sensitive the
+// way kalloc() is, but keeping both drivers' init explicit and symmetric
+// is worth more than saving one function call)
+def initConsole() {
+    registerHandler(sysConsoleWrite, Console.sysWriteVector, 1);
+}
+
+def consoleWrite(s) {
+    i = 0;
+    while (i < len(s)) {
+        syscall(Console.sysWriteVector, int(s[i]));
+        i = i + 1;
+    }
+}
+
+def consoleWriteLine(s) {
+    consoleWrite(s);
+    println '';
+}
+
+// --- process journal: a log of every exec() a kernel-level caller has
+// launched through journalExec() - name, outcome (ok / crashed: <message>)
+// and how long it ran. exec() itself knows nothing about this; it's pure
+// kernel-side bookkeeping wrapped AROUND exec(), the same way a real init
+// system/shell logs what it launches without the kernel's own
+// process-creation syscall needing to care ---
+def class ProcessJournal {
+    static field entries;
+    static field nextPid;
+}
+ProcessJournal.entries = [];
+ProcessJournal.nextPid = 1;
+
+def journalExec(name, path) {
+    pid = ProcessJournal.nextPid;
+    ProcessJournal.nextPid = ProcessJournal.nextPid + 1;
+    startTick = ticks();
+    println '  [journal] pid ' + pid + ' starting ' + name + ' (' + path + ')';
+
+    status = 'ok';
+    try {
+        exec(path);
+    } catch (e) {
+        status = 'crashed: ' + e;
+    }
+
+    elapsedMs = ticks() - startTick;
+    push(ProcessJournal.entries, 'pid=' + pid + ' name=' + name + ' status=' + status + ' elapsedMs=' + elapsedMs);
+    println '  [journal] pid ' + pid + ' ' + name + ': ' + status + ' (' + elapsedMs + 'ms)';
+    return status;
+}
+
+def printJournal() {
+    println '--- process journal (' + len(ProcessJournal.entries) + ' entries) ---';
+    i = 0;
+    while (i < len(ProcessJournal.entries)) {
+        println '  ' + ProcessJournal.entries[i];
+        i = i + 1;
+    }
+}

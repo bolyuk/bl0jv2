@@ -1,0 +1,95 @@
+import 'tcp.bl0';
+import '../str/find.bl0';
+
+// minimal HTTP/1.0 over the TCP stack below - one request per connection,
+// GET only, no headers either side actually needs to send or parse
+// (Content-Length, Host, etc. are all skipped). The response has no
+// framing of its own: like real HTTP/1.0 without a Content-Length header,
+// the body simply ends when the server closes the connection - httpGet()
+// reads until it sees the peer's FIN, httpServe() always closes right
+// after writing its one response. That's what makes this "HTTP/1.0", not
+// just "a text protocol over TCP": it's the actual convention that
+// version of the spec uses for framing a response.
+
+def class Http {
+    static field version;
+}
+Http.version = 'HTTP/1.0';
+
+// GETs 'path' from serverIp:serverPort, using localIp/localPort as this
+// end's own address (tcpConnect() needs one - see its own doc). Blocks
+// until the server closes its end - see this file's own header comment on
+// why that's how a response ends here, not a length header. Returns the
+// raw response text (status line + blank line + body) unparsed - see
+// httpParseResponse() to split it into pieces.
+def httpGet(localIp, localPort, serverIp, serverPort, path) {
+    conn = tcpConnect(localIp, localPort, serverIp, serverPort);
+    tcpSend(conn, 'GET ' + path + ' ' + Http.version + '\r\n\r\n');
+
+    response = '';
+    while (!conn.peerFinReceived) {
+        if (tcpHasData(conn)) {
+            response = response + tcpReceive(conn);
+        } else {
+            wait(1);
+        }
+    }
+    response = response + tcpReceive(conn); // whatever arrived alongside the FIN itself
+
+    tcpClose(conn);
+    return response;
+}
+
+def class HttpResponse {
+    field statusLine;
+    field body;
+}
+
+def httpParseResponse(response) {
+    r = new HttpResponse();
+    sep = find(response, '\r\n\r\n');
+    if (sep < 0) {
+        r.statusLine = response;
+        r.body = '';
+        return r;
+    }
+    r.statusLine = substr(response, 0, sep);
+    r.body = substr(response, sep + 4, len(response));
+    return r;
+}
+
+// 'GET <path> HTTP/1.0\r\n\r\n' - only the request line, no headers to
+// look past, so the path is just what's between the first two spaces
+def httpParsePath(request) {
+    afterMethod = len('GET ');
+    rest = substr(request, afterMethod, len(request));
+    pathLen = find(rest, ' ');
+    return substr(rest, 0, pathLen);
+}
+
+// accepts exactly ONE request, hands its path to 'handler' (a plain
+// bl0jv2 function: path -> response body string), writes the response,
+// then closes - this stack's tcpListen()/tcpAccept() pair only ever
+// accepts one connection per call anyway (see tcpListen()'s own doc), so
+// a multi-request server would just call this again in a loop, each time
+// with a fresh tcpListen().
+def httpServe(localIp, localPort, handler) {
+    conn = tcpListen(localIp, localPort);
+    tcpAccept(conn);
+
+    request = '';
+    while (find(request, '\r\n\r\n') < 0) {
+        if (tcpHasData(conn)) {
+            request = request + tcpReceive(conn);
+        } else {
+            wait(1);
+        }
+    }
+
+    path = httpParsePath(request);
+    body = handler(path);
+
+    tcpSend(conn, Http.version + ' 200 OK\r\n\r\n' + body);
+    tcpClose(conn);
+    tcpWaitClosed(conn);
+}

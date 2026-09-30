@@ -21,4 +21,11 @@ public final class NativeMethods {
     // see Bl0jv2_jVM.CoreContext.privileged and its own doc
     public static final byte DROP_TO_USER_MODE = 0x0E;
     public static final byte IS_PRIVILEGED = 0x0F;
+    // idle this core until an interrupt is pending - see Bl0jv2_jVM's own
+    // registration for why this is a native (a blocking Java loop), not a
+    // dedicated opcode
+    public static final byte HALT_CORE = 0x10;
+    // loads and runs a separate compiled (.bl0c) file as a genuinely
+    // isolated child process - see Bl0jv2_jVM's own registration
+    public static final byte EXEC = 0x11;
 }

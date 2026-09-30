@@ -1,11 +1,16 @@
 package bl0.bl0jv2;
 
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
+import bl0.bl0jv2.runtime.Bl0jv2_jVM;
 import org.junit.jupiter.api.Test;
+
+import java.io.StringWriter;
+import java.nio.ByteBuffer;
 
 import static bl0.bl0jv2.Bl0jv2_TestRunner.run;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 // registerHandler()/raiseInterrupt() - cooperative, priority-ordered
 // interrupts. set_interrupt_poll_interval(1) makes polling deterministic:
@@ -157,5 +162,50 @@ class Bl0jv2_InterruptTest {
                 vm -> vm.set_interrupt_poll_interval(1));
 
         assertEquals("AHB", out);
+    }
+
+    // --- haltCore(): idle until an interrupt is pending, then hand control
+    // back to the normal cooperative poll (haltCore() itself never
+    // delivers anything - see its own registration in Bl0jv2_jVM) ---
+
+    @Test
+    void haltCoreFromUserModeThrows() {
+        assertThrows(Bl0j_VM_Exception.class, () -> run("dropToUserMode(); haltCore();"));
+    }
+
+    // the interrupt is raised from a background Java thread (simulating a
+    // real host-side device/timer) after a real delay - proves haltCore()
+    // actually blocks the calling thread rather than returning immediately,
+    // and that the normal poll still delivers once it does return
+    @Test
+    void haltCoreBlocksUntilAnInterruptBecomesPendingThenDelivers() throws Exception {
+        String source =
+                "def onTick(v) { print 'H'; } " +
+                "registerHandler(onTick, 1, 5); " +
+                "haltCore(); " +
+                "print 'woke';";
+
+        byte[] bytecode = Bl0jv2_TestRunner.compile(source);
+        var vm = new Bl0jv2_jVM();
+        vm.set_interrupt_poll_interval(1);
+        StringWriter sw = new StringWriter();
+        vm.set_out_writer(sw);
+        vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
+
+        Thread raiser = new Thread(() -> {
+            try {
+                Thread.sleep(150);
+            } catch (InterruptedException ignored) {
+            }
+            vm.raiseInterrupt(1);
+        });
+        raiser.start();
+
+        long start = System.nanoTime();
+        vm.run_instructions();
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertEquals("Hwoke", sw.toString());
+        assertTrue(elapsedMs >= 140, "haltCore() returned suspiciously early: " + elapsedMs + "ms");
     }
 }

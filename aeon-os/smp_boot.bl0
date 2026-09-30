@@ -10,7 +10,54 @@
 // boot.bl0) AND a real Mutex (races BETWEEN cores, which disableInterrupts()
 // does nothing for - see Bl0jMutex's own doc). Both matter here for real:
 // with genuine parallelism, two cores really can be inside addTask() at
-// the same instant.
+// the same instant. Scheduler.tasks is a compound structure (an array),
+// which is exactly what a Mutex is for - a single raw-memory word has a
+// cheaper option instead (see the heap allocator and completion counter
+// below), which is why not everything in this file uses a Mutex.
+//
+// --- atomics instead of a Mutex, where the shared state fits in one word ---
+// The kernel heap's own bump pointer and the task-completion counter are
+// both single 32-bit words in raw memory, so both use atomicAdd() instead
+// of a Mutex + a managed static field - lock-free, and genuinely simpler
+// code (kalloc() is one line). A Mutex still protects Scheduler.tasks
+// above, because atomicAdd/atomicCas only ever touch one word at a time;
+// an array needs real mutual exclusion, not a single atomic op.
+//
+// --- haltCore() is NOT used for the completion wait below, and that's a
+// deliberate choice, not an oversight ---
+// The obvious design would have each worker raiseInterrupt() once done and
+// have core 0 haltCore() instead of spinning. It doesn't work: now that
+// every core polls the SAME shared pending-interrupt queue (see
+// Bl0jv2_jVM's own per-core polling), a raise meant to wake core 0
+// specifically can just as easily be drained by whichever busy worker
+// happens to poll next (taskCompute's own tight loop polls constantly) -
+// haltCore() only unblocks on hasPending(), so if every raise keeps
+// getting stolen before core 0's own check observes it, core 0 can stay
+// asleep forever even after Kernel.doneCounterAddr has already reached its
+// target. This VM has no notion of a targeted, core-specific wakeup
+// (a real inter-processor interrupt) - every vector is one shared table,
+// fine for a device IRQ nobody cares which core services, wrong for "wake
+// up THIS core". So: the counter below (already race-free, via atomicAdd)
+// is polled directly instead - correct, just not as idle as it could be
+// with real IPI support, which is future VM work, not something to fake
+// here.
+//
+// --- privilege rings ---
+// Core 0 (the scheduler) stays kernel-mode for its entire life - it's the
+// only code in this file allowed to touch hardware directly. Every worker
+// core (1..Kernel.numCores-1) is a dedicated USER core instead: the first
+// task ever dispatched to it calls ensureUserMode(), which drops that
+// core to user mode once and for all (there is no way back up except for
+// the duration of a syscall() trap - see dropToUserMode()'s own doc).
+// Every task dispatched to that worker afterward - this one or any other -
+// runs unprivileged, proven by taskRogue below, which tries to bypass the
+// console device's syscall gate and gets a privilege fault instead.
+//
+// A "process" here is really just "whichever worker core a task happens to
+// land on" - simplified, but a legitimate reading of the primitives this
+// VM actually provides: one ring bit per core (see CoreContext.privileged),
+// not a full per-task address space/context switch, which is real future
+// work, not something bolted on here.
 //
 // Known language limitations hit writing this (same ones from boot.bl0,
 // still true): a plain 'def' function can't close over a top-level
@@ -19,38 +66,95 @@
 // qualified name from any function regardless of nesting.
 
 import '../stdlib/mathlib.bl0';
+import 'kernel.bl0';
 
 def class Kernel {
     static field numCores;
-    static field completedCount;
-    static field lock;
+    static field doneCounterAddr;
+    // portConsole/sysPutcVector live here, not as plain top-level
+    // variables, for the same reason every other piece of shared state in
+    // this file does: a plain 'def' function (sysPutc, taskNetwork,
+    // taskRogue below) can't see an enclosing top-level variable at all -
+    // only a static field, reached by its explicit qualified name, works
+    // from any function regardless of nesting (see this file's own header
+    // comment on this limitation)
+    static field portConsole;
+    static field sysPutcVector;
 }
 Kernel.numCores = 4; // core 0 (scheduler) + 3 workers
-Kernel.completedCount = 0;
-Kernel.lock = newMutex();
+Kernel.portConsole = 0;
+Kernel.sysPutcVector = 1;
 
-// --- kernel heap: same minimal bump allocator as boot.bl0 (see its own
-// comment) - the VM provides no raw-memory allocator of its own, on
-// purpose, so every core sharing this heap goes through kalloc()/kfree(),
-// which serializes allocation with a real Mutex the same way addTask()
-// below serializes the run queue ---
+// --- kernel heap: a minimal bump allocator, same idea as boot.bl0's (see
+// its own comment) - the VM provides no raw-memory allocator of its own,
+// on purpose. Lock-free: atomicAdd() both returns the previous counter
+// value (the address to hand out) and advances it, indivisibly, so
+// concurrent kalloc() calls from different cores never race the way two
+// plain peek()+poke() calls would (see Bl0jv2_AtomicsTest's own race test
+// in the VM's test suite for a from-first-principles proof of that).
+// counterAddr is a static field, not a top-level variable, for the same
+// reason as everywhere else in this file: kalloc() is a plain 'def'
+// function and can't see an enclosing top-level variable at all ---
 def class HeapAlloc {
-    static field nextFree;
-    static field lock;
+    static field counterAddr;
 }
-HeapAlloc.nextFree = 0;
-HeapAlloc.lock = newMutex();
+HeapAlloc.counterAddr = 0; // one 32-bit word: HeapAlloc's own bump pointer
+
+// --- raw memory layout: two atomically-updated counters, reserved so
+// kalloc() below can never hand either address out for anything else -
+// the heap proper starts right after both, at HEAP_BASE ---
+Kernel.doneCounterAddr = 4; // one 32-bit word, incremented by taskDone()
+HEAP_BASE = 8;
+reserve(0, 8);
+poke32(HeapAlloc.counterAddr, HEAP_BASE);
+poke32(Kernel.doneCounterAddr, 0);
 
 def kalloc(size) {
-    lock(HeapAlloc.lock);
-    addr = HeapAlloc.nextFree;
-    HeapAlloc.nextFree = HeapAlloc.nextFree + size;
-    unlock(HeapAlloc.lock);
-    return addr;
+    return atomicAdd(HeapAlloc.counterAddr, size);
 }
 
 def kfree(addr) {
     // no-op - see boot.bl0's own HeapAlloc comment
+}
+
+// --- the console "device": a single port that only kernel code may write
+// to directly (out8()/in8() are privileged instructions, same as
+// reserve()/registerHandler()/dispatch() - see requirePrivileged's own
+// doc). This reference VM has no real device behind a port (see PortIO's
+// own doc), so the driver below also mirrors what it wrote via println,
+// purely so the demo's output is observable - a real backend would drive
+// actual hardware from here instead, the user-facing contract (go through
+// the syscall, never touch the port yourself) wouldn't change. Both
+// Kernel.portConsole and Kernel.sysPutcVector are effectively constants
+// (assigned once, above, and never reassigned) - they still have to be
+// static fields, not top-level variables, purely so sysPutc()/taskNetwork()/
+// taskRogue() below can see them at all - see Kernel's own field comment ---
+
+// kernel-side driver - runs ELEVATED (syscall()'s trap gate forces kernel
+// mode for exactly this handler's own body, see invokeAsTrap), regardless
+// of which ring the calling task was in, then the caller's own privilege
+// is restored automatically once this returns
+def sysPutc(byteValue) {
+    out8(Kernel.portConsole, byteValue);
+    println '  [console] driver wrote 0x' + toHex(byteValue) + ' to port ' + Kernel.portConsole;
+}
+
+// --- syscall ABI: registers sysPutc() on the same 0-255 vector table
+// registerHandler()/raiseInterrupt() use for hardware IRQs (see
+// InterruptController.handlerFor's own doc) - syscall() just delivers
+// synchronously instead of on the next poll ---
+registerHandler(sysPutc, Kernel.sysPutcVector, 1);
+
+// every user task calls this first. Safe to call from every task
+// dispatched to a given worker, not just the first one: the first call
+// actually drops privilege, every later call on that (already-unprivileged)
+// core just observes isPrivileged() == false and skips - dropToUserMode()
+// itself throws if called while already unprivileged (see its own doc), so
+// this check is required, not optional
+def ensureUserMode() {
+    if (isPrivileged()) {
+        dropToUserMode();
+    }
 }
 
 def class Scheduler {
@@ -145,23 +249,29 @@ def dispatchNext() {
 }
 
 def taskDone() {
-    lock(Kernel.lock);
-    Kernel.completedCount = Kernel.completedCount + 1;
-    unlock(Kernel.lock);
+    atomicAdd(Kernel.doneCounterAddr, 1);
 }
 
 // --- demo tasks: each reports which real core it actually ran on, to
-// make the parallelism observable rather than taken on faith ---
+// make the parallelism observable rather than taken on faith. Every one
+// calls ensureUserMode() first - the core it lands on runs the rest of
+// the task, and every task dispatched to it afterward, unprivileged ---
 
 def taskLogger() {
+    ensureUserMode();
     println '    [logger] running on core ' + currentCore();
     taskDone();
 }
 
 def taskNetwork() {
+    ensureUserMode();
     buf = kalloc(4);
     poke32(buf, 0xC0FFEE);
     println '    [network] running on core ' + currentCore() + ', packet ' + toHex(peek32(buf));
+    // out8() itself is privileged and this task is not - syscall() is the
+    // only path left to the console device, handled by sysPutc() above.
+    // buf+3: the packet's low byte (0xC0FFEE is big-endian, buf+0 is 0x00)
+    syscall(Kernel.sysPutcVector, peek8(buf + 3));
     kfree(buf);
     taskDone();
 }
@@ -169,10 +279,31 @@ def taskNetwork() {
 // enough real work that genuine cross-core overlap is plausible, not just
 // three near-instant tasks that happen to interleave trivially
 def taskCompute() {
+    ensureUserMode();
     i = 0;
     sum = 0;
     while (i < 200000) { sum = sum + i; i = i + 1; }
     println '    [compute] running on core ' + currentCore() + ', sum=' + sum;
+    taskDone();
+}
+
+// deliberately tries to bypass the syscall gate and talk to the console
+// device directly, to prove the ring boundary is real and not just
+// documented - out8() must throw here. Catches its own fault rather than
+// letting it escape uncaught: unlike boot.bl0's single-core scheduler
+// (whose runOnce() wraps every task in its own try/catch), dispatch() here
+// has no scheduler-level fault isolation - an uncaught exception in a
+// dispatched task is only logged to stderr by the worker (see CoreWorker's
+// own catch block) and never calls taskDone(), which would strand the
+// completion count below and hang the final wait forever
+def taskRogue() {
+    ensureUserMode();
+    try {
+        out8(Kernel.portConsole, 99);
+        println '    [rogue] this should never print';
+    } catch (e) {
+        println '    [rogue] blocked: ' + e;
+    }
     taskDone();
 }
 
@@ -183,6 +314,7 @@ addTask(new Task('network', 20, taskNetwork));
 addTask(new Task('compute-a', 10, taskCompute));
 addTask(new Task('compute-b', 10, taskCompute));
 addTask(new Task('compute-c', 10, taskCompute));
+addTask(new Task('rogue', 15, taskRogue));
 
 println '';
 println '--- dispatching all ready tasks across cores ---';
@@ -194,11 +326,45 @@ while (true) {
 
 println '';
 println '--- waiting for all dispatched tasks to complete ---';
+// a plain busy-poll, not haltCore() - see this file's own header comment
+// on why a targeted, core-specific wakeup isn't safe to build on yet. The
+// wait(1) still keeps this from pegging core 0 at 100% for the loop's
+// whole (short but nonzero) duration - this is a raw-memory counter check,
+// completely unrelated to the interrupt poll mechanism (see kbHasInput's
+// own comment in shell.bl0 for why THAT loop's wait() doesn't delay input
+// delivery), so there's no delivery-latency trade-off to weigh here at all
 while (true) {
-    lock(Kernel.lock); done = Kernel.completedCount; unlock(Kernel.lock);
-    if (done >= 5) { break; }
+    done = peek32(Kernel.doneCounterAddr);
+    if (done >= 6) { break; }
+    wait(1);
 }
 
 println '';
-println 'all ' + Kernel.completedCount + ' tasks completed across ' + (Kernel.numCores - 1) + ' worker cores';
+println 'all ' + peek32(Kernel.doneCounterAddr) + ' tasks completed across ' + (Kernel.numCores - 1) + ' worker cores';
+
+// --- launching the interactive shell: exec()'d on core 0 itself (the only
+// core that stayed privileged this whole time - see this file's own header
+// comment on privilege rings), same journalExec()/kernel.bl0 pattern
+// boot.bl0 uses. Its heap counter at raw address 0 is this file's own
+// HeapAlloc.counterAddr - literally the same word, not a coincidence: both
+// files agreed on address 0 for a bump counter, so shell.bl0's own
+// import (kernel.bl0's kalloc()) just keeps advancing the counter this
+// file already started, and its own peek32(0)==0 self-init check correctly
+// sees it's non-zero and skips re-initializing. vector 1 is reused too -
+// this file's own sysPutc (registered above, for taskNetwork's syscall
+// demo) gets overwritten by kernel.bl0's initConsole() below (registerHandler
+// always replaces whatever was on a vector - see InterruptController's own
+// doc); harmless, since every task that needed vector 1 already ran and
+// completed before the shell is launched. Run with `-e -k` to actually type
+// into it (see Bl0jv2_CLI's own -k doc) - without -k this just hangs at the
+// prompt like launching an interactive shell with no controlling terminal
+// would on a real system ---
+println '';
+println '--- launching shell ---';
+journalExec('shell', 'aeon-os/shell.bl0c');
+
+println '';
+printJournal();
+
+println '';
 println '=== aeon-os (SMP) halted cleanly ===';

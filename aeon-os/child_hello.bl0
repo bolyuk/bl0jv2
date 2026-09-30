@@ -1,0 +1,15 @@
+// aeon-os (child_hello): a trivial standalone process, meant to be exec()'d
+// from boot.bl0 - imports kernel.bl0 like any other aeon-os program does,
+// so it shares the running kernel's own heap correctly (see kernel.bl0's
+// own doc: address 0 is its shared bump-counter now, not free scratch
+// space - a hardcoded address here would silently corrupt it). Everything
+// this writes lives in the SAME raw memory as the kernel that exec()'d it
+// (see Bl0jv2_jVM's own exec() doc) - kalloc() is what keeps that safe,
+// not a separate address space.
+
+import 'kernel.bl0';
+
+println '  [child_hello] hi, running in this kernels own address space';
+buf = kalloc(4);
+poke32(buf, 0xC0FFEE);
+println '  [child_hello] wrote and read back: ' + peek32(buf);

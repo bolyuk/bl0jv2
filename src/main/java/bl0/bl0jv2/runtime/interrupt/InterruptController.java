@@ -93,6 +93,13 @@ public final class InterruptController {
         return new Fired(next.vector(), entry.fn());
     }
 
+    // used by haltCore() to block a core until there's something worth
+    // waking up for, without actually consuming it (that's pollNext()'s
+    // job, respecting priority and the caller's own masking state)
+    public boolean hasPending() {
+        return !pending.isEmpty();
+    }
+
     public int pollInterval() {
         return pollInterval;
     }

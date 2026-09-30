@@ -41,7 +41,7 @@ public final class PortIO {
     // big-endian, matching RawMemory.peek()/this project's own bytecode
     // format
     public long read(int port, int widthBytes) {
-        lock.readLock().lock();
+        lock();
         try {
             checkBounds(port, widthBytes);
             long value = 0;
@@ -49,12 +49,12 @@ public final class PortIO {
                 value = (value << 8) | (ports[port + i] & 0xFFL);
             return value;
         } finally {
-            lock.readLock().unlock();
+            unlock();
         }
     }
 
     public void write(int port, int widthBytes, long value) {
-        lock.readLock().lock();
+        lock();
         try {
             checkBounds(port, widthBytes);
             for (int i = widthBytes - 1; i >= 0; i--) {
@@ -62,7 +62,15 @@ public final class PortIO {
                 value >>>= 8;
             }
         } finally {
-            lock.readLock().unlock();
+            unlock();
         }
+    }
+
+    private void lock(){
+        lock.readLock().lock();
+    }
+
+    private void unlock(){
+        lock.readLock().unlock();
     }
 }

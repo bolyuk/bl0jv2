@@ -13,6 +13,8 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -193,8 +195,17 @@ public final class Bl0jv2_jVM {
             return null;
         });
         // unrecoverable by design - see Bl0j_VM_Panic's javadoc and the
-        // special case for it in execute()'s exception-catch block below
+        // special case for it in execute()'s exception-catch block below.
+        // Privileged-only: panic() halts the WHOLE shared machine (every
+        // core, every process sharing this VM instance - see execute()'s
+        // own panicked-flag handling and Bl0jv2_jVM's exec() doc), so an
+        // unprivileged (user-mode) process must not be able to trigger it -
+        // that would let any userspace bug take down the kernel itself.
+        // User-mode code still gets an ordinary, catchable
+        // Bl0j_VM_Exception here instead, same as any other privileged
+        // native it isn't allowed to call.
         nativeMethods.put(NativeMethods.PANIC, (msg) -> {
+            requirePrivileged(currentContext(), "panic");
             throw new Bl0j_VM_Panic(String.valueOf(msg));
         });
         // milliseconds elapsed since feed_compiled_file() - a real
@@ -230,6 +241,124 @@ public final class Bl0jv2_jVM {
             return null;
         });
         nativeMethods.put(NativeMethods.IS_PRIVILEGED, (ignored) -> currentContext().privileged);
+        // real x86 HLT: ring-0 only, idles the core until something is
+        // worth waking up for. This VM has no real wakeup interrupt (no OS
+        // thread scheduler hook to block on) - it's a plain sleep-poll
+        // loop, a pragmatic reference-VM stand-in like WAIT's own
+        // Thread.sleep, not a claim about real hardware timing. Delivery
+        // itself still goes through the normal cooperative poll once this
+        // returns - haltCore() only shortens the wait, it never delivers
+        // anything itself. Also unblocks on a machine-wide panic so a
+        // halted core doesn't spin forever after everything else stopped.
+        nativeMethods.put(NativeMethods.HALT_CORE, (ignored) -> {
+            CoreContext ctx = currentContext();
+            requirePrivileged(ctx, "haltCore");
+            while (!interrupts.hasPending() && !panicked) {
+                try {
+                    Thread.sleep(1);
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+            return null;
+        });
+        // loads a SEPARATE compiled (.bl0c) file from disk and runs it to
+        // completion IN THIS SAME Bl0jv2_jVM instance - same managed heap,
+        // raw memory, port space, interrupt table and cores as whatever
+        // called exec(). An earlier version of this spun up a second
+        // Bl0jv2_jVM instance per call instead; that's not how real
+        // hardware works (a real kernel loads a new process into its OWN
+        // address space, on the SAME machine - it never boots a second
+        // computer to run one program) and wouldn't port to a future
+        // non-JVM backend, which is the whole point of this VM being a
+        // reference implementation. loadRelocated() is what makes sharing
+        // possible: it appends the new program's constants/instructions to
+        // this VM's own, shifting every embedded address by however much
+        // was already there - see its own doc for exactly which operands
+        // need that and why.
+        //
+        // Because everything really is shared now, so are the
+        // consequences: a panic() anywhere in the loaded program sets this
+        // VM's ONE 'panicked' flag, same as a panic() anywhere else - it
+        // halts the whole machine, not just "the thing that called exec()"
+        // (see execute()'s own Bl0j_VM_Panic handling, and the dedicated
+        // catch clause below that lets it through unwrapped rather than
+        // treating it as an ordinary failure). That's the correct behavior
+        // for code sharing the kernel's own privilege and address space,
+        // not a limitation: it's exactly why untrusted code has no
+        // business running with kernel privilege to begin with. An
+        // ordinary (non-panic) error still propagates as a normal,
+        // catchable Bl0j_VM_Exception, the same as any other exec()
+        // failure.
+        //
+        // Runs as a nested, poll-eligible execute() call - like a worker
+        // core's own dispatched top-level task (see invokeDispatchedWork),
+        // NOT like a plain invoke(): the loaded program is a genuine new
+        // top-level task in its own right and needs the normal cooperative
+        // interrupt poll to keep running while it executes (its own
+        // registerHandler()'d keyboard/console/etc), not the "never poll
+        // inside a nested call" rule a handler body or a toString()
+        // override follows.
+        //
+        // Privileged: loading and running new code at the current
+        // privilege level is a kernel resource allocation, the same
+        // category as dispatch()/reserve(). Returns 0 on success; a
+        // missing/malformed file or an ordinary in-program failure both
+        // throw directly (bypassing CALL_NATIVE's generic -1 sentinel, the
+        // same way PANIC above does) with a message that actually says
+        // which, instead of the generic "native method N returned error"
+        // every other native's failure shares.
+        nativeMethods.put(NativeMethods.EXEC, (pathObj) -> {
+            CoreContext ctx = currentContext();
+            requirePrivileged(ctx, "exec");
+            String path = String.valueOf(pathObj);
+
+            byte[] fileBytes;
+            try {
+                fileBytes = Files.readAllBytes(Path.of(path));
+            } catch (IOException e) {
+                throw new Bl0j_VM_Exception("exec: cannot read '" + path + "': " + e.getMessage());
+            }
+
+            int entryAddr;
+            int registersLength;
+            try {
+                int[] loaded = loadRelocated(fileBytes);
+                entryAddr = loaded[0] * C.INSTR_WIDTH;
+                registersLength = loaded[1];
+            } catch (Bl0j_VM_Exception e) {
+                throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': " + e.getMessage());
+            }
+
+            int stackDepthBefore = ctx.callStack.size();
+            boolean privilegedBefore = ctx.privileged;
+            ctx.callStack.push(new Frame(new long[registersLength], -1, -1));
+            try {
+                execute(entryAddr, stackDepthBefore, true);
+                return 0;
+            } catch (Bl0j_VM_Panic e) {
+                // never wrapped, never treated as an ordinary failure -
+                // propagates exactly as if panic() had been called
+                // directly here, see this method's own doc on why
+                throw e;
+            } catch (Bl0j_VM_Exception | IOException e) {
+                throw new Bl0j_VM_Exception("exec: '" + path + "' failed: " + e.getMessage());
+            } finally {
+                while (ctx.callStack.size() > stackDepthBefore)
+                    ctx.callStack.pop();
+                // a loaded program that called dropToUserMode() (aeon-os's
+                // own shell.bl0 does - see its own doc) must not leave the
+                // CALLER permanently de-privileged: this core's
+                // ctx.privileged is one flag shared across the whole call
+                // stack, not scoped per-frame, so without restoring it here
+                // the kernel that exec()'d a child would itself be stuck in
+                // user mode for everything it does afterward, the same IRET
+                // ("privilege restored to whatever it was before", not
+                // unconditionally reset to kernel) rule invokeAsTrap()
+                // already applies to interrupt/syscall handlers
+                ctx.privileged = privilegedBefore;
+            }
+        });
     }
 
     private static double toDouble(Object numeric) {
@@ -431,6 +560,152 @@ public final class Bl0jv2_jVM {
         bytes.get(instructions);
     }
 
+    // loads a SEPARATE compiled file's constants/instructions and APPENDS
+    // them to this VM's own - unlike feed_compiled_file(), nothing here is
+    // reset (this instance's call stack, heap, raw memory, port space and
+    // interrupt table all keep running exactly as they were) - this is
+    // what exec() uses instead of spinning up a second Bl0jv2_jVM
+    // instance, so a loaded program genuinely shares the SAME machine
+    // (same physical memory, same devices, same cores) with whatever
+    // called exec(), matching how a real kernel loads a new process into
+    // its own address space rather than starting a second computer.
+    //
+    // Every address embedded in the incoming bytecode is relative to ITS
+    // OWN constant pool / instruction stream (starting at 0), so it has to
+    // be shifted by however much this VM's own pool/stream had already
+    // grown before appending - constOffset for anything that indexes the
+    // constant pool, instrOffset for anything that's an instruction
+    // address. Three kinds of value need this: a FUN constant's own
+    // address field (instrOffset), a CLASS constant's field-default and
+    // method indices (constOffset, read directly out of the raw bytes
+    // here rather than through an opcode), and - inside the newly
+    // appended instruction bytes themselves - JUMP/JUMP_IF/JUMP_IF_NOT/
+    // TRY_ENTER's own address operand (instrOffset). Nothing else needs
+    // relocating: CALL reaches its target through a FunDef value sitting
+    // in a register (already relocated once, when that FunDef constant
+    // was loaded), not through an address encoded directly in the CALL
+    // instruction itself.
+    //
+    // Returns {entry instruction index, the loaded program's own top-level
+    // register count} - the caller pushes its own frame sized to the
+    // second value and starts executing at the first.
+    private int[] loadRelocated(byte[] fileBytes) {
+        ByteBuffer bytes = ByteBuffer.wrap(fileBytes);
+        bytes.order(ByteOrder.BIG_ENDIAN);
+
+        if (bytes.getInt() != C.MAGIC)
+            throw new Bl0j_VM_Exception("Wrong magic number");
+
+        short version = bytes.getShort();
+        if (version != C.VERSION)
+            throw new Bl0j_VM_Exception("Incompatible Bl0jv2_jVM version: [ " + C.VERSION + " != " + version + " ]");
+
+        short constants_length = bytes.getShort();
+        short registers_length = bytes.getShort();
+
+        int constOffset = consts.length;
+        int instrOffset = instructions.length / C.INSTR_WIDTH;
+
+        long[] newConsts = Arrays.copyOf(consts, consts.length + constants_length);
+
+        for (int i = 0; i < constants_length; i++) {
+            byte type = bytes.get();
+            switch (type) {
+                case Constants.INT -> newConsts[constOffset + i] = NanBox.ofInt(bytes.getInt());
+                case Constants.STRING -> newConsts[constOffset + i] = boxRef(get_str(bytes));
+                case Constants.BOOL -> newConsts[constOffset + i] = NanBox.ofBoolean(bytes.get() != 0);
+                // + instrOffset: this function's own entry address, an
+                // instruction index local to the file being loaded
+                case Constants.FUN -> newConsts[constOffset + i] = boxRef(new FunDef(
+                        get_str(bytes),
+                        (bytes.getInt() & 0xFFFF) + instrOffset,
+                        bytes.getShort(),
+                        bytes.getShort()));
+                case Constants.BYTE -> newConsts[constOffset + i] = NanBox.ofInt(bytes.get());
+                case Constants.FLOAT -> newConsts[constOffset + i] = Double.doubleToLongBits(bytes.getDouble());
+                case Constants.CLASS -> {
+                    String className = get_str(bytes);
+                    int fieldCount = bytes.getShort() & 0xFFFF;
+                    List<String> fieldNames = new ArrayList<>();
+                    long[] fieldDefaults = new long[fieldCount];
+                    Arrays.fill(fieldDefaults, NanBox.NIL);
+                    for (int f = 0; f < fieldCount; f++) {
+                        fieldNames.add(get_str(bytes));
+                        // + constOffset: the default value's own index,
+                        // local to the file being loaded
+                        if (bytes.get() != 0)
+                            fieldDefaults[f] = newConsts[constOffset + (bytes.getShort() & 0xFFFF)];
+                    }
+                    int methodCount = bytes.getShort() & 0xFFFF;
+                    Map<String, FunDef> methods = new HashMap<>();
+                    for (int m = 0; m < methodCount; m++) {
+                        String methodName = get_str(bytes);
+                        // + constOffset: same reasoning as the field
+                        // default above
+                        int methodConstIdx = constOffset + (bytes.getShort() & 0xFFFF);
+                        methods.put(methodName, (FunDef) unbox(newConsts[methodConstIdx]));
+                    }
+                    int staticFieldCount = bytes.getShort() & 0xFFFF;
+                    newConsts[constOffset + i] = boxRef(new Bl0jClass(className, fieldNames, fieldDefaults, methods, staticFieldCount));
+                }
+                default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
+            }
+        }
+
+        int remaining = bytes.remaining();
+        if (remaining % C.INSTR_WIDTH != 0)
+            throw new Bl0j_VM_Exception("wrong amount of instructions");
+
+        byte[] newInstructions = Arrays.copyOf(instructions, instructions.length + remaining);
+        bytes.get(newInstructions, instructions.length, remaining);
+
+        for (int addr = instructions.length; addr < newInstructions.length; addr += C.INSTR_WIDTH) {
+            switch (newInstructions[addr]) {
+                // instruction-address operands - shift by instrOffset
+                case OpCodes.JUMP -> relocateOperand(newInstructions, addr + 1, instrOffset);
+                case OpCodes.JUMP_IF, OpCodes.JUMP_IF_NOT, OpCodes.TRY_ENTER ->
+                        relocateOperand(newInstructions, addr + 3, instrOffset);
+                // constant-pool-index operands - shift by constOffset.
+                // LOAD_CONST's b IS the index; GET_FIELD/LOOKUP_METHOD's b
+                // is a field/method NAME's const index (the object/target
+                // sits in 'a', a register, never relocated)
+                case OpCodes.LOAD_CONST, OpCodes.GET_FIELD, OpCodes.LOOKUP_METHOD ->
+                        relocateOperand(newInstructions, addr + 3, constOffset);
+                // SET_FIELD's own 'b' is a register, not a direct operand -
+                // it holds a field name's const-pool index packed there by
+                // a SET two instructions earlier (compileAssign's own
+                // fixed SET;MOV;SET_FIELD emission, nothing else in
+                // between - see its own comment), NOT by LOAD_CONST, so
+                // it's invisible to the case above. SET's own immediate
+                // otherwise means a plain literal (POKE/PORT_OUT widths)
+                // or a per-class field index (SET_STATIC_FIELD) that must
+                // NOT be relocated, so this has to be keyed off SET_FIELD
+                // specifically, not off every SET
+                case OpCodes.SET_FIELD -> {
+                    int setAddr = addr - 2 * C.INSTR_WIDTH;
+                    if (setAddr >= instructions.length && newInstructions[setAddr] == OpCodes.SET)
+                        relocateOperand(newInstructions, setAddr + 3, constOffset);
+                }
+                default -> { }
+            }
+        }
+
+        int entryAddr = instrOffset;
+        consts = newConsts;
+        instructions = newInstructions;
+        return new int[]{entryAddr, registers_length};
+    }
+
+    // adds 'offset' to the big-endian u16 operand starting at arr[pos]
+    // (pos is addr+1 for a JUMP's 'a', addr+3 for a 'b' operand - see
+    // execute()'s own instruction decoding)
+    private static void relocateOperand(byte[] arr, int pos, int offset) {
+        int value = ((arr[pos] & 0xFF) << 8) | (arr[pos + 1] & 0xFF);
+        value += offset;
+        arr[pos] = (byte) (value >> 8);
+        arr[pos + 1] = (byte) value;
+    }
+
     public void set_out_writer(Writer out){
         this.out = out;
     }
@@ -473,15 +748,41 @@ public final class Bl0jv2_jVM {
         interrupts.raiseInterrupt(vector);
     }
 
-    // how many instructions execute() runs between interrupt polls at the
-    // outermost call; default 5 (InterruptController's own default)
+    // simulates an external device (e.g. a real keyboard controller)
+    // writing to one of its own ports from OUTSIDE the running program -
+    // bl0jv2 code only ever reads a port via in8/in16/in32 (out8/out16/
+    // out32 write the *other* direction), so nothing inside the VM ever
+    // writes to a port on a device's behalf. This is the port-I/O
+    // counterpart to raiseInterrupt() above and is typically paired with
+    // it the same way a real device is: write the data, then signal it's
+    // ready.
+    public void hostPortWrite(int port, int widthBytes, long value) {
+        portIO.write(port, widthBytes, value);
+    }
+
+    // the read-direction counterpart to hostPortWrite() above - lets a
+    // host-side bridge (e.g. a real UDP socket relay - see
+    // stdlib/net/nic.bl0's own doc on host bridging) observe what bl0jv2
+    // code wrote via out8/out16/out32, the same port bus in the other
+    // direction. There is no "host wants to know about a write" callback -
+    // a bridge thread polls this directly (a sequence-number port bl0jv2
+    // code bumps on every new write is the usual way to tell a fresh write
+    // apart from re-reading stale data - see nic.bl0's own TX port layout).
+    public long hostPortRead(int port, int widthBytes) {
+        return portIO.read(port, widthBytes);
+    }
+
+    // how many instructions execute() runs between interrupt polls, on each
+    // poll-eligible core (core 0's own top-level run, and every worker
+    // core's own top-level dispatched task - see execute()'s own doc);
+    // default 5 (InterruptController's own default)
     public void set_interrupt_poll_interval(int instructions) {
         interrupts.setPollInterval(instructions);
     }
 
     public void run_instructions() throws IOException {
         startWorkerCoresIfNeeded();
-        execute(0, -1);
+        execute(0, -1, true);
     }
 
     // spawns cores 1..coreCount-1 as daemon threads, each idling on its own
@@ -545,7 +846,7 @@ public final class Bl0jv2_jVM {
                     return;
                 }
                 try {
-                    invoke(work.callee(), work.argRaw());
+                    invokeDispatchedWork(work.callee(), work.argRaw());
                 } catch (Bl0j_VM_Panic e) {
                     // stop accepting further work entirely - matches real
                     // hardware halting on a kernel panic, not just this one
@@ -587,8 +888,25 @@ public final class Bl0jv2_jVM {
     // rather than until HALT. callee is a FunDef (an ordinary function) or
     // a Bl0jClosure (a lambda) - see resolveCallee(). Public so
     // Bl0jInstance/Bl0jTuple (runtime.values) can call it for a
-    // user-defined toString()/equals().
+    // user-defined toString()/equals(). Never poll-eligible - see
+    // invokeDispatchedWork() below for the one caller that needs to be.
     public Object invoke(Object callee, long... args) {
+        return invoke(callee, false, args);
+    }
+
+    // one worker core's own top-level dispatched task (see CoreWorker) -
+    // the exact same mechanics as invoke() above, just poll-eligible, so a
+    // worker actually running dispatched work can have its own hardware
+    // interrupts delivered instead of only ever running to completion
+    // uninterrupted. Never called for a nested call (a handler body, a
+    // toString()/equals() override) - those always go through the
+    // non-poll-eligible invoke() above, even when they happen to run on a
+    // worker core.
+    private Object invokeDispatchedWork(Object callee, long argRaw) {
+        return invoke(callee, true, new long[]{argRaw});
+    }
+
+    private Object invoke(Object callee, boolean pollEligible, long[] args) {
         CoreContext ctx = currentContext();
         int stopAtDepth = ctx.callStack.size();
         ResolvedCallee resolved = resolveCallee(callee);
@@ -605,7 +923,7 @@ public final class Bl0jv2_jVM {
         // starts at 1), so it's free scratch space for exactly this
         ctx.callStack.push(new Frame(regs, -1, 0));
         try {
-            execute(fun.address() * C.INSTR_WIDTH, stopAtDepth);
+            execute(fun.address() * C.INSTR_WIDTH, stopAtDepth, pollEligible);
         } catch (IOException e) {
             throw new Bl0j_VM_Exception("invoke failed: " + e.getMessage());
         }
@@ -649,16 +967,20 @@ public final class Bl0jv2_jVM {
     // stopAtDepth=-1 (run to HALT); invoke() passes the depth its own
     // pushed frame will pop back to, so execution returns to Java once
     // that one frame's RETURN runs, without disturbing the enclosing call.
-    private void execute(int startAddr, int stopAtDepth) throws IOException {
+    // pollEligible is independent of stopAtDepth - it's true for exactly
+    // two kinds of call: core 0's own top-level run (run_instructions()) and
+    // a worker core's own top-level dispatched task (CoreWorker below), and
+    // false for every *nested* invoke() (an interrupt/syscall handler body,
+    // a user-defined toString()/equals()) regardless of which core it runs
+    // on, so a handler can't be interrupted mid-fire and ordinary CALL-based
+    // bl0jv2 function calls (which stay inside this same execute() loop,
+    // never re-entering it) keep polling exactly as before.
+    private void execute(int startAddr, int stopAtDepth, boolean pollEligible) throws IOException {
 
             // resolved once - this whole call runs start-to-finish on one
             // thread, so re-resolving per instruction would be pure waste
             CoreContext ctx = currentContext();
 
-            // cooperative interrupt polling - only at the outermost call
-            // (stopAtDepth < 0); a nested invoke() (toString/equals/another
-            // handler) never re-enters this, so a handler can't be
-            // interrupted mid-fire
             int sinceLastPoll = 0;
 
             for(int addr = startAddr; addr < instructions.length;){
@@ -671,7 +993,7 @@ public final class Bl0jv2_jVM {
                 if (panicked)
                     throw new Bl0j_VM_Panic("halted: another core panicked");
 
-                if (stopAtDepth < 0 && ++sinceLastPoll >= interrupts.pollInterval()) {
+                if (pollEligible && ++sinceLastPoll >= interrupts.pollInterval()) {
                     sinceLastPoll = 0;
                     // the cadence above always ticks on schedule regardless
                     // of masking (matches this VM's pre-multi-core timing

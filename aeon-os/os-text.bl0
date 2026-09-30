@@ -1,0 +1,1207 @@
+import '../stdlib/mathlib.bl0';
+
+/*
+ * ============================================================================
+ * aeon-os SMP
+ * ============================================================================
+ *
+ * Architecture:
+ *
+ *   core 0
+ *      |
+ *      +-- kernel scheduler
+ *      |
+ *      +-- task registry
+ *      |
+ *      +-- ready queue
+ *      |
+ *      +-- syscall registration
+ *
+ *   core 1..N
+ *      |
+ *      +-- worker execution
+ *      +-- user mode
+ *
+ * VM provides mechanism:
+ *
+ *   dispatch()
+ *   atomicAdd()
+ *   Mutex
+ *   interrupt table
+ *   syscall trap
+ *   privilege checks
+ *   raw memory
+ *
+ * aeon-os provides policy:
+ *
+ *   task lifecycle
+ *   priorities
+ *   ready queue
+ *   worker assignment
+ *   affinity
+ *   accounting
+ *   failure handling
+ *
+ * This is still NOT a full process/address-space implementation.
+ * A task is an execution unit dispatched onto a worker core.
+ *
+ * ============================================================================
+ */
+
+
+/*
+ * ============================================================================
+ * Constants
+ * ============================================================================
+ */
+
+TASK_READY = 0;
+TASK_RUNNING = 1;
+TASK_DONE = 2;
+TASK_FAILED = 3;
+
+TASK_ANY_CORE = 0;
+
+PRIORITY_MIN = 0;
+PRIORITY_MAX = 100;
+
+SYSCALL_PUTC = 1;
+SYSCALL_YIELD = 2;
+
+
+/*
+ * ============================================================================
+ * Kernel globals
+ * ============================================================================
+ */
+
+def class Kernel {
+    static field numCores;
+
+    static field portConsole;
+    static field sysPutcVector;
+
+    static field panic;
+    static field shuttingDown;
+}
+
+Kernel.numCores = 4;
+
+Kernel.portConsole = 0;
+Kernel.sysPutcVector = SYSCALL_PUTC;
+
+Kernel.panic = false;
+Kernel.shuttingDown = false;
+
+
+/*
+ * ============================================================================
+ * Kernel heap
+ * ============================================================================
+ *
+ * Address 0:
+ *     bump pointer
+ *
+ * Address 4:
+ *     completed tasks
+ *
+ * Address 8:
+ *     heap
+ * ============================================================================
+ */
+
+def class HeapAlloc {
+    static field counterAddr;
+}
+
+HeapAlloc.counterAddr = 0;
+
+Kernel.doneCounterAddr = 4;
+
+HEAP_BASE = 8;
+
+reserve(0, 8);
+
+poke32(
+    HeapAlloc.counterAddr,
+    HEAP_BASE
+);
+
+poke32(
+    Kernel.doneCounterAddr,
+    0
+);
+
+
+def kalloc(size) {
+    if (size <= 0) {
+        return nil;
+    }
+
+    return atomicAdd(
+        HeapAlloc.counterAddr,
+        size
+    );
+}
+
+
+def kfree(addr) {
+    // Bump allocator intentionally does not reclaim memory yet.
+}
+
+
+/*
+ * ============================================================================
+ * Console driver
+ * ============================================================================
+ */
+
+def sysPutc(byteValue) {
+    out8(
+        Kernel.portConsole,
+        byteValue
+    );
+
+    println(
+        '  [console] wrote 0x'
+        + toHex(byteValue)
+        + ' to port '
+        + Kernel.portConsole
+    );
+}
+
+
+registerHandler(
+    sysPutc,
+    Kernel.sysPutcVector,
+    1
+);
+
+
+/*
+ * ============================================================================
+ * Privilege handling
+ * ============================================================================
+ */
+
+def ensureUserMode() {
+    if (isPrivileged()) {
+        dropToUserMode();
+    }
+}
+
+
+/*
+ * ============================================================================
+ * Task
+ * ============================================================================
+ */
+
+def class Task {
+
+    field id;
+    field name;
+    field priority;
+    field fn;
+
+    field state;
+    field assignedCore;
+
+    field result;
+    field error;
+
+    field createdTick;
+    field startedTick;
+    field finishedTick;
+
+    def init(id, name, priority, fn) {
+
+        this.id = id;
+        this.name = name;
+        this.priority = priority;
+        this.fn = fn;
+
+        this.state = TASK_READY;
+
+        this.assignedCore = TASK_ANY_CORE;
+
+        this.result = nil;
+        this.error = nil;
+
+        this.createdTick = 0;
+        this.startedTick = 0;
+        this.finishedTick = 0;
+    }
+}
+
+
+/*
+ * ============================================================================
+ * Scheduler
+ * ============================================================================
+ */
+
+def class Scheduler {
+
+    /*
+     * Ready queue.
+     */
+    static field ready;
+
+    /*
+     * Every task ever created.
+     */
+    static field tasks;
+
+    /*
+     * Synchronization.
+     */
+    static field readyLock;
+    static field taskLock;
+
+    /*
+     * IDs.
+     */
+    static field nextTaskId;
+
+    /*
+     * Worker placement.
+     */
+    static field nextCore;
+
+    /*
+     * Accounting.
+     */
+    static field totalTasks;
+    static field completedTasks;
+    static field failedTasks;
+
+    /*
+     * Number of currently running tasks.
+     */
+    static field runningTasks;
+
+    /*
+     * Number of worker cores.
+     */
+    static field workers;
+
+    /*
+     * Scheduler tick.
+     *
+     * This is intentionally only a logical scheduler counter.
+     * No real timer interrupt is assumed here.
+     */
+    static field tick;
+}
+
+
+Scheduler.ready = [];
+Scheduler.tasks = [];
+
+Scheduler.readyLock = newMutex();
+Scheduler.taskLock = newMutex();
+
+Scheduler.nextTaskId = 1;
+
+Scheduler.nextCore = 1;
+
+Scheduler.totalTasks = 0;
+Scheduler.completedTasks = 0;
+Scheduler.failedTasks = 0;
+
+Scheduler.runningTasks = 0;
+
+Scheduler.workers = Kernel.numCores - 1;
+
+Scheduler.tick = 0;
+
+
+/*
+ * ============================================================================
+ * Task ID
+ * ============================================================================
+ */
+
+def allocateTaskId() {
+
+    id = Scheduler.nextTaskId;
+
+    Scheduler.nextTaskId =
+        Scheduler.nextTaskId + 1;
+
+    return id;
+}
+
+
+/*
+ * ============================================================================
+ * Task creation
+ * ============================================================================
+ */
+
+def createTask(name, priority, fn) {
+
+    id = allocateTaskId();
+
+    task = new Task(
+        id,
+        name,
+        priority,
+        fn
+    );
+
+    lock(Scheduler.taskLock);
+
+    push(
+        Scheduler.tasks,
+        task
+    );
+
+    Scheduler.totalTasks =
+        Scheduler.totalTasks + 1;
+
+    unlock(Scheduler.taskLock);
+
+    return task;
+}
+
+
+/*
+ * ============================================================================
+ * Queue insertion
+ * ============================================================================
+ */
+
+def enqueueTask(task) {
+
+    lock(Scheduler.readyLock);
+
+    task.state = TASK_READY;
+
+    push(
+        Scheduler.ready,
+        task
+    );
+
+    unlock(Scheduler.readyLock);
+}
+
+
+/*
+ * ============================================================================
+ * Priority aging
+ * ============================================================================
+ *
+ * Effective priority:
+ *
+ *     base priority + waiting time
+ *
+ * This prevents a low-priority task from being permanently starved by
+ * continuously arriving high-priority tasks.
+ *
+ * No real timer is required. Scheduler.tick is advanced whenever the
+ * scheduler scans the queue.
+ * ============================================================================
+ */
+
+def effectivePriority(task) {
+
+    waiting =
+        Scheduler.tick
+        - task.createdTick;
+
+    value =
+        task.priority
+        + waiting;
+
+    if (value > PRIORITY_MAX) {
+        value = PRIORITY_MAX;
+    }
+
+    return value;
+}
+
+
+/*
+ * ============================================================================
+ * Find best ready task
+ * ============================================================================
+ *
+ * Caller MUST hold readyLock.
+ * ============================================================================
+ */
+
+def pickTaskIndex() {
+
+    if (len(Scheduler.ready) == 0) {
+        return -1;
+    }
+
+    best = 0;
+
+    i = 1;
+
+    while (i < len(Scheduler.ready)) {
+
+        current =
+            Scheduler.ready[i];
+
+        candidate =
+            Scheduler.ready[best];
+
+        currentPriority =
+            effectivePriority(current);
+
+        bestPriority =
+            effectivePriority(candidate);
+
+        if (currentPriority > bestPriority) {
+
+            best = i;
+
+        } else {
+
+            /*
+             * Stable tie-breaker:
+             * older task wins.
+             */
+            if (currentPriority == bestPriority) {
+
+                if (
+                    current.createdTick
+                    <
+                    candidate.createdTick
+                ) {
+                    best = i;
+                }
+            }
+        }
+
+        i = i + 1;
+    }
+
+    return best;
+}
+
+
+/*
+ * ============================================================================
+ * Remove queue element
+ * ============================================================================
+ */
+
+def removeReadyAt(index) {
+
+    last =
+        len(Scheduler.ready) - 1;
+
+    if (index != last) {
+
+        Scheduler.ready[index] =
+            Scheduler.ready[last];
+    }
+
+    pop(Scheduler.ready);
+}
+
+
+/*
+ * ============================================================================
+ * Worker core selection
+ * ============================================================================
+ */
+
+def nextWorkerCore() {
+
+    if (Scheduler.workers <= 0) {
+        return -1;
+    }
+
+    core =
+        Scheduler.nextCore;
+
+    Scheduler.nextCore =
+        Scheduler.nextCore + 1;
+
+    if (
+        Scheduler.nextCore
+        >=
+        Kernel.numCores
+    ) {
+        Scheduler.nextCore = 1;
+    }
+
+    return core;
+}
+
+
+/*
+ * ============================================================================
+ * Task completion
+ * ============================================================================
+ */
+
+def taskFinished(task) {
+
+    task.state = TASK_DONE;
+
+    Scheduler.completedTasks =
+        Scheduler.completedTasks + 1;
+
+    Scheduler.runningTasks =
+        Scheduler.runningTasks - 1;
+
+    atomicAdd(
+        Kernel.doneCounterAddr,
+        1
+    );
+}
+
+
+/*
+ * ============================================================================
+ * Task failure
+ * ============================================================================
+ */
+
+def taskFailed(task, error) {
+
+    task.state = TASK_FAILED;
+
+    task.error = error;
+
+    Scheduler.failedTasks =
+        Scheduler.failedTasks + 1;
+
+    Scheduler.completedTasks =
+        Scheduler.completedTasks + 1;
+
+    Scheduler.runningTasks =
+        Scheduler.runningTasks - 1;
+
+    atomicAdd(
+        Kernel.doneCounterAddr,
+        1
+    );
+}
+
+
+/*
+ * ============================================================================
+ * Worker entry
+ * ============================================================================
+ *
+ * This is deliberately the single execution wrapper for every dispatched
+ * task.
+ *
+ * The important property is:
+ *
+ *     taskDone() can never be forgotten by individual tasks.
+ *
+ * The task itself is wrapped by the scheduler.
+ *
+ * ============================================================================
+ */
+
+def runTask(task) {
+
+    ensureUserMode();
+
+    task.state = TASK_RUNNING;
+
+    task.startedTick =
+        Scheduler.tick;
+
+    try {
+
+        fn =
+            task.fn;
+
+        fn();
+
+        taskFinished(task);
+
+    } catch (e) {
+
+        println(
+            '  [scheduler] task #'
+            + task.id
+            + ' '
+            + task.name
+            + ' FAILED: '
+            + e
+        );
+
+        taskFailed(
+            task,
+            e
+        );
+    }
+}
+
+
+/*
+ * ============================================================================
+ * Dispatch one task
+ * ============================================================================
+ */
+
+def dispatchOne() {
+
+    disableInterrupts();
+
+    lock(Scheduler.readyLock);
+
+    index =
+        pickTaskIndex();
+
+    if (index < 0) {
+
+        unlock(Scheduler.readyLock);
+
+        enableInterrupts();
+
+        return false;
+    }
+
+    task =
+        Scheduler.ready[index];
+
+    removeReadyAt(index);
+
+    task.state =
+        TASK_RUNNING;
+
+    core =
+        nextWorkerCore();
+
+    task.assignedCore =
+        core;
+
+    Scheduler.runningTasks =
+        Scheduler.runningTasks + 1;
+
+    unlock(Scheduler.readyLock);
+
+    enableInterrupts();
+
+
+    if (core < 0) {
+
+        println(
+            '[scheduler] no worker core available for '
+            + task.name
+        );
+
+        taskFailed(
+            task,
+            'no worker core'
+        );
+
+        return false;
+    }
+
+
+    println(
+        '  [scheduler] dispatch #'
+        + task.id
+        + ' '
+        + task.name
+        + ' -> core '
+        + core
+    );
+
+
+    dispatch(
+        runTask,
+        core,
+        task
+    );
+
+    return true;
+}
+
+
+/*
+ * ============================================================================
+ * Dispatch until all workers have something to do.
+ *
+ * Since dispatch() is fire-and-forget, this function does not wait for
+ * task completion.
+ * ============================================================================
+ */
+
+def fillWorkers() {
+
+    dispatched = 0;
+
+    while (
+        Scheduler.runningTasks
+        <
+        Scheduler.workers
+    ) {
+
+        if (
+            len(Scheduler.ready)
+            == 0
+        ) {
+            break;
+        }
+
+        if (!dispatchOne()) {
+            break;
+        }
+
+        dispatched =
+            dispatched + 1;
+    }
+
+    return dispatched;
+}
+
+
+/*
+ * ============================================================================
+ * Scheduler step
+ * ============================================================================
+ */
+
+def schedulerStep() {
+
+    Scheduler.tick =
+        Scheduler.tick + 1;
+
+    return fillWorkers();
+}
+
+
+/*
+ * ============================================================================
+ * Syscall test task
+ * ============================================================================
+ */
+
+def taskNetwork() {
+
+    ensureUserMode();
+
+    buf =
+        kalloc(4);
+
+    poke32(
+        buf,
+        0xC0FFEE
+    );
+
+    println(
+        '    [network] core '
+        + currentCore()
+        + ', packet=0x'
+        + toHex(peek32(buf))
+    );
+
+
+    /*
+     * User code cannot access the device directly.
+     *
+     * Low byte of packet:
+     *
+     *     0xEE
+     */
+    syscall(
+        Kernel.sysPutcVector,
+        peek8(buf + 3)
+    );
+
+
+    kfree(buf);
+}
+
+
+/*
+ * ============================================================================
+ * Compute tasks
+ * ============================================================================
+ */
+
+def taskComputeA() {
+
+    ensureUserMode();
+
+    i = 0;
+    sum = 0;
+
+    while (i < 200000) {
+
+        sum =
+            sum + i;
+
+        i =
+            i + 1;
+    }
+
+    println(
+        '    [compute-a] core '
+        + currentCore()
+        + ', sum='
+        + sum
+    );
+}
+
+
+def taskComputeB() {
+
+    ensureUserMode();
+
+    i = 0;
+    sum = 0;
+
+    while (i < 200000) {
+
+        sum =
+            sum + (i * 2);
+
+        i =
+            i + 1;
+    }
+
+    println(
+        '    [compute-b] core '
+        + currentCore()
+        + ', sum='
+        + sum
+    );
+}
+
+
+def taskComputeC() {
+
+    ensureUserMode();
+
+    i = 0;
+    sum = 0;
+
+    while (i < 200000) {
+
+        sum =
+            sum + (i * 3);
+
+        i =
+            i + 1;
+    }
+
+    println(
+        '    [compute-c] core '
+        + currentCore()
+        + ', sum='
+        + sum
+    );
+}
+
+
+/*
+ * ============================================================================
+ * Logger
+ * ============================================================================
+ */
+
+def taskLogger() {
+
+    ensureUserMode();
+
+    println(
+        '    [logger] core '
+        + currentCore()
+    );
+}
+
+
+/*
+ * ============================================================================
+ * Privilege test
+ * ============================================================================
+ */
+
+def taskRogue() {
+
+    ensureUserMode();
+
+    println(
+        '    [rogue] attempting privileged I/O from core '
+        + currentCore()
+    );
+
+    /*
+     * Must fail.
+     */
+    out8(
+        Kernel.portConsole,
+        99
+    );
+
+    /*
+     * If this prints, the privilege boundary is broken.
+     */
+    println(
+        '    [rogue] SECURITY FAILURE: out8() succeeded'
+    );
+}
+
+
+/*
+ * ============================================================================
+ * Scheduler statistics
+ * ============================================================================
+ */
+
+def printTaskStatistics() {
+
+    println('');
+    println('--- task statistics ---');
+
+    lock(Scheduler.taskLock);
+
+    i = 0;
+
+    while (
+        i < len(Scheduler.tasks)
+    ) {
+
+        task =
+            Scheduler.tasks[i];
+
+        stateName = 'UNKNOWN';
+
+        if (task.state == TASK_READY) {
+            stateName = 'READY';
+        }
+
+        if (task.state == TASK_RUNNING) {
+            stateName = 'RUNNING';
+        }
+
+        if (task.state == TASK_DONE) {
+            stateName = 'DONE';
+        }
+
+        if (task.state == TASK_FAILED) {
+            stateName = 'FAILED';
+        }
+
+        println(
+            '  #'
+            + task.id
+            + ' '
+            + task.name
+            + ' state='
+            + stateName
+            + ' core='
+            + task.assignedCore
+        );
+
+        i = i + 1;
+    }
+
+    unlock(Scheduler.taskLock);
+
+    println('');
+}
+
+
+/*
+ * ============================================================================
+ * Kernel panic
+ * ============================================================================
+ */
+
+def kernelPanic(message) {
+
+    Kernel.panic = true;
+    Kernel.shuttingDown = true;
+
+    println('');
+    println('!!! KERNEL PANIC !!!');
+    println(message);
+
+    /*
+     * Current VM has no dedicated panic/halt primitive in this API.
+     * Keep the kernel alive enough to expose the failure.
+     */
+}
+
+
+/*
+ * ============================================================================
+ * Bootstrap
+ * ============================================================================
+ */
+
+println(
+    '=== aeon-os SMP kernel ==='
+);
+
+println(
+    'cores: '
+    + Kernel.numCores
+);
+
+println(
+    'workers: '
+    + Scheduler.workers
+);
+
+println('');
+
+
+/*
+ * ============================================================================
+ * Create tasks
+ * ============================================================================
+ */
+
+taskLoggerObject =
+    createTask(
+        'logger',
+        5,
+        taskLogger
+    );
+
+taskNetworkObject =
+    createTask(
+        'network',
+        20,
+        taskNetwork
+    );
+
+taskComputeAObject =
+    createTask(
+        'compute-a',
+        10,
+        taskComputeA
+    );
+
+taskComputeBObject =
+    createTask(
+        'compute-b',
+        10,
+        taskComputeB
+    );
+
+taskComputeCObject =
+    createTask(
+        'compute-c',
+        10,
+        taskComputeC
+    );
+
+taskRogueObject =
+    createTask(
+        'rogue',
+        15,
+        taskRogue
+    );
+
+
+/*
+ * Put all tasks into ready queue.
+ */
+
+enqueueTask(taskLoggerObject);
+enqueueTask(taskNetworkObject);
+
+enqueueTask(taskComputeAObject);
+enqueueTask(taskComputeBObject);
+enqueueTask(taskComputeCObject);
+
+enqueueTask(taskRogueObject);
+
+
+/*
+ * ============================================================================
+ * Main scheduler loop
+ * ============================================================================
+ *
+ * The scheduler remains on core 0.
+ *
+ * It repeatedly fills free worker slots.
+ *
+ * Since there is no proper sleep/event/targeted IPI primitive yet, the
+ * scheduler polls.
+ * ============================================================================
+ */
+
+println(
+    '--- scheduler started ---'
+);
+
+
+while (
+    Scheduler.completedTasks
+    <
+    Scheduler.totalTasks
+) {
+
+    schedulerStep();
+
+
+    /*
+     * If no tasks are ready but tasks are still running, workers are doing
+     * the actual work. Core 0 has nothing productive to execute yet.
+     *
+     * This is intentionally a spin because the VM currently has no safe
+     * targeted wakeup primitive.
+     */
+}
+
+
+println('');
+println(
+    '--- all tasks reached terminal state ---'
+);
+
+
+println(
+    'total: '
+    + Scheduler.totalTasks
+);
+
+println(
+    'completed: '
+    + Scheduler.completedTasks
+);
+
+println(
+    'failed: '
+    + Scheduler.failedTasks
+);
+
+println(
+    'doneCounter: '
+    + peek32(Kernel.doneCounterAddr)
+);
+
+
+printTaskStatistics();
+
+
+/*
+ * ============================================================================
+ * Final kernel state
+ * ============================================================================
+ */
+
+if (
+    Scheduler.failedTasks > 0
+) {
+
+    println(
+        '=== aeon-os halted with failed tasks ==='
+    );
+
+} else {
+
+    println(
+        '=== aeon-os halted cleanly ==='
+    );
+}

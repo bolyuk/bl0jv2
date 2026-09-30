@@ -1,0 +1,15 @@
+// aeon-os (child_crash): a trivial standalone process that deliberately
+// fails with an ORDINARY runtime error (not panic()) - meant to be
+// exec()'d from boot.bl0 to prove journalExec() catches and logs a failed
+// launch instead of letting it propagate. This is NOT the same claim
+// boot.bl0's own final integrity check demonstrates: since exec() now
+// runs a loaded program in the SAME Bl0jv2_jVM instance as whatever
+// called it (see Bl0jv2_jVM's own exec() doc), a REAL panic() here would
+// set the one shared 'panicked' flag and take the WHOLE kernel down with
+// it, not just this one process - deliberately using an ordinary error
+// instead is what keeps this demo (and the rest of boot.bl0 after it)
+// running.
+
+println '  [child_crash] about to fail...';
+x = 1 / 0;
+println '  [child_crash] unreachable';

@@ -581,6 +581,32 @@ public final class Bl0jv2_Compiler {
         return result;
     }
 
+    // haltCore(): zero-arg, side-effecting, same shape as disableInterrupts()
+    private Integer compileHaltCore(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "haltCore", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.HALT_CORE, result);
+        return result;
+    }
+
+    // exec(path): 1-arg, value-producing (0 on success) - same shape as
+    // compileRaiseInterrupt's clobber-avoidance MOV, but the result here is
+    // meaningful (CALL_NATIVE overwrites its own operand register with the
+    // native's return value), not discarded
+    private Integer compileExec(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "exec", 1))
+            return null;
+
+        int pathRegRaw = compileInner(funCall.args.get(0));
+        int pathReg = regIndex++;
+        _emit(OpCodes.MOV, pathReg, pathRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.EXEC, pathReg);
+        return pathReg;
+    }
+
     // syscall(vector, arg): SYSCALL takes its two values directly in a/b,
     // no packing needed (same shape as reserve's addr/size) - but unlike
     // reserve, SYSCALL mutates a's own slot with the handler's return
@@ -835,6 +861,8 @@ public final class Bl0jv2_Compiler {
         if ((r = compileEnableInterrupts(funCall)) != null) return r;
         if ((r = compileDropToUserMode(funCall)) != null) return r;
         if ((r = compileIsPrivileged(funCall)) != null) return r;
+        if ((r = compileHaltCore(funCall)) != null) return r;
+        if ((r = compileExec(funCall)) != null) return r;
         if ((r = compileSyscall(funCall)) != null) return r;
         if ((r = compileAtomicAdd(funCall)) != null) return r;
         if ((r = compileAtomicCas(funCall)) != null) return r;
