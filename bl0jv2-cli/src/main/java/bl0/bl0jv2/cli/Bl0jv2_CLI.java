@@ -64,6 +64,8 @@ public class Bl0jv2_CLI {
     private Path bridgeFsDir = null;
     // --uart-baud: how fast the serial port sends (0 = instantly)
     private int uartBaud = 0;
+    // --shared: a manifest of shared libraries; programs put on the disk link to them, and they are put there too
+    private Path sharedManifest = null;
     // --display: the guest's text-mode display, drawn on the host terminal (see HostScreen)
     private boolean display = false;
     private final java.util.List<DiskImport.Spec> diskPuts = new java.util.ArrayList<>();
@@ -132,6 +134,13 @@ public class Bl0jv2_CLI {
                     includeDirs.add(Path.of(args[++i]));
                 }
                 case "--display" -> display = true;
+                case "--shared" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--shared requires a manifest file");
+                        System.exit(1);
+                    }
+                    sharedManifest = Path.of(args[++i]);
+                }
                 case "--uart-baud" -> {
                     if (i + 1 >= args.length) {
                         System.err.println("--uart-baud requires a number");
@@ -245,6 +254,10 @@ public class Bl0jv2_CLI {
         System.out.println("      --display  give the program a text-mode display (80x24 or the terminal's size)");
         System.out.println("                  and draw it on this terminal; the console then goes to the screen,");
         System.out.println("                  not to the serial line. Use together with -k for the keyboard");
+        System.out.println("      --shared MANIFEST  shared libraries (one source file per line, in load order):");
+        System.out.println("                  programs put on the disk with --disk-put do not contain their code but");
+        System.out.println("                  link to them when loaded, and the libraries are put on the disk too");
+        System.out.println("                  (lib/NAME.bl0c and lib/MANIFEST)");
         System.out.println("      --uart-baud N  send on the serial port at N bits per second (default 0:");
         System.out.println("                  instantly); a driver that ignores the line status loses text");
         System.out.println("      --bridge-fs DIR  show the host folder DIR to the program (read, write,");
@@ -442,7 +455,8 @@ public class Bl0jv2_CLI {
                 if (diskImage != null) {
                     try {
                         var disk = new FileDisk(diskImage, diskSectors);
-                        if (!diskPuts.isEmpty()) DiskImport.put(disk, diskPuts, includeDirs);
+                        SharedLibs shared = sharedManifest == null ? null : SharedLibs.read(sharedManifest);
+                        if (!diskPuts.isEmpty() || shared != null) DiskImport.put(disk, diskPuts, includeDirs, shared);
                         vm.attach_disk(disk);
                     } catch (IOException e) {
                         System.err.println("--disk " + diskImage + ": " + e.getMessage());

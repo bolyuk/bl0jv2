@@ -130,6 +130,11 @@ public final class Bl0jv2_Linker {
         }
     }
 
+    /** the source of a file, from disk or - for stdlib files - from the classpath, as an import would read it */
+    public static String read(Path file) {
+        return readSource(file.toAbsolutePath().normalize(), file.toString());
+    }
+
     // real file on disk first (a developer's own checkout, where stdlib
     // sits wherever bl0jv2-compiler/src/main/resources/stdlib/ puts it,
     // relative to whatever the importer's own path chain resolved to) -

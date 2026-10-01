@@ -39,6 +39,7 @@ bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
       --bridge-outbound          let VM code open real sockets (see below)
       --disk FILE [--disk-sectors N]  present FILE as a block device (created if missing)
       --bridge-fs DIR    show the host folder DIR to the program (stdlib/fs/hostfs.bl0)
+      --shared MANIFEST  shared libraries: programs put on the disk link to them (see below)
       --disk-put HOSTFILE[:NAME]  copy a host file or folder onto the --disk image first
                          (a .bl0 is compiled and stored as .bl0c); repeatable
   -I, --include DIR  look an import up in DIR when it is not next to the importing file
@@ -195,6 +196,21 @@ x, y = (1, 2)            // destructuring
 imports by itself, so the CLI needs no list of files; `-I` only adds places to
 look. It works at the `-t` prompt too.
 
+### Shared libraries
+
+`import` normally splices a file's code into the program. For an operating system that is
+wasteful and keeps state apart, so a build can name some files as **shared libraries**
+(`Bl0jv2_Linker.resolveImports(..., shared)` and the CLI's `--shared MANIFEST`). An import of
+one of them brings in only what the file *declares* - its functions with their parameters, its
+classes with their fields and methods - so calls are checked exactly as for inlined code, and
+the program refers to them by name (an `EXTERN` constant, made on first use). The library is
+compiled on its own and loaded once with `execMem(addr, size, 2)`: it runs its top level and
+exports every function and class it defines; a program loaded afterwards has its names linked to
+those definitions, so a library's static state is shared by all. A library may import only
+libraries loaded before it; defining a name a library defines, two libraries exporting one name,
+and loading a program whose library is not loaded are all errors, the last one at load time.
+Unloading a user program frees nothing a library owns.
+
 ## Builtins
 
 | Area | Builtins |
@@ -208,7 +224,7 @@ look. It works at the `-t` prompt too.
 | Events | `newEvent()` `eventGen(e)` `signalEvent(e)` `waitEvent(e, gen, timeoutMs)` |
 | Interrupts | `registerHandler(fn, vector, priority)` `raiseInterrupt(v)` `raiseInterruptOn(core, v)` `disableInterrupts()` `enableInterrupts()` `haltCore()` |
 | Privilege | `dropToUserMode()` (one-way) `isPrivileged()` `syscall(vector, arg)` |
-| Other | `read()` (a line from stdin) `execMem(addr, size, mode)` (run a compiled program that sits in raw memory; mode 0 = user program, unloaded afterwards, 1 = kernel program) |
+| Other | `read()` (a line from stdin) `execMem(addr, size, mode)` (run a compiled program that sits in raw memory; mode 0 = user program, unloaded afterwards, 1 = kernel program, 2 = shared library) |
 
 A user function with the same name as a builtin takes precedence. Privileged
 (ring 0) only: `registerHandler`, `dispatch`, `execMem`, `haltCore`, `reserve`,

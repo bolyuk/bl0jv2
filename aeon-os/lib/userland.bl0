@@ -19,7 +19,6 @@ import '../../stdlib/str/split.bl0';
 import '../../stdlib/str/fmt.bl0';
 import '../../stdlib/arrlib.bl0';
 import '../../stdlib/fs/hostfs.bl0';
-import 'sys.bl0';
 
 def class Prog {
     static field cwd;
@@ -79,7 +78,7 @@ def isSpace(c) {
 //
 // A program writes with say() and reads with inputText(); where that goes is the
 // shell's business: the terminal, or a file when the command line redirected or
-// piped it (the shell puts the paths on the system page). Output to a file is
+// piped it (the shell sets Io.inPath and Io.outPath). Output to a file is
 // collected and appended in blocks. Messages that are about the command itself -
 // usage, "no such file" - go to sayErr(), which is always the terminal, so that a
 // pipe carries only data.
@@ -133,18 +132,13 @@ def destination(from, to) {
     return target;
 }
 
-// call first thing in a program; false (after saying why) when there is no filesystem to use
+// call first thing in a program; false (after saying why) when there is no filesystem to use.
+// The shell has put the command line (Prog.words), the working folder (Prog.cwd) and the
+// redirections (Io.inPath, Io.outPath) where this program finds them: everything here is a
+// shared library, so those are the same variables the shell uses, not copies. The disk driver,
+// the keyboard, the console are likewise the system's own.
 def startProgram() {
-    Disk.attach(peek32(Sys.base + 8), peek32(Sys.base + 4), peek32(Sys.base + 12));
-    Hfs.attach(peek32(Sys.base + 3076), peek32(Sys.base + 3080), peek32(Sys.base + 3084), peek32(Sys.base + 3072) == 1);
-    attachKeyboard(peek32(Sys.base + 3088));
-    Console.columns = peek32(Sys.base + 3092);
-    Console.rows = peek32(Sys.base + 3096);
-    Prog.cwd = sysCwd();
-    Prog.words = sysArgs();
-    Io.outPath = sysStdout();
-    Io.inPath = sysStdin();
-    if (!Fs.mount()) {
+    if (!Fs.mounted) {
         sayErr('the disk has no filesystem');
         return false;
     }

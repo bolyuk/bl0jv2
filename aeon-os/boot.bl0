@@ -53,6 +53,7 @@ if (!Fs.mount()) {
     panic('no boot disk');
 }
 Log.write('boot: aeon-os booting');
+loadLibraries();
 
 println '=== aeon-os booting ===';
 println 'sys info magic: ' + Math.toHex(peek32(SYS_INFO_BASE));

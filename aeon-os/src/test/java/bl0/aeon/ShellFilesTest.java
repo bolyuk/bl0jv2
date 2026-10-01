@@ -127,10 +127,10 @@ class ShellFilesTest {
         Path src = dir.resolve(name + ".bl0");
         java.nio.file.Files.writeString(src, source);
         var s = new AeonSession();
-        s.start(AeonSession.compile("shell.bl0"), 1, vm -> {
+        s.start(AeonSession.compile("init.bl0"), 1, vm -> {
             try {
                 var disk = AeonImage.os(dir.resolve("d.img"));
-                DiskImport.put(disk, java.util.List.of(DiskImport.Spec.parse(src + ":bin/" + name + ".bl0c")), java.util.List.of(Path.of("aeon-os/bin")));
+                DiskImport.put(disk, java.util.List.of(DiskImport.Spec.parse(src + ":bin/" + name + ".bl0c")), java.util.List.of(Path.of("aeon-os/bin")), AeonImage.shared());
                 vm.attach_disk(disk);
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);
@@ -151,7 +151,7 @@ class ShellFilesTest {
 
     @Test
     void aProgramSeesItsArgumentsAndTheCurrentFolder(@TempDir Path dir) throws Exception {
-        var s = shellWith(dir, "where", "import '../lib/sys.bl0'; import '../lib/userland.bl0'; startProgram(); say('args=' + str(Prog.words) + ' cwd=[' + sysCwd() + ']');");
+        var s = shellWith(dir, "where", "import '../lib/userland.bl0'; startProgram(); say('args=' + str(Prog.words) + ' cwd=[' + Prog.cwd + ']');");
         command(s, "mkdir work", "$ ");
         command(s, "cd work", "/work $ ");
         command(s, "where one  \"two  words\"", "args=[where, one, two  words] cwd=[work]");

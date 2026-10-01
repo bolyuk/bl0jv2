@@ -74,7 +74,7 @@ public final class AeonSession {
     /** the same, with a host folder shared (--bridge-fs) when 'share' is not null */
     static AeonSession shellOn(java.nio.file.Path image, boolean fresh, java.nio.file.Path share) throws Exception {
         var s = new AeonSession();
-        s.start(compile("shell.bl0"), 1, vm -> {
+        s.start(compile("init.bl0"), 1, vm -> {
             try {
                 if (share != null) vm.attach_share(new bl0.bl0jv2.cli.DirShare(share));
                 vm.attach_disk(fresh ? AeonImage.os(image) : new bl0.bl0jv2.cli.FileDisk(image, AeonImage.SECTORS));
@@ -121,7 +121,7 @@ public final class AeonSession {
     static AeonSession shellOnDisplay(java.nio.file.Path dir) throws Exception {
         var s = new AeonSession();
         s.display = true;
-        s.start(compile("shell.bl0"), 1, vm -> {
+        s.start(compile("init.bl0"), 1, vm -> {
             try {
                 vm.attach_disk(AeonImage.os(dir.resolve("d.img")));
             } catch (java.io.IOException e) {

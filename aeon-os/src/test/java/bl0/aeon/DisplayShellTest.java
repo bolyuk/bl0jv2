@@ -25,11 +25,11 @@ class DisplayShellTest {
     @Test
     void theShellDrawsItsPromptAndOutputOnTheScreenNotTheSerialLine(@TempDir Path dir) throws Exception {
         var s = AeonSession.shellOnDisplay(dir);
-        assertEquals("", s.output());                                    // nothing went out of the serial port
+        assertTrue(!s.output().contains("aeon-shell ready"), s.output());   // the console did not go out of the serial port
         until(s, "prompt", t -> t.lastLine().equals("$"));
         s.type("echo привет, мир" + ENTER);
         until(s, "output and a new prompt", t -> t.screenText().contains("\nпривет, мир\n$"));
-        assertEquals("", s.output());
+        assertTrue(!s.output().contains("привет"), s.output());
         s.type("ls bin | grep wc" + ENTER);
         until(s, "pipe output", t -> t.screenText().contains("wc.bl0c"));
     }

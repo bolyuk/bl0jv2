@@ -1,0 +1,24 @@
+# The shared libraries of aeon-os, in load order (a library comes after every library it imports).
+# Paths are relative to the repository root. They are compiled once, put on the disk as lib/NAME.bl0c
+# (see aeon.sh / --shared) and loaded by the boot code; programs link to them by name when they load.
+stdlib/arrlib.bl0
+stdlib/mathlib.bl0
+stdlib/str/char.bl0
+stdlib/str/affix.bl0
+stdlib/str/substr.bl0
+stdlib/str/utf8.bl0
+stdlib/str/split.bl0
+stdlib/str/fmt.bl0
+aeon-os/kernel.bl0
+stdlib/fs/disk.bl0
+stdlib/fs/hostfs.bl0
+stdlib/fs/fs.bl0
+stdlib/fs/path.bl0
+stdlib/fs/dirs.bl0
+aeon-os/lib/log.bl0
+aeon-os/lib/loader.bl0
+aeon-os/lib/term.bl0
+aeon-os/lib/keys.bl0
+aeon-os/lib/lineedit.bl0
+aeon-os/lib/userland.bl0
+aeon-os/lib/input.bl0

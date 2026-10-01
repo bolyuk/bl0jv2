@@ -78,13 +78,8 @@ TcpConn.connectTimeoutMs = 5000;
 // in raw memory, then mount - an unformatted disk stays unmounted until 'format'
 Disk.init(kalloc(512));
 if (Disk.present()) { Fs.mount(); }
-// the page the programs on the disk read their environment from (lib/sys.bl0)
-sysReserve();
-sysPublish(Disk.bufAddr, Disk.sectors, Disk.vector);
 // the host folder, if the host shared one (--bridge-fs)
 Hfs.init(kalloc(260), kalloc(Hfs.chunk));
-sysPublishHfs(Hfs.present, Hfs.pathAddr, Hfs.dataAddr, Hfs.vector);
-sysPublishTerm(Keyboard.base, Console.columns, Console.rows);
 Log.write('shell: started');
 
 // --- built-in commands ---
@@ -317,7 +312,8 @@ def cmdHttpd(words) {
 // exec, the network commands, ...). Every other command - ls, cat, cp, grep,
 // ... - is a program on the virtual disk, bin/<name>.bl0c, loaded into memory
 // when you type its name: the shell finds it with Fs, puts the command line and
-// the current folder on the system page (lib/sys.bl0), and asks the kernel to
+// the current folder where the program finds them (Prog.words, Prog.cwd, Io - shared libraries
+// make those the shell's own variables), and asks the kernel to
 // run it. The kernel half is sysExec below, a syscall handler registered before
 // dropToUserMode(): it reads the file and calls execMem, which runs the program
 // UNPRIVILEGED and unloads it when it returns. A program that fails reports its
@@ -402,8 +398,8 @@ def runProgram(path, words, label) {
         sayErr(label + ': command not found');
         return nil;
     }
-    sysSetArgs(words);
-    sysSetCwd(ShellState.cwd);
+    Prog.words = words;
+    Prog.cwd = ShellState.cwd;
     problem = syscall(Exec.vector, path);
     if (problem != '') {
         say(label + ': ' + problem);
@@ -504,14 +500,12 @@ def runPipeline(stages) {
         }
         Io.inPath = inPath;
         Io.outPath = outPath;
-        sysSetStdio(inPath, outPath);
         guarded(runStage, stage.words);
         Io.flush();
         i += 1;
     }
     Io.inPath = '';
     Io.outPath = '';
-    sysSetStdio('', '');
     i = 0;
     while (i < len(temps)) {
         Fs.remove(temps[i]);

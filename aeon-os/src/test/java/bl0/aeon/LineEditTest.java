@@ -163,7 +163,7 @@ class LineEditTest {
     @Test
     void theConsoleSurvivesALineSpeedSlowerThanTheGuest(@TempDir Path dir) throws Exception {
         var s = new AeonSession();
-        s.start(AeonSession.compile("shell.bl0"), 1, vm -> {
+        s.start(AeonSession.compile("init.bl0"), 1, vm -> {
             try {
                 vm.set_uart_baud(115_200);
                 vm.attach_disk(AeonImage.os(dir.resolve("d.img")));

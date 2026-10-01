@@ -7,11 +7,13 @@ and type on its keyboard.
 ```
 aeon-os/
   kernel.bl0        heap, keyboard driver, console (syscall gate)
-  boot.bl0          boots, runs a demo scheduler, starts sbin/ programs from the disk
+  init.bl0          the smallest boot: loads the shared libraries and the shell from the disk
+  boot.bl0          the same after a demo scheduler and fault isolation show
+  libs.txt          the shared libraries, in load order
   smp_boot.bl0      the same on several cores
   shell.bl0         the shell: built-ins, the network commands, program launcher
   child_*.bl0       small programs boot starts
-  lib/              sys (system page), log, loader, userland (what a program imports), input (stdin),
+  lib/              log, loader, drivers (UART, terminal emulator), userland (what a program imports), input (stdin),
                     term/keys/lineedit (terminal output, key parsing, the line editor), cmdline (parser)
   bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir edit
 ```
@@ -32,9 +34,27 @@ loader, the commands.
   lives in the shell). Any other word is looked up as `bin/<word>.bl0c` on the
   disk, read with `Fs`, placed in raw memory and run with `execMem` - **in user
   mode**, relocated to wherever there is room, and unloaded when it returns.
-* A program gets its command line, the current folder and the disk driver's
-  state from the **system page** (`lib/sys.bl0`, a fixed block of raw memory), and
-  reaches the machine only through syscalls.
+* A program is linked to the **shared libraries** (below): its command line, working folder and
+  redirections are variables of those libraries that the shell sets, and it reaches the machine
+  only through syscalls.
+
+## Shared libraries
+
+The code every program needs - the filesystem, UTF-8, the line editor, the keyboard driver, the
+helpers - is not in the programs. `libs.txt` lists the shared libraries in load order. They are
+compiled once (`--shared aeon-os/libs.txt` does it when it builds the disk), stored as
+`lib/NAME.bl0c` with `lib/MANIFEST`, and loaded once at boot by `loadLibraries()` (`execMem` mode
+2): each runs its top level and **exports** the functions and classes it defines. A program built
+against them contains only its own code, and its references to library things are names that the
+loader links to the loaded copies when it starts. The compiler still checks calls to them (arity,
+members) from the library's source. Consequences: a command is 300 bytes to 1.3 KB instead of 40-60
+KB, and a library's state is one for the whole system - `Fs.mounted`, the disk driver, the
+keyboard ring, the redirections - not a copy per program.
+
+Rules: a library may import only libraries that come before it in the manifest; a program may not
+define a name a library defines; two libraries may not export one name. `init.bl0` and `boot.bl0`
+are built with the filesystem and loader inside (they are what reads the libraries in) and so are
+not linked to anything.
 
 ## Running
 
@@ -98,11 +118,10 @@ exposes only that one folder.
 ```
 // aeon-os/bin/hello.bl0
 import '../lib/userland.bl0';
-def main(words) { consoleWriteLine('hello ' + restOf(words, 1)); }
-if (startProgram()) { main(Prog.words); }
+def main(words) { say('hello ' + restOf(words, 1)); }
+programMain(main);
 ```
 
-Put it on the disk (`--disk-put aeon-os/bin/hello.bl0:bin/hello.bl0c`, or inside
-the OS: `write`/`echo > file` a compiled program) and type `hello world`.
-A program has its own copy of every class it imports, so it cannot share state
-with the shell - which is why the network commands stay built in.
+Put it on the disk (`--shared aeon-os/libs.txt --disk-put aeon-os/bin/hello.bl0:bin/hello.bl0c`) and
+type `hello world`. The network commands stay in the shell because their state (the NIC, the
+connections) is the shell's own and not a library's.

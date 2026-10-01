@@ -65,6 +65,15 @@ public final class DiskImport {
     }
 
     public static void put(BlockDevice disk, List<Spec> specs, List<Path> includeDirs) throws IOException {
+        put(disk, specs, includeDirs, null);
+    }
+
+    /**
+     * With 'shared' the programs are built against those libraries (their code is not in them),
+     * and the libraries themselves are put on the disk as lib/NAME.bl0c with lib/MANIFEST listing
+     * them in load order.
+     */
+    public static void put(BlockDevice disk, List<Spec> specs, List<Path> includeDirs, SharedLibs shared) throws IOException {
         StringBuilder src = new StringBuilder("import 'stdlib/fs/fs.bl0'; Disk.init(8192); ")
                 .append("if (!Fs.mount()) { Fs.format(); } ")
                 // a file travels as hex text in string constants (a push per byte would overflow
@@ -72,23 +81,20 @@ public final class DiskImport {
                 .append("def unhex(chunks) { out = []; c = 0; while (c < len(chunks)) { s = chunks[c]; i = 0; ")
                 .append("while (i < len(s)) { a = int(s[i]); b = int(s[i + 1]); ")
                 .append("push(out, ((a < 58 ? a - 48 : a - 87) << 4) | (b < 58 ? b - 48 : b - 87)); i += 2; } c += 1; } return out; } ");
+        if (shared != null) {
+            StringBuilder manifest = new StringBuilder();
+            for (Path lib : shared.files()) {
+                String name = SharedLibs.imageName(lib);
+                appendFile(src, "lib/" + name, compileSource(Bl0jv2_Linker.read(lib), lib, includeDirs, shared));
+                manifest.append("lib/").append(name).append('\n');
+            }
+            appendFile(src, "lib/MANIFEST", manifest.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
         for (Item item : expand(specs)) {
             byte[] data = item.host().getFileName().toString().endsWith(".bl0")
-                    ? compile(item.host(), includeDirs)
+                    ? compileSource(Files.readString(item.host()), item.host(), includeDirs, shared)
                     : Files.readAllBytes(item.host());
-            src.append("Fs.writeData('").append(item.name().replace("\\", "\\\\").replace("'", "\\'")).append("', unhex([");
-            StringBuilder hex = new StringBuilder();
-            boolean firstChunk = true;
-            for (int i = 0; i < data.length; i++) {
-                hex.append(Character.forDigit((data[i] >> 4) & 15, 16)).append(Character.forDigit(data[i] & 15, 16));
-                if (hex.length() >= 8000 || i == data.length - 1) {
-                    if (!firstChunk) src.append(',');
-                    src.append('\'').append(hex).append('\'');
-                    firstChunk = false;
-                    hex.setLength(0);
-                }
-            }
-            src.append("])); ");
+            appendFile(src, item.name(), data);
         }
 
         var parser = new Bl0jv2_Parser();
@@ -110,11 +116,30 @@ public final class DiskImport {
         }
     }
 
-    private static byte[] compile(Path file, List<Path> includeDirs) throws IOException {
-        String source = Files.readString(file);
+    // statements that write 'data' to the file 'name' on the disk
+    private static void appendFile(StringBuilder src, String name, byte[] data) {
+        src.append("Fs.writeData('").append(name.replace("\\", "\\\\").replace("'", "\\'")).append("', unhex([");
+        StringBuilder hex = new StringBuilder();
+        boolean firstChunk = true;
+        for (int i = 0; i < data.length; i++) {
+            hex.append(Character.forDigit((data[i] >> 4) & 15, 16)).append(Character.forDigit(data[i] & 15, 16));
+            if (hex.length() >= 8000 || i == data.length - 1) {
+                if (!firstChunk) src.append(',');
+                src.append('\'').append(hex).append('\'');
+                firstChunk = false;
+                hex.setLength(0);
+            }
+        }
+        src.append("])); ");
+    }
+
+    private static byte[] compileSource(String source, Path file, List<Path> includeDirs, SharedLibs shared) {
         var parser = new Bl0jv2_Parser();
         parser.setSourceCode(source);
         var ast = (PROGRAM_N) parser.getAST(new Bl0jv2_Lexer().getTokens(source));
-        return new Bl0jv2_Compiler().compile(Bl0jv2_Linker.resolveImports(ast, file, includeDirs));
+        var linked = shared == null
+                ? Bl0jv2_Linker.resolveImports(ast, file, includeDirs)
+                : Bl0jv2_Linker.resolveImports(ast, file, includeDirs, shared.keys());
+        return new Bl0jv2_Compiler().compile(linked);
     }
 }

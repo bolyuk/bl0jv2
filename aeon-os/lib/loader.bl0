@@ -10,6 +10,7 @@
 
 import '../kernel.bl0';
 import '../../stdlib/fs/fs.bl0';
+import '../../stdlib/str/split.bl0';
 import 'log.bl0';
 
 def class Loader {
@@ -36,6 +37,28 @@ def loadAndRun(path, mode) {
     }
     free(data);
     execMem(Loader.buffer, size, mode);
+}
+
+// The shared libraries (see libs.txt): lib/MANIFEST on the disk names their images, in load order.
+// Each is loaded once, in mode 2: it runs its top level and exports what it defines, and every
+// program loaded afterwards that was built against it links to that one copy - so a library's
+// state (the filesystem's mounted flag, the keyboard ring, ...) is one for the whole system and a
+// program carries only its own code. An image built without shared libraries has no manifest.
+def loadLibraries() {
+    manifest = Fs.read('lib/MANIFEST');
+    if (manifest == nil) { return 0; }
+    names = Split.split(manifest, strChar(10));
+    count = 0;
+    i = 0;
+    while (i < len(names)) {
+        if (names[i] != '') {
+            loadAndRun(names[i], 2);
+            count += 1;
+        }
+        i += 1;
+    }
+    Log.write('loader: ' + count + ' shared libraries loaded');
+    return count;
 }
 
 // --- process journal: a log of every program a kernel-level caller has

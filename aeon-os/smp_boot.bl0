@@ -358,6 +358,7 @@ if (!Fs.mount()) {
     println 'no boot disk: start with --disk <image> holding sbin/shell.bl0c (see aeon-os/README.md)';
     panic('no boot disk');
 }
+loadLibraries();
 journalExec('shell', 'sbin/shell.bl0c');
 
 println '';
