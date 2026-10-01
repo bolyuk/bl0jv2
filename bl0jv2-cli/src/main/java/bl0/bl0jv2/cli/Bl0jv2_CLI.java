@@ -388,7 +388,7 @@ public class Bl0jv2_CLI {
 
         if (compile) {
             if (dest == null)
-                dest = source.getParent().resolve(source.getFileName() + ".bl0c");
+                dest = source.resolveSibling(source.getFileName() + ".bl0c");
 
             var lexer = new Bl0jv2_Lexer();
             var parser = new Bl0jv2_Parser();

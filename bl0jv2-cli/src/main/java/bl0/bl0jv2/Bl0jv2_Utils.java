@@ -113,7 +113,7 @@ public final class Bl0jv2_Utils {
                 case OpCodes.LR_SUB -> writer.append(String.format("SUB r%d = r%d - r%d", c, a, b));
                 case OpCodes.LR_MUL -> writer.append(String.format("MUL r%d = r%d * r%d", c, a, b));
                 case OpCodes.LR_DIV -> writer.append(String.format("DIV r%d = r%d / r%d", c, a, b));
-                case OpCodes.LR_REM -> writer.append(String.format("REM r%d = r%d % r%d", c, a, b));
+                case OpCodes.LR_REM -> writer.append(String.format("REM r%d = r%d %% r%d", c, a, b));
                 case OpCodes.LR_POW -> writer.append(String.format("POW r%d = r%d ** r%d", c, a, b));
                 case OpCodes.LR_AND -> writer.append(String.format("AND r%d = r%d & r%d", c, a, b));
                 case OpCodes.LR_OR -> writer.append(String.format("OR r%d = r%d | r%d", c, a, b));
