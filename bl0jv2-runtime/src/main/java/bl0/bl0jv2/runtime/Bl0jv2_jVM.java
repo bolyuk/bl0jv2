@@ -9,6 +9,7 @@ import bl0.bl0jv2.runtime.interrupt.TimerService;
 import bl0.bl0jv2.runtime.device.BlockDevice;
 import bl0.bl0jv2.runtime.device.DisplayController;
 import bl0.bl0jv2.runtime.device.DiskController;
+import bl0.bl0jv2.runtime.device.RealTimeClock;
 import bl0.bl0jv2.runtime.device.UartController;
 import bl0.bl0jv2.runtime.device.PortDevice;
 import bl0.bl0jv2.runtime.device.HostShare;
@@ -71,7 +72,8 @@ public final class Bl0jv2_jVM {
         }
     }, () -> this.interrupts.raiseInterruptOn(0, 2));   // the serial port's interrupt is taken by core 0, always: its handler is not written for two cores at once
     private final DisplayController display = new DisplayController(portIO, rawMemory);
-    private final PortDevice[] devices = {disk, share, uart, display};
+    private final RealTimeClock clock = new RealTimeClock();
+    private final PortDevice[] devices = {disk, share, uart, display, clock};
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
 
@@ -1167,6 +1169,11 @@ public final class Bl0jv2_jVM {
         for (PortDevice device : devices)
             if (device.claimsRead(port)) return device.read(port, widthBytes);
         return portIO.read(port, widthBytes);
+    }
+
+    /** what the real-time clock (ports 0x0F70-0x0F77) reads: milliseconds since 1970-01-01 UTC; the host's clock by default */
+    public void set_clock(java.util.function.LongSupplier epochMillis) {
+        clock.setSource(epochMillis);
     }
 
     /** the terminal sent these bytes: they go through the UART's receiver, which interrupts vector 2 */

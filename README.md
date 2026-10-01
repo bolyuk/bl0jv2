@@ -341,6 +341,13 @@ ports, `in16(0x0F50)` columns and `in16(0x0F52)` rows. `-k` connects the host te
 guest's job: see aeon-os/README.md. `Utf8Stream` (stdlib/str/utf8.bl0) decodes a byte
 stream one byte at a time.
 
+### The clock
+
+A **real-time clock**, read the way a PC's CMOS one is: the date and time as separate fields, in UTC. Reading the seconds
+port latches a snapshot, so the fields read after it agree: `in8(0x0F70)` second, `0x0F71` minute, `0x0F72` hour, `0x0F73`
+day of the month, `0x0F74` month, `0x0F75` weekday (0 = Sunday), `in16(0x0F76)` year. The host's clock by default;
+`Bl0jv2_jVM.set_clock(LongSupplier)` gives it another (a test moves one by hand). `stdlib/time/clock.bl0` reads it.
+
 ### The display
 
 `--display` attaches a **text-mode display**, in the manner of VGA text mode, and the
