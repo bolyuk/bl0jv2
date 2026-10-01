@@ -70,7 +70,7 @@ public final class Bl0jv2_jVM {
             throw new Bl0j_VM_Exception("console write failed: " + e.getMessage());
         }
     }, () -> this.interrupts.raiseInterrupt(2));
-    private final DisplayController display = new DisplayController();
+    private final DisplayController display = new DisplayController(portIO, rawMemory);
     private final PortDevice[] devices = {disk, share, uart, display};
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
@@ -1102,6 +1102,16 @@ public final class Bl0jv2_jVM {
     /** with flow control (the default) the receiver holds bytes back while its FIFO is full; without, they are lost */
     public void set_uart_flow_control(boolean on) {
         uart.setFlowControl(on);
+    }
+
+    /** attaches a text-mode display (see DisplayController): the guest finds it by reading the present port */
+    public void attach_display() {
+        display.attach();
+    }
+
+    /** what the display shows now; null if none is attached */
+    public DisplayController.Frame display_frame() {
+        return display.frame();
     }
 
     /** the screen size the display reports to the guest (default 80x24) */
