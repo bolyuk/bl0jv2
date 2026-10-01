@@ -650,7 +650,7 @@ public final class Bl0jv2_Compiler {
     }
 
     // eventGen(e): 1-arg, value-producing (the event's current generation) -
-    // same shape as exec(path)
+    // same shape as syscall's value-producing natives
     private Integer compileEventGen(FunCall funCall) {
         if (!isBuiltinCall(funCall, "eventGen", 1))
             return null;
@@ -821,21 +821,6 @@ public final class Bl0jv2_Compiler {
         _emit(OpCodes.LOAD_NIL, result);
         _emit(OpCodes.CALL_NATIVE, NativeMethods.HALT_CORE, result);
         return result;
-    }
-
-    // exec(path): 1-arg, value-producing (0 on success) - same shape as
-    // compileRaiseInterrupt's clobber-avoidance MOV, but the result here is
-    // meaningful (CALL_NATIVE overwrites its own operand register with the
-    // native's return value), not discarded
-    private Integer compileExec(FunCall funCall) {
-        if (!isBuiltinCall(funCall, "exec", 1))
-            return null;
-
-        int pathRegRaw = compileInner(funCall.args.get(0));
-        int pathReg = regIndex++;
-        _emit(OpCodes.MOV, pathReg, pathRegRaw);
-        _emit(OpCodes.CALL_NATIVE, NativeMethods.EXEC, pathReg);
-        return pathReg;
     }
 
     // syscall(vector, arg): SYSCALL takes its two values directly in a/b,
@@ -1130,7 +1115,7 @@ public final class Bl0jv2_Compiler {
         if ((r = compileValueNative(funCall, "throw", 1, NativeMethods.THROW)) != null) return r;
         if ((r = compileValueNative(funCall, "strSub", 3, NativeMethods.STR_SUB)) != null) return r;
         if ((r = compileValueNative(funCall, "strFind", 3, NativeMethods.STR_FIND)) != null) return r;
-        if ((r = compileValueNative(funCall, "execMem", 2, NativeMethods.EXEC_MEM)) != null) return r;
+        if ((r = compileValueNative(funCall, "execMem", 3, NativeMethods.EXEC_MEM)) != null) return r;
         if ((r = compileValueNative(funCall, "strChar", 1, NativeMethods.STR_CHAR)) != null) return r;
         if ((r = compileValueNative(funCall, "strUpper", 1, NativeMethods.STR_UPPER)) != null) return r;
         if ((r = compileValueNative(funCall, "strLower", 1, NativeMethods.STR_LOWER)) != null) return r;
@@ -1148,7 +1133,6 @@ public final class Bl0jv2_Compiler {
         if ((r = compileDropToUserMode(funCall)) != null) return r;
         if ((r = compileIsPrivileged(funCall)) != null) return r;
         if ((r = compileHaltCore(funCall)) != null) return r;
-        if ((r = compileExec(funCall)) != null) return r;
         if ((r = compileSyscall(funCall)) != null) return r;
         if ((r = compileAtomicAdd(funCall)) != null) return r;
         if ((r = compileAtomicCas(funCall)) != null) return r;

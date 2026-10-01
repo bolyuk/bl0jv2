@@ -25,9 +25,6 @@ public final class NativeMethods {
     // registration for why this is a native (a blocking Java loop), not a
     // dedicated opcode
     public static final byte HALT_CORE = 0x10;
-    // loads and runs a separate compiled (.bl0c) file as a genuinely
-    // isolated child process - see Bl0jv2_jVM's own registration
-    public static final byte EXEC = 0x11;
     // generation-counted event (see Bl0jEvent): eventGen() snapshots it,
     // signalEvent() bumps it and wakes every waiter, waitEvent() sleeps
     // until it differs from a snapshot (or timeout / deliverable interrupt)
@@ -53,6 +50,7 @@ public final class NativeMethods {
     public static final byte THROW = 0x1E;
     // strChar(codePoint): the one-character string for a Unicode code point
     public static final byte STR_CHAR = 0x1F;
-    // execMem(addr, size): run a compiled program that sits in raw memory, unprivileged
+    // execMem(addr, size, mode): run a compiled program that sits in raw memory
+    // (0x11, once exec(path), is free: the VM never reads a host file)
     public static final byte EXEC_MEM = 0x20;
 }

@@ -17,25 +17,47 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// exec(path): loads a SEPARATE compiled (.bl0c) file and runs it in THIS
-// SAME Bl0jv2_jVM instance - same managed heap, raw memory, port space,
-// interrupt table and cores as whatever called it. An earlier version of
-// this spun up a second Bl0jv2_jVM instance per call instead; that model
-// is gone now (see Bl0jv2_jVM's own exec() doc for why: it doesn't match
-// real hardware, and doesn't port to a future non-JVM backend). Every
-// address the loaded program's own bytecode encodes gets relocated by
-// loadRelocated() to land past whatever this VM already had loaded - see
-// its own doc for exactly which operands need that.
+// execMem(addr, size, mode): loads a compiled program that sits in raw memory
+// and runs it in THIS SAME Bl0jv2_jVM instance - same managed heap, raw memory,
+// port space, interrupt table and cores as whatever called it. The VM never
+// reads a host file: these tests put the program's bytes in memory the way a
+// kernel would after reading them from a disk. Every address the loaded
+// program's bytecode encodes is relocated by loadRelocated() to land past
+// whatever this VM already had loaded.
 class Bl0jv2_ExecTest {
 
     @TempDir
     Path tempDir;
 
+    private static final int AT = 30000;
+
+    // a compiled program, as the bl0 statements that place it in raw memory
+    private static final java.util.Map<Path, byte[]> PROGRAMS = new java.util.HashMap<>();
+
     private Path writeCompiled(String name, String source) throws IOException {
         byte[] bytecode = Bl0jv2_TestRunner.compile(source);
         Path file = tempDir.resolve(name);
-        Files.write(file, bytecode);
+        PROGRAMS.put(file, bytecode);
         return file;
+    }
+
+    private static String place(Path program) {
+        byte[] b = PROGRAMS.get(program);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < b.length; i++) sb.append("poke8(").append(AT + i).append(", ").append(b[i] & 0xFF).append("); ");
+        return sb.toString();
+    }
+
+    // statements that load the program into memory and run it in 'mode' (0 user, 1 kernel)
+    private static String load(Path program, int mode) {
+        byte[] b = PROGRAMS.get(program);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < b.length; i++) sb.append("poke8(").append(AT + i).append(", ").append(b[i] & 0xFF).append("); ");
+        return sb + "execMem(" + AT + ", " + b.length + ", " + mode + ")";
+    }
+
+    private static String load(Path program) {
+        return load(program, 1);
     }
 
     @Test
@@ -44,7 +66,7 @@ class Bl0jv2_ExecTest {
 
         assertEquals("before|from the child|after", run(
                 "print 'before|'; " +
-                "exec('" + escaped(child) + "'); " +
+                "" + load(child) + "; " +
                 "print '|after';"));
     }
 
@@ -53,19 +75,49 @@ class Bl0jv2_ExecTest {
         Path child = writeCompiled("child.bl0c", "print 'hi';");
 
         assertEquals("hi|0", run(
-                "status = exec('" + escaped(child) + "'); " +
+                place(child) + "status = execMem(" + AT + ", " + PROGRAMS.get(child).length + ", 1); " +
                 "print '|' + status;"));
     }
 
     @Test
-    void execOfAMissingFileThrows() {
-        assertThrows(Bl0j_VM_Exception.class, () -> run("exec('does/not/exist.bl0c');"));
+    void execMemOfGarbageThrowsACatchableError() {
+        assertEquals("exec: cannot load 'memory at 20000': Wrong magic number", run(
+                "poke8(20000, 1); try { execMem(20000, 16, 1); } catch (e) { print e; }"));
     }
 
     @Test
-    void execFromUserModeThrows() {
-        assertThrows(Bl0j_VM_Exception.class, () -> run(
-                "dropToUserMode(); exec('anything.bl0c');"));
+    void execMemFromUserModeThrows() {
+        assertThrows(Bl0j_VM_Exception.class, () -> run("dropToUserMode(); execMem(20000, 16, 1);"));
+    }
+
+    @Test
+    void thereIsNoWayToReadAHostFile() {
+        // exec(path) is gone: a name that is not a builtin is just an undefined function
+        assertThrows(RuntimeException.class, () -> run("exec('anything.bl0c');"));
+    }
+
+    @Test
+    void aUserModeProgramRunsUnprivilegedAndTheCallerKeepsItsPrivilege() throws IOException {
+        Path child = writeCompiled("user.bl0c", "print 'child privileged: ' + str(isPrivileged());");
+        assertEquals("child privileged: false|caller privileged: true", run(
+                load(child, 0) + "; print '|caller privileged: ' + str(isPrivileged());"));
+    }
+
+    @Test
+    void aUserModeProgramLeavesNothingLoadedBehind() throws IOException {
+        Path child = writeCompiled("quiet.bl0c", "def f() { return 7; } class_free = f(); s = 'text';");
+        // 40000 constants would not fit a 16-bit pool if each run stayed loaded
+        assertEquals("done", run(
+                place(child) + "i = 0; while (i < 10000) { execMem(" + AT + ", " + PROGRAMS.get(child).length + ", 0); i += 1; } print 'done';"));
+    }
+
+    @Test
+    void aKernelProgramStaysLoaded() throws IOException {
+        // its function is still there for the caller to find afterwards: the program
+        // stores nothing, so what survives is only observable as "no crash"; the
+        // callerCodeStillWorksCorrectlyAfterExec test covers the contents
+        Path child = writeCompiled("kernel.bl0c", "def g() { return 1; }");
+        assertEquals("ok", run(load(child, 1) + "; print 'ok';"));
     }
 
     // ctx.privileged is one flag shared by the whole call stack on this
@@ -81,7 +133,7 @@ class Bl0jv2_ExecTest {
         Path child = writeCompiled("dropsPrivilege.bl0c", "dropToUserMode();");
 
         assertEquals("still privileged", run(
-                "exec('" + escaped(child) + "'); " +
+                "" + load(child) + "; " +
                 "if (isPrivileged()) { print 'still privileged'; } else { print 'wrongly demoted'; }"));
     }
 
@@ -93,7 +145,7 @@ class Bl0jv2_ExecTest {
         Path child = writeCompiled("buggy.bl0c", "x = 1 / 0;");
 
         assertEquals("survived", run(
-                "try { exec('" + escaped(child) + "'); } catch (e) { } " +
+                "try { " + load(child) + "; } catch (e) { } " +
                 "print 'survived';"));
     }
 
@@ -108,7 +160,7 @@ class Bl0jv2_ExecTest {
         Path child = writeCompiled("crashy.bl0c", "panic('child fault');");
 
         Bl0j_VM_Panic ex = assertThrows(Bl0j_VM_Panic.class, () -> run(
-                "try { exec('" + escaped(child) + "'); } catch (e) { print 'unreachable'; } " +
+                "try { " + load(child) + "; } catch (e) { print 'unreachable'; } " +
                 "print 'also unreachable';"));
         assertTrue(ex.getMessage().contains("child fault"));
     }
@@ -122,7 +174,7 @@ class Bl0jv2_ExecTest {
 
         assertEquals("999", run(
                 "poke32(0, 111); " +
-                "exec('" + escaped(child) + "'); " +
+                "" + load(child) + "; " +
                 "print peek32(0);"));
     }
 
@@ -137,7 +189,7 @@ class Bl0jv2_ExecTest {
         assertEquals("42|999|42", run(
                 "def f() { return 42; } " +
                 "print f() + '|'; " +
-                "exec('" + escaped(child) + "'); " +
+                "" + load(child) + "; " +
                 "print '|' + f();"));
     }
 
@@ -158,7 +210,7 @@ class Bl0jv2_ExecTest {
                 "def class Box { field v; def init(v) { this.v = v; } def bump() { this.v = this.v + 1; return this.v; } } " +
                 "a = new Box(100); " +
                 "print 'before|'; " +
-                "exec('" + escaped(child) + "'); " +
+                "" + load(child) + "; " +
                 "print '|after';"));
     }
 
@@ -172,10 +224,10 @@ class Bl0jv2_ExecTest {
     private static final String JOURNAL =
             "def class ProcessJournal { static field entries; static field nextPid; } " +
             "ProcessJournal.entries = []; ProcessJournal.nextPid = 1; " +
-            "def journalExec(name, path) { " +
+            "def journalExec(name, addr, size) { " +
             "  pid = ProcessJournal.nextPid; ProcessJournal.nextPid = ProcessJournal.nextPid + 1; " +
             "  status = 'ok'; " +
-            "  try { exec(path); } catch (e) { status = 'crashed: ' + e; } " +
+            "  try { execMem(addr, size, 1); } catch (e) { status = 'crashed: ' + e; } " +
             "  push(ProcessJournal.entries, 'pid=' + pid + ' name=' + name + ' status=' + status); " +
             "  return status; " +
             "} " +
@@ -189,7 +241,7 @@ class Bl0jv2_ExecTest {
         Path child = writeCompiled("ok.bl0c", "print 'ran';");
 
         assertEquals("ranpid=1 name=greeter status=ok|", run(JOURNAL +
-                "journalExec('greeter', '" + escaped(child) + "'); " +
+                place(child) + "journalExec('greeter', " + AT + ", " + PROGRAMS.get(child).length + "); " +
                 "printJournal();"));
     }
 
@@ -198,7 +250,7 @@ class Bl0jv2_ExecTest {
         Path child = writeCompiled("bad.bl0c", "x = 1 / 0;");
 
         String out = run(JOURNAL +
-                "journalExec('buggy', '" + escaped(child) + "'); " +
+                place(child) + "journalExec('buggy', " + AT + ", " + PROGRAMS.get(child).length + "); " +
                 "printJournal();");
 
         assertTrue(out.contains("pid=1 name=buggy status=crashed:"), "journal entry missing crash status: " + out);
@@ -210,7 +262,7 @@ class Bl0jv2_ExecTest {
         Path child = writeCompiled("ok.bl0c", "");
 
         assertEquals("ok", run(JOURNAL +
-                "print journalExec('x', '" + escaped(child) + "');"));
+                place(child) + "print journalExec('x', " + AT + ", " + PROGRAMS.get(child).length + ");"));
     }
 
     private static String escaped(Path p) {

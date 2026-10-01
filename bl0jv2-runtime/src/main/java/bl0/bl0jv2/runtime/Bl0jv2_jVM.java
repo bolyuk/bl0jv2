@@ -365,79 +365,44 @@ public final class Bl0jv2_jVM {
             }
             return null;
         });
-        // loads a SEPARATE compiled (.bl0c) file from disk and runs it to
-        // completion IN THIS SAME Bl0jv2_jVM instance - same managed heap,
-        // raw memory, port space, interrupt table and cores as whatever
-        // called exec(). An earlier version of this spun up a second
-        // Bl0jv2_jVM instance per call instead; that's not how real
-        // hardware works (a real kernel loads a new process into its OWN
-        // address space, on the SAME machine - it never boots a second
-        // computer to run one program) and wouldn't port to a future
-        // non-JVM backend, which is the whole point of this VM being a
-        // reference implementation. loadRelocated() is what makes sharing
-        // possible: it appends the new program's constants/instructions to
-        // this VM's own, shifting every embedded address by however much
-        // was already there - see its own doc for exactly which operands
-        // need that and why.
+        // execMem(addr, size, mode): loads a compiled program that sits in raw
+        // memory and runs it to completion IN THIS SAME VM - same heap, raw
+        // memory, ports, interrupt table and cores as the caller. The VM never
+        // reads a host file: a kernel gets the bytes from whatever device it
+        // has (a disk, a network) and puts them in memory first. That is what
+        // makes the loader something a real machine can have.
         //
-        // Because everything really is shared now, so are the
-        // consequences: a panic() anywhere in the loaded program sets this
-        // VM's ONE 'panicked' flag, same as a panic() anywhere else - it
-        // halts the whole machine, not just "the thing that called exec()"
-        // (see execute()'s own Bl0j_VM_Panic handling, and the dedicated
-        // catch clause below that lets it through unwrapped rather than
-        // treating it as an ordinary failure). That's the correct behavior
-        // for code sharing the kernel's own privilege and address space,
-        // not a limitation: it's exactly why untrusted code has no
-        // business running with kernel privilege to begin with. An
-        // ordinary (non-panic) error still propagates as a normal,
-        // catchable Bl0j_VM_Exception, the same as any other exec()
-        // failure.
+        // The program is appended to the VM's constant pool and instruction
+        // stream with every embedded address shifted (loadRelocated(): jump
+        // targets, constant indices, FUN entry addresses, class member
+        // indices), the way a relocating loader places a program wherever
+        // there is room.
         //
-        // Runs as a nested, poll-eligible execute() call - like a worker
-        // core's own dispatched top-level task (see invokeDispatchedWork),
-        // NOT like a plain invoke(): the loaded program is a genuine new
-        // top-level task in its own right and needs the normal cooperative
-        // interrupt poll to keep running while it executes (its own
-        // registerHandler()'d keyboard/console/etc), not the "never poll
-        // inside a nested call" rule a handler body or a toString()
-        // override follows.
+        // mode 0 = a user program: it runs UNPRIVILEGED, and when it returns
+        // everything the load added is taken back out (the pool is indexed by 16
+        // bits, so programs that stayed forever would run it out after a few
+        // dozen runs) - heap entries made for its constants are freed, which
+        // means a program must not leave values behind that something else
+        // keeps. mode 1 = a kernel program (a child the boot code starts): it
+        // keeps the caller's privilege and stays loaded, since it may register
+        // handlers that point into it. Only privileged code may call this at
+        // all; a user-mode shell reaches it through a syscall.
         //
-        // Privileged: loading and running new code at the current
-        // privilege level is a kernel resource allocation, the same
-        // category as dispatch()/reserve(). Returns 0 on success; a
-        // missing/malformed file or an ordinary in-program failure both
-        // throw directly (bypassing CALL_NATIVE's generic -1 sentinel, the
-        // same way PANIC above does) with a message that actually says
-        // which, instead of the generic "native method N returned error"
-        // every other native's failure shares.
-        nativeMethods.put(NativeMethods.EXEC, (pathObj) -> {
-            CoreContext ctx = currentContext();
-            requirePrivileged(ctx, "exec");
-            String path = String.valueOf(pathObj);
-
-            byte[] fileBytes;
-            try {
-                fileBytes = Files.readAllBytes(Path.of(path));
-            } catch (IOException e) {
-                throw new Bl0j_VM_Exception("exec: cannot read '" + path + "': " + e.getMessage());
-            }
-
-            return execBytes(fileBytes, path, false);
-        });
-        // execMem(addr, size): the same, for a program already sitting in raw
-        // memory (a kernel that read it from a disk, say) - and the program runs
-        // UNPRIVILEGED: whoever asks (usually a syscall handler, which is itself
-        // elevated) is handing control to code it does not trust. Returns 0.
+        // A panic() inside the program halts the whole machine (one shared
+        // 'panicked' flag); any other error is an ordinary catchable error at
+        // the call. Returns 0.
         nativeMethods.put(NativeMethods.EXEC_MEM, (arg) -> {
             requirePrivileged(currentContext(), "execMem");
-            Object[] a = nativeArgs(arg, 2, "execMem(addr, size)");
+            Object[] a = nativeArgs(arg, 3, "execMem(addr, size, mode)");
             int addr = requireInt(a[0], "execMem"), size = requireInt(a[1], "execMem");
+            int mode = requireInt(a[2], "execMem");
             if (size <= 0)
                 throw new Bl0j_VM_Exception("execMem: size must be positive");
+            if (mode != 0 && mode != 1)
+                throw new Bl0j_VM_Exception("execMem: mode must be 0 (user program) or 1 (kernel program)");
             byte[] fileBytes = new byte[size];
             rawMemory.readBytes(addr, fileBytes);
-            return execBytes(fileBytes, "memory at " + addr, true);
+            return execBytes(fileBytes, "memory at " + addr, mode == 0);
         });
     }
 
@@ -445,6 +410,9 @@ public final class Bl0jv2_jVM {
     // 'label' only names it in error messages
     private Object execBytes(byte[] fileBytes, String path, boolean unprivileged) {
         CoreContext ctx = currentContext();
+        long[] constsBefore = consts;
+        int[] symbolsBefore = constSymbols;
+        byte[] instructionsBefore = instructions;
         int entryAddr;
         int registersLength;
         try {
@@ -483,6 +451,19 @@ public final class Bl0jv2_jVM {
             // unconditionally reset to kernel) rule invokeAsTrap()
             // already applies to interrupt/syscall handlers
             ctx.privileged = privilegedBefore;
+            // a user program leaves nothing loaded behind (see EXEC_MEM's doc). Not
+            // with several cores running: another core may be executing code
+            // out of the pool this would shrink.
+            if (unprivileged && coreCount == 1 && consts != constsBefore) {
+                for (int i = constsBefore.length; i < consts.length; i++) {
+                    long v = consts[i];
+                    if (NanBox.isBoxed(v) && NanBox.tagOf(v) == NanBox.TAG_REF)
+                        heap.free(NanBox.asRefIndex(v));
+                }
+                consts = constsBefore;
+                constSymbols = symbolsBefore;
+                instructions = instructionsBefore;
+            }
         }
     }
 
