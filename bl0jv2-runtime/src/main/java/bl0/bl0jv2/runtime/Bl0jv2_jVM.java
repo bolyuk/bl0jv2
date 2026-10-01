@@ -1151,8 +1151,8 @@ public final class Bl0jv2_jVM {
     // a bridge thread polls this directly (a sequence-number port bl0jv2
     // code bumps on every new write is the usual way to tell a fresh write
     // apart from re-reading stale data - see nic.bl0's own TX port layout).
-    // attaches the disk behind the controller ports (see DiskController);
-    // null detaches it
+    // attaches a disk behind the controller ports (see DiskController): the first call is drive 0, each
+    // further call the next drive; null detaches them all
     public void attach_disk(BlockDevice device) {
         disk.attach(device);
     }
