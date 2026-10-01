@@ -399,7 +399,7 @@ public final class Bl0jv2_jVM {
 
             int stackDepthBefore = ctx.callStack.size();
             boolean privilegedBefore = ctx.privileged;
-            ctx.callStack.push(new Frame(new long[registersLength], -1, -1));
+            ctx.callStack.push(new Frame(newRegisters(registersLength), -1, -1));
             try {
                 execute(entryAddr, stackDepthBefore, true);
                 return 0;
@@ -577,7 +577,7 @@ public final class Bl0jv2_jVM {
         heap.clear();
         freeHeapSlots.clear();
         ctx.handlerStack.clear();
-        ctx.callStack.add(new Frame(new long[registers_length], -1, -1));
+        ctx.callStack.add(new Frame(newRegisters(registers_length), -1, -1));
         consts = new long[constants_length];
 
         rawMemory.reset();
@@ -988,7 +988,7 @@ public final class Bl0jv2_jVM {
         FunDef fun = resolved.fun();
         long[] capturedCells = resolved.capturedCells();
 
-        long[] regs = new long[fun.regs()];
+        long[] regs = newRegisters(fun.regs());
         for (int i = 0; i < capturedCells.length; i++)
             regs[i + 1] = capturedCells[i];
         for (int i = 0; i < args.length; i++)
@@ -1455,8 +1455,18 @@ public final class Bl0jv2_jVM {
             }
     }
 
+    // a fresh register file: every register starts as nil. A plain
+    // 'new long[n]' is all-zero bits, which NanBox reads as the double 0.0 -
+    // so reading a variable that was never assigned (or an argument the
+    // caller didn't pass) silently produced 0.0 instead of nil.
+    private static long[] newRegisters(int count) {
+        long[] regs = new long[count];
+        Arrays.fill(regs, NanBox.NIL);
+        return regs;
+    }
+
     private void gen_frame(CoreContext ctx, FunDef fun, long[] args, int addressToReturn, int resultReg) {
-        long[] regs = new long[fun.regs()];
+        long[] regs = newRegisters(fun.regs());
 
         regs[0] = NanBox.NIL;
         for (int i = 0; i < args.length; i++)
