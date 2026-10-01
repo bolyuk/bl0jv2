@@ -248,4 +248,33 @@ class ShellFilesTest {
         command(s, "find needle sub", "/sub/needle.txt");
         command(s, "find zzz", "nothing found");
     }
+
+    @Test
+    void foldersCanBeCopiedMovedAndRemovedWithTheirContents(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "mkdir proj", "$ ");
+        command(s, "mkdir proj/sub", "$ ");
+        command(s, "mkdir proj/empty", "$ ");
+        command(s, "echo one > proj/a.txt", "$ ");
+        command(s, "echo two > proj/sub/b.txt", "$ ");
+        command(s, "tree proj", "2 folders, 2 files");
+        command(s, "rm proj", "is a folder");
+        command(s, "cp proj proj2", "is a folder");
+        command(s, "cp -r proj proj2", "2 files copied");
+        command(s, "cat proj2/sub/b.txt", "two");
+        command(s, "ls proj2", "empty/");
+        command(s, "cp -r proj proj/inner", "into itself");
+        command(s, "mv proj2 moved", "$ ");
+        command(s, "cat moved/a.txt", "one");
+        command(s, "cat moved/sub/b.txt", "two");
+        command(s, "ls proj2", "no such folder");
+        command(s, "mkdir into", "$ ");
+        command(s, "mv moved into", "$ ");
+        command(s, "cat into/moved/a.txt", "one");
+        command(s, "rm -r into", "$ ");
+        command(s, "ls into", "no such folder");
+        command(s, "rm -r proj", "$ ");
+        command(s, "ls proj", "no such folder");
+        command(s, "rm -r /", "will not remove the root");
+    }
 }

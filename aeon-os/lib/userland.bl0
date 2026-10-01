@@ -220,6 +220,59 @@ def destination(from, to) {
     return target;
 }
 
+// everything below a folder, however deep: array of [name, size] - names in full, a folder's own marker
+// ('docs/') included. 'dir' is a stored name ('' = the root).
+def allUnder(dir) {
+    return Fs.list(FsPath.prefix(dir));
+}
+
+// makes a folder (and the ones above it) unless it exists
+def ensureDir(path) {
+    if (path == '' || Dirs.isDir(path)) { return nil; }
+    ensureDir(FsPath.parent(path));
+    Dirs.mkdir(path);
+}
+
+// removes a file, or a folder with everything in it; false when there is nothing of that name
+def removeTree(path) {
+    if (Fs.exists(path)) { return Fs.remove(path); }
+    if (!Dirs.isDir(path)) { return false; }
+    entries = allUnder(path);
+    i = 0;
+    while (i < len(entries)) {
+        Fs.remove(entries[i][0]);
+        i += 1;
+    }
+    return true;
+}
+
+// copies a folder's contents to 'to' (a stored name that does not exist yet as a file); returns how many
+// files were copied
+def copyTree(from, to) {
+    entries = allUnder(from);
+    prefix = FsPath.prefix(from);
+    target = FsPath.prefix(to);
+    copied = 0;
+    ensureDir(to);
+    i = 0;
+    while (i < len(entries)) {
+        name = entries[i][0];
+        rest = strSub(name, len(prefix), len(name));
+        if (rest == '') {
+            // the marker of 'from' itself
+        } else if (strSub(rest, len(rest) - 1, len(rest)) == '/') {
+            ensureDir(strSub(target + rest, 0, len(target + rest) - 1));
+        } else {
+            data = Fs.readData(name);
+            Fs.writeData(target + rest, data);
+            free(data);
+            copied += 1;
+        }
+        i += 1;
+    }
+    return copied;
+}
+
 // call first thing in a program; false (after saying why) when there is no filesystem to use.
 // The shell has put the command line, the working folder and the redirections in this core's Ctx:
 // everything here is a shared library, so that is the same table the shell uses, not a copy. The

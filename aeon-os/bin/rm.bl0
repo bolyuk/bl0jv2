@@ -1,11 +1,29 @@
-// aeon-os program: remove a file
+// aeon-os program: remove files; rm [-r] <path>...  (-r also removes a folder with everything in it)
 // Loaded from the virtual disk by the shell (bin/rm.bl0c); see lib/userland.bl0.
 
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 2) { sayErr('usage: rm <file>'); return nil; }
-    if (!Fs.remove(inCwd(words[1]))) { sayErr(words[1] + ': no such file'); }
+    recursive = false;
+    paths = [];
+    i = 1;
+    while (i < len(words)) {
+        if (words[i] == '-r') { recursive = true; } else { push(paths, words[i]); }
+        i += 1;
+    }
+    if (len(paths) == 0) { sayErr('usage: rm [-r] <path>...'); return nil; }
+    i = 0;
+    while (i < len(paths)) {
+        path = inCwd(paths[i]);
+        if (!recursive && !Fs.exists(path) && Dirs.isDir(path)) {
+            sayErr(paths[i] + ': is a folder (rm -r removes it with its contents, rmdir if it is empty)');
+        } else if (path == '') {
+            sayErr('rm: will not remove the root');
+        } else if (!removeTree(path)) {
+            sayErr(paths[i] + ': no such file');
+        }
+        i += 1;
+    }
 }
 
 programMain(main);
