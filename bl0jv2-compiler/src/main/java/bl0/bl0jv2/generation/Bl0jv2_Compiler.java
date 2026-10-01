@@ -338,6 +338,7 @@ public final class Bl0jv2_Compiler {
             for (int i = 0; i < fun.args.args.size(); i++) {
                 String argName = fun.args.args.get(i);
                 boolean isCaptured = i < pending.captureCount();
+
                 // mark BEFORE resolve() allocates it, so isCell() already
                 // reports the truth about this incoming value
                 if (isCaptured) scope.cellNames.add(argName);
@@ -1153,7 +1154,8 @@ public final class Bl0jv2_Compiler {
             Integer builtin = tryCompileBuiltin(funCall);
             if (builtin != null) return builtin;
 
-            if (funCall.left instanceof IdentityNode calleeName && functionArity.containsKey(calleeName.name)) {
+            if (funCall.left instanceof IdentityNode calleeName && functionArity.containsKey(calleeName.name)
+                    && !currentScope().identityMapping.containsKey(calleeName.name)) {
                 int expected = functionArity.get(calleeName.name);
                 if (expected != funCall.args.size())
                     throw err("function " + calleeName.name + " expects " + argumentCount(expected) + ", got " + funCall.args.size());
@@ -1557,7 +1559,11 @@ public final class Bl0jv2_Compiler {
             int constIndex = -1;
 
             if(node instanceof IdentityNode n){
-                if (functionMapping.containsKey(n.name)) {
+                // a parameter (or captured variable) shadows a function of the
+                // same name inside its own function - lexical scoping. Plain
+                // assignment to a function's name is rejected, so a local
+                // that exists here is always a parameter.
+                if (functionMapping.containsKey(n.name) && !currentScope().identityMapping.containsKey(n.name)) {
                     constIndex = functionMapping.get(n.name);
                     int reg = regIndex++;
                     _emit(OpCodes.LOAD_CONST, reg, constIndex);
@@ -1898,6 +1904,11 @@ public final class Bl0jv2_Compiler {
             // as nil, makes the lambda capture the very cell the assignment
             // below then fills in - the same cell, so by the time the
             // lambda actually runs it sees itself.
+            if (functionArity.containsKey(idNode.name))
+                throw err("cannot assign to '" + idNode.name + "': it is the name of a function");
+            if (classMapping.containsKey(idNode.name))
+                throw err("cannot assign to '" + idNode.name + "': it is the name of a class");
+
             if (valueNode instanceof LambdaNode lambda && lambdaMentionsFreely(lambda, idNode.name)) {
                 FunctionScope scope = currentScope();
                 if (!scope.identityMapping.containsKey(idNode.name) && scope.isCell(idNode.name)) {

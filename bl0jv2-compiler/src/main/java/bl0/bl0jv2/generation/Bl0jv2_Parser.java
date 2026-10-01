@@ -629,7 +629,51 @@ public final class Bl0jv2_Parser {
             return new BinaryNode(left, op.op, right);
         }
 
+        // x += 1  is  x = x + 1
+        if ((left instanceof IdentityNode || left instanceof IndexNode || left instanceof FieldAccessNode)
+                && peek_t() instanceof OpToken compound && compoundOperator(compound.op) != null) {
+            Token compoundToken = peek_t();
+            consume_t();
+            if (!isRepeatableTarget(left))
+                gen_exception(compoundToken, "the target of a compound assignment is evaluated twice, so it must not contain calls or assignments");
+            Node right = assign_evaluation();
+            return new BinaryNode(left, Operator.ASSIGNMENT, new BinaryNode(left, compoundOperator(compound.op), right));
+        }
+
         return left;
+    }
+
+    // the binary operator a compound assignment applies, or null for any other operator
+    private static Operator compoundOperator(Operator op) {
+        return switch (op) {
+            case PLUS_ASSIGN -> Operator.PLUS;
+            case MINUS_ASSIGN -> Operator.MINUS;
+            case STAR_ASSIGN -> Operator.STAR;
+            case DIV_ASSIGN -> Operator.DIV;
+            case REMAINDER_ASSIGN -> Operator.REMAINDER;
+            case STAR_STAR_ASSIGN -> Operator.STAR_STAR;
+            case AND_ASSIGN -> Operator.BIT_AND;
+            case OR_ASSIGN -> Operator.BIT_OR;
+            case XOR_ASSIGN -> Operator.BIT_XOR;
+            case SHIFT_LEFT_ASSIGN -> Operator.SHIFT_LEFT;
+            case SHIFT_RIGHT_ASSIGN -> Operator.SHIFT_RIGHT;
+            case SHIFT_RIGHT_UNSIGNED_ASSIGN -> Operator.SHIFT_RIGHT_UNSIGNED;
+            default -> null;
+        };
+    }
+
+    // a[i] += 1 reads and writes a[i], so the target is compiled twice: fine
+    // for names, literals and field/index chains over them, wrong for
+    // 'a[next()] += 1' (next() would run twice)
+    private static boolean isRepeatableTarget(Node node) {
+        return switch (node) {
+            case IdentityNode n -> true;
+            case NumberNode n -> true;
+            case StringNode n -> true;
+            case FieldAccessNode n -> isRepeatableTarget(n.target);
+            case IndexNode n -> isRepeatableTarget(n.left) && isRepeatableTarget(n.index);
+            default -> false;
+        };
     }
 
     // a, b = <expr> (, <expr>)*   -   e.g. 'x, y = f();' or 'a, b = b, a;'

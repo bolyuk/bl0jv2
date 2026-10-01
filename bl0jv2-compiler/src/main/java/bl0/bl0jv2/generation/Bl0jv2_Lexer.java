@@ -59,7 +59,7 @@ public final class Bl0jv2_Lexer {
                     tokens.add(new SemicolonToken(line, line_index));
                     break;
                 case '%':
-                    tokens.add(new OpToken(line, line_index, Operator.REMAINDER));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.REMAINDER_ASSIGN : Operator.REMAINDER));
                     break;
                 case '=':
                     if (peekIfNext('='))
@@ -68,25 +68,28 @@ public final class Bl0jv2_Lexer {
                         tokens.add(new OpToken(line, line_index, Operator.ASSIGNMENT));
                     break;
                 case '>':
-                    if (peekIfNext('>'))
-                        tokens.add(new OpToken(line, line_index, peekIfNext('>') ? Operator.SHIFT_RIGHT_UNSIGNED : Operator.SHIFT_RIGHT));
-                    else
+                    if (peekIfNext('>')) {
+                        if (peekIfNext('>'))
+                            tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.SHIFT_RIGHT_UNSIGNED_ASSIGN : Operator.SHIFT_RIGHT_UNSIGNED));
+                        else
+                            tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.SHIFT_RIGHT_ASSIGN : Operator.SHIFT_RIGHT));
+                    } else
                         tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.GREATER_EQUALS : Operator.GREATER));
                     break;
                 case '<':
                     if (peekIfNext('<'))
-                        tokens.add(new OpToken(line, line_index, Operator.SHIFT_LEFT));
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.SHIFT_LEFT_ASSIGN : Operator.SHIFT_LEFT));
                     else
                         tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.LESS_EQUALS : Operator.LESS));
                     break;
                 case '&':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('&') ? Operator.AND : Operator.BIT_AND));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('&') ? Operator.AND : peekIfNext('=') ? Operator.AND_ASSIGN : Operator.BIT_AND));
                     break;
                 case '|':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('|') ? Operator.OR : Operator.BIT_OR));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('|') ? Operator.OR : peekIfNext('=') ? Operator.OR_ASSIGN : Operator.BIT_OR));
                     break;
                 case '^':
-                    tokens.add(new OpToken(line, line_index, Operator.BIT_XOR));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.XOR_ASSIGN : Operator.BIT_XOR));
                     break;
                 case '~':
                     tokens.add(new OpToken(line, line_index, Operator.BIT_NOT));
@@ -107,16 +110,19 @@ public final class Bl0jv2_Lexer {
                     tokens.add(new RBracketToken(line, line_index));
                     break;
                 case '+':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('+') ? Operator.PLUS_PLUS : Operator.PLUS));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('+') ? Operator.PLUS_PLUS : peekIfNext('=') ? Operator.PLUS_ASSIGN : Operator.PLUS));
                     break;
                 case '-':
                     if (peekIfNext('>'))
                         tokens.add(new ArrowToken(line, line_index));
                     else
-                        tokens.add(new OpToken(line, line_index, peekIfNext('-') ? Operator.MINUS_MINUS : Operator.MINUS));
+                        tokens.add(new OpToken(line, line_index, peekIfNext('-') ? Operator.MINUS_MINUS : peekIfNext('=') ? Operator.MINUS_ASSIGN : Operator.MINUS));
                     break;
                 case '*':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('*') ? Operator.STAR_STAR : Operator.STAR));
+                    if (peekIfNext('*'))
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.STAR_STAR_ASSIGN : Operator.STAR_STAR));
+                    else
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.STAR_ASSIGN : Operator.STAR));
                     break;
                 case '/':
                     if (peekIfNext('/')) {
@@ -124,7 +130,7 @@ public final class Bl0jv2_Lexer {
                         while (pos + 1 < len && lookAhead() != '\n')
                             pos++;
                     } else
-                        tokens.add(new OpToken(line, line_index, Operator.DIV));
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.DIV_ASSIGN : Operator.DIV));
                     break;
                 case '!':
                     if (peekIfNext('='))
