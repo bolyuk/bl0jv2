@@ -7,7 +7,10 @@ import bl0.bl0jv2.runtime.arithmetic.ArithmeticOperators;
 import bl0.bl0jv2.runtime.interrupt.InterruptController;
 import bl0.bl0jv2.runtime.interrupt.TimerService;
 import bl0.bl0jv2.runtime.device.BlockDevice;
+import bl0.bl0jv2.runtime.device.ConsoleController;
 import bl0.bl0jv2.runtime.device.DiskController;
+import bl0.bl0jv2.runtime.device.KeyboardController;
+import bl0.bl0jv2.runtime.device.PortDevice;
 import bl0.bl0jv2.runtime.device.HostShare;
 import bl0.bl0jv2.runtime.device.ShareController;
 import bl0.bl0jv2.runtime.memory.PortIO;
@@ -59,6 +62,16 @@ public final class Bl0jv2_jVM {
     private final PortIO portIO = new PortIO();
     private final DiskController disk = new DiskController(portIO, rawMemory);
     private final ShareController share = new ShareController(portIO, rawMemory);
+    // set_out_writer() may replace the writer after this is built, hence the indirection
+    private final ConsoleController console = new ConsoleController(text -> {
+        try {
+            if (out != null) out.write(text);
+        } catch (IOException e) {
+            throw new Bl0j_VM_Exception("console write failed: " + e.getMessage());
+        }
+    });
+    private final KeyboardController keyboard = new KeyboardController();
+    private final PortDevice[] devices = {disk, share, console, keyboard};
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
 
@@ -1069,6 +1082,24 @@ public final class Bl0jv2_jVM {
         share.attach(folder);
     }
 
+    // a guest port read: a device that claims the port answers, otherwise the stored value
+    private long portRead(int port, int widthBytes) {
+        for (PortDevice device : devices)
+            if (device.claimsRead(port)) return device.read(port, widthBytes);
+        return portIO.read(port, widthBytes);
+    }
+
+    /** the terminal sent these bytes: they wait in the keyboard FIFO and interrupt vector 2 is raised */
+    public void key_input(byte[] bytes) {
+        keyboard.push(bytes);
+        interrupts.raiseInterrupt(2);
+    }
+
+    /** the screen size the console reports to the guest (default 80x24) */
+    public void set_console_size(int columns, int rows) {
+        console.setSize(columns, rows);
+    }
+
     public long hostPortRead(int port, int widthBytes) {
         return portIO.read(port, widthBytes);
     }
@@ -1671,7 +1702,7 @@ public final class Bl0jv2_jVM {
                     // compile-time immediate
                     case OpCodes.PORT_IN -> {
                         requirePrivileged(ctx, "in");
-                        reg[a] = NanBox.ofInt((int) portIO.read((int) unbox(reg[a]), b / 8));
+                        reg[a] = NanBox.ofInt((int) portRead((int) unbox(reg[a]), b / 8));
                     }
 
                     // same operand shape as POKE - width and value packed
@@ -1682,8 +1713,7 @@ public final class Bl0jv2_jVM {
                         long value = ((Number) unbox(reg[b + 1])).longValue();
                         int port = (int) unbox(reg[a]);
                         portIO.write(port, width / 8, value);
-                        disk.onPortWrite(port, value);
-                        share.onPortWrite(port, value);
+                        for (PortDevice device : devices) device.onWrite(port, value);
                     }
 
                     // vector in a, arg in b - synchronous, unlike

@@ -22,7 +22,7 @@ import java.nio.charset.StandardCharsets;
  *   0x0F28  in32   result: size / bytes read / bytes written / bytes of listing
  * </pre>
  */
-public final class ShareController {
+public final class ShareController implements PortDevice {
     public static final int PRESENT_PORT = 0x0F10;
     public static final int PATH_PORT = 0x0F14;
     public static final int DATA_PORT = 0x0F18;
@@ -47,7 +47,8 @@ public final class ShareController {
         ports.write(PRESENT_PORT, 1, share == null ? 0 : 1);
     }
 
-    public void onPortWrite(int port, long value) {
+    @Override
+    public void onWrite(int port, long value) {
         if (port == COMMAND_PORT) command((int) value & 0xFF);
     }
 

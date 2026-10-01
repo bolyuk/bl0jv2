@@ -19,7 +19,7 @@ import java.io.IOException;
  *   0x0F0D  in8    status of the last command: 0 = ok, 1 = failed
  * </pre>
  */
-public final class DiskController {
+public final class DiskController implements PortDevice {
     public static final int SECTORS_PORT = 0x0F00;
     public static final int SECTOR_PORT = 0x0F04;
     public static final int ADDRESS_PORT = 0x0F08;
@@ -45,7 +45,8 @@ public final class DiskController {
     }
 
     /** called by the VM after every port write; only the command port does anything */
-    public void onPortWrite(int port, long value) {
+    @Override
+    public void onWrite(int port, long value) {
         if (port == COMMAND_PORT) command((int) value & 0xFF);
     }
 
