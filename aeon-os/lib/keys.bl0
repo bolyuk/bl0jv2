@@ -44,7 +44,12 @@ def class Keys {
         }
     }
 
+    static field afterCR;      // the last byte was CR: a LF right behind it is the same Enter (CR LF)
+
     static def decode(b) {
+        wasCR = Keys.afterCR;
+        Keys.afterCR = b == 13;
+        if (b == 10 && wasCR) { return nil; }
         if (b == 27) { return Keys.escape(); }
         if (b == 13 || b == 10) { return new Key('ENTER', nil); }
         if (b == 9) { return new Key('TAB', nil); }
