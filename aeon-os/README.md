@@ -97,6 +97,20 @@ aeon-os/aeon.sh                 # builds aeon.img from the sources and boots it
 `.bl0c`). The image keeps its files between runs; `--disk-put` rewrites what it
 names.
 
+### Windows
+
+```
+mvn -q -DskipTests compile
+aeon-os\aeon.cmd
+```
+
+`aeon.cmd` mirrors `aeon.sh` (`CORES`, `SHARE`, `SCREEN`, `BOOT` environment
+variables) and runs from `target\classes`. With `-k` the CLI switches the
+console into raw VT mode through a short PowerShell helper (kernel32
+`SetConsoleMode`, UTF-8 code pages) and restores it on exit. Use Windows
+Terminal or a recent conhost. Ctrl-C reaches the guest as a key, so leave with
+`exit`. This path has not been exercised on real Windows yet.
+
 ## The terminal
 
 Two paths lead to the same programs, which cannot tell them apart: the **serial line**
