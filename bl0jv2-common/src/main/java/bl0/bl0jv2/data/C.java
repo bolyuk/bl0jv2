@@ -22,7 +22,10 @@ public final class C {
     // 10.03.26
     // GET_FIELD / LOOKUP_METHOD write their result to c instead of overwriting
     // the object register (no MOV of the object first)
-    public static final int VERSION = 8;
+    // 10.04.26
+    // constant type EXTERN: a name resolved at load time against the exports of the shared
+    // libraries loaded before (see ExternDef)
+    public static final int VERSION = 9;
 
     public static final int MAGIC = 0x426C306A;
 

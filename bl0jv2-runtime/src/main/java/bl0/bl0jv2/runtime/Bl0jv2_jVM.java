@@ -392,6 +392,9 @@ public final class Bl0jv2_jVM {
         // indices), the way a relocating loader places a program wherever
         // there is room.
         //
+        // mode 2 = a shared library: like a kernel program, but what it defines (functions and
+        // classes, by name) is exported, and programs loaded afterwards whose compiler was told
+        // the library is shared have their EXTERN constants linked to those definitions.
         // mode 0 = a user program: it runs UNPRIVILEGED, and when it returns
         // everything the load added is taken back out (the pool is indexed by 16
         // bits, so programs that stayed forever would run it out after a few
@@ -412,17 +415,18 @@ public final class Bl0jv2_jVM {
             int mode = requireInt(a[2], "execMem");
             if (size <= 0)
                 throw new Bl0j_VM_Exception("execMem: size must be positive");
-            if (mode != 0 && mode != 1)
-                throw new Bl0j_VM_Exception("execMem: mode must be 0 (user program) or 1 (kernel program)");
+            if (mode < 0 || mode > 2)
+                throw new Bl0j_VM_Exception("execMem: mode must be 0 (user program), 1 (kernel program) or 2 (shared library)");
             byte[] fileBytes = new byte[size];
             rawMemory.readBytes(addr, fileBytes);
-            return execBytes(fileBytes, "memory at " + addr, mode == 0);
+            return execBytes(fileBytes, "memory at " + addr, mode);
         });
     }
 
     // loads and runs a compiled program in this VM (see the exec() doc above);
     // 'label' only names it in error messages
-    private Object execBytes(byte[] fileBytes, String path, boolean unprivileged) {
+    private Object execBytes(byte[] fileBytes, String path, int mode) {
+        boolean unprivileged = mode == 0;
         CoreContext ctx = currentContext();
         long[] constsBefore = consts;
         int[] symbolsBefore = constSymbols;
@@ -435,6 +439,15 @@ public final class Bl0jv2_jVM {
             registersLength = loaded[1];
         } catch (Bl0j_VM_Exception e) {
             throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': " + e.getMessage());
+        }
+        if (mode == 2) {
+            // a shared library: what it defines becomes linkable by the programs loaded after it
+            for (Object[] defined : definedNames) {
+                String name = (String) defined[0];
+                if (exports.containsKey(name))
+                    throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': it defines '" + name + "', which another shared library already exports");
+            }
+            for (Object[] defined : definedNames) exports.put((String) defined[0], (Long) defined[1]);
         }
 
         int stackDepthBefore = ctx.callStack.size();
@@ -471,9 +484,10 @@ public final class Bl0jv2_jVM {
             if (unprivileged && coreCount == 1 && consts != constsBefore) {
                 for (int i = constsBefore.length; i < consts.length; i++) {
                     long v = consts[i];
-                    if (NanBox.isBoxed(v) && NanBox.tagOf(v) == NanBox.TAG_REF)
+                    if (NanBox.isBoxed(v) && NanBox.tagOf(v) == NanBox.TAG_REF && !externConsts.get(i))
                         heap.free(NanBox.asRefIndex(v));
                 }
+                externConsts.clear(constsBefore.length, consts.length);
                 consts = constsBefore;
                 constSymbols = symbolsBefore;
                 instructions = instructionsBefore;
@@ -705,6 +719,15 @@ public final class Bl0jv2_jVM {
     // new program replaces the heap.
     private final Map<String, Long> internedStrings = new HashMap<>();
 
+    // what the shared libraries loaded so far define, by name: the values (boxed FunDefs and
+    // classes) that an EXTERN constant of a later program is replaced with
+    private final Map<String, Long> exports = new HashMap<>();
+    // constants of the pool that were linked to a library's own function or class: they belong
+    // to the library, so unloading a program must not free them
+    private final java.util.BitSet externConsts = new java.util.BitSet();
+    // functions and classes the file being loaded defines, collected by loadConstants
+    private final java.util.List<Object[]> definedNames = new java.util.ArrayList<>();
+
     private synchronized long internedString(String text) {
         return internedStrings.computeIfAbsent(text, this::boxRef);
     }
@@ -753,12 +776,24 @@ public final class Bl0jv2_jVM {
                     targetSymbols[idx] = symbols.intern(str);
                 }
                 case Constants.BOOL -> target[idx] = NanBox.ofBoolean(bytes.get() != 0);
-                case Constants.FUN -> target[idx] = boxRef(new FunDef(
-                        get_str(bytes),
-                        (bytes.getInt() & 0xFFFF) + instrOffset,
-                        bytes.getShort(),
-                        bytes.getShort(),
-                        bytes.get() != 0));
+                case Constants.EXTERN -> {
+                    String name = get_str(bytes);
+                    Long linked = exports.get(name);
+                    if (linked == null)
+                        throw new Bl0j_VM_Exception("unresolved external '" + name + "': no loaded library defines it");
+                    target[idx] = linked;
+                    externConsts.set(idx);
+                }
+                case Constants.FUN -> {
+                    FunDef def = new FunDef(
+                            get_str(bytes),
+                            (bytes.getInt() & 0xFFFF) + instrOffset,
+                            bytes.getShort(),
+                            bytes.getShort(),
+                            bytes.get() != 0);
+                    target[idx] = boxRef(def);
+                    if (!def.name().startsWith("<lambda")) definedNames.add(new Object[]{def.name(), target[idx]});
+                }
                 case Constants.BYTE -> target[idx] = NanBox.ofInt(bytes.get());
                 case Constants.FLOAT -> target[idx] = Double.doubleToLongBits(bytes.getDouble());
                 // methods are always registered (and thus loaded) before
@@ -791,6 +826,7 @@ public final class Bl0jv2_jVM {
                     int staticFieldCount = bytes.getShort() & 0xFFFF;
                     target[idx] = boxRef(new Bl0jClass(className, fieldNames, fieldSymbols, fieldDefaults,
                             methodNames, methodSymbols, methodDefs, methodRefs, staticFieldCount));
+                    definedNames.add(new Object[]{className, target[idx]});
                 }
                 default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
             }
@@ -810,8 +846,8 @@ public final class Bl0jv2_jVM {
             throw new Bl0j_VM_Exception("Incompatible Bl0jv2_jVM version: [ " + C.VERSION + " != " + version+" ]");
         }
 
-        short constants_length = bytes.getShort();
-        short registers_length = bytes.getShort();
+        int constants_length = bytes.getShort() & 0xFFFF;
+        int registers_length = bytes.getShort() & 0xFFFF;
 
         // seeds core 0's context specifically - feed_compiled_file() is
         // always called from the "main" thread, which is exactly the
@@ -824,6 +860,9 @@ public final class Bl0jv2_jVM {
             internedStrings.clear();
         }
         ctx.handlerStack.clear();
+        exports.clear();
+        externConsts.clear();
+        definedNames.clear();
         ctx.callStack.add(new Frame(newRegisters(registers_length), -1, -1));
         consts = new long[constants_length];
 
@@ -885,11 +924,13 @@ public final class Bl0jv2_jVM {
         if (version != C.VERSION)
             throw new Bl0j_VM_Exception("Incompatible Bl0jv2_jVM version: [ " + C.VERSION + " != " + version + " ]");
 
-        short constants_length = bytes.getShort();
-        short registers_length = bytes.getShort();
+        int constants_length = bytes.getShort() & 0xFFFF;
+        int registers_length = bytes.getShort() & 0xFFFF;
 
         int constOffset = consts.length;
         int instrOffset = instructions.length / C.INSTR_WIDTH;
+        definedNames.clear();
+        externConsts.clear(constOffset, constOffset + constants_length);   // a failed earlier load may have left marks here
 
         long[] newConsts = Arrays.copyOf(consts, consts.length + constants_length);
         int[] newConstSymbols = Arrays.copyOf(constSymbols, consts.length + constants_length);

@@ -3,6 +3,8 @@ package bl0.bl0jv2.generation;
 import bl0.bl0jv2.exceptions.Bl0j_CompilerException;
 import bl0.bl0jv2.generation.nodes.Node;
 import bl0.bl0jv2.generation.nodes.PROGRAM_N;
+import bl0.bl0jv2.generation.nodes.statements.ClassNode;
+import bl0.bl0jv2.generation.nodes.statements.FunNode;
 import bl0.bl0jv2.generation.nodes.statements.ImportNode;
 
 import java.io.IOException;
@@ -52,18 +54,50 @@ public final class Bl0jv2_Linker {
      * classpath fallback applies.
      */
     public static PROGRAM_N resolveImports(PROGRAM_N entryProgram, Path entryPath, List<Path> searchPaths) {
+        return resolveImports(entryProgram, entryPath, searchPaths, Set.of());
+    }
+
+    /**
+     * 'shared' names the files that live in shared libraries (see {@link #libraryKey}): an import
+     * of one of them does not splice its code in. The program only gets to know what the file
+     * declares - its functions and classes, with their parameters, fields and methods, so calls
+     * are checked as strictly as for inlined code - and refers to them by name; the loader links
+     * them to the library's own copy. A shared file may itself import only shared files (it is
+     * a library: whatever it needs is a library too).
+     */
+    public static PROGRAM_N resolveImports(PROGRAM_N entryProgram, Path entryPath, List<Path> searchPaths, Set<String> shared) {
         Set<Path> visited = new HashSet<>();
         visited.add(entryPath.toAbsolutePath().normalize());
 
         List<Node> resolved = new ArrayList<>();
-        resolveInto(entryProgram, entryPath.toAbsolutePath().getParent(), searchPaths, visited, resolved);
+        resolveInto(entryProgram, entryPath.toAbsolutePath().getParent(), searchPaths, shared, false, visited, resolved);
         return new PROGRAM_N(resolved);
     }
 
-    private static void resolveInto(PROGRAM_N program, Path baseDir, List<Path> searchPaths, Set<Path> visited, List<Node> out) {
+    /**
+     * How a file is named in a set of shared libraries: its path from a "stdlib" directory
+     * onward when it has one on the way (stdlib is found on disk or in the jar alike), else
+     * its absolute normalized path.
+     */
+    public static String libraryKey(Path file) {
+        Path normalized = file.toAbsolutePath().normalize();
+        String stdlib = classpathResourceNameFor(normalized);
+        return stdlib != null ? stdlib : normalized.toString().replace('\\', '/');
+    }
+
+    private static void resolveInto(PROGRAM_N program, Path baseDir, List<Path> searchPaths, Set<String> shared,
+                                    boolean declaringOnly, Set<Path> visited, List<Node> out) {
         for (Node node : program.nodes) {
             if (!(node instanceof ImportNode importNode)) {
-                out.add(node);
+                if (!declaringOnly) {
+                    out.add(node);
+                } else if (node instanceof FunNode f) {
+                    f.external = true;
+                    out.add(f);
+                } else if (node instanceof ClassNode c) {
+                    c.external = true;
+                    out.add(c);
+                }   // anything else (top-level statements) belongs to the library's own initialisation
                 continue;
             }
 
@@ -77,6 +111,9 @@ public final class Bl0jv2_Linker {
                     }
                 }
             }
+            boolean isShared = shared.contains(libraryKey(resolvedPath));
+            if (declaringOnly && !isShared)
+                throw new Bl0j_CompilerException("a shared library cannot import '" + importNode.path + "': it is not a shared library itself");
             if (!visited.add(resolvedPath))
                 continue; // already imported (directly or via another import) - skip quietly
 
@@ -89,7 +126,7 @@ public final class Bl0jv2_Linker {
             if (!(importedAst instanceof PROGRAM_N importedProgram))
                 throw new Bl0j_CompilerException("imported file did not parse to a program: " + importNode.path);
 
-            resolveInto(importedProgram, resolvedPath.getParent(), searchPaths, visited, out);
+            resolveInto(importedProgram, resolvedPath.getParent(), searchPaths, shared, isShared, visited, out);
         }
     }
 

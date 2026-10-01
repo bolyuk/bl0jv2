@@ -2,6 +2,7 @@ package bl0.bl0jv2.generation;
 
 import bl0.bl0jv2.data.C;
 import bl0.bl0jv2.data.ClassDef;
+import bl0.bl0jv2.data.ExternDef;
 import bl0.bl0jv2.data.Constants;
 import bl0.bl0jv2.data.FunDef;
 import bl0.bl0jv2.data.NativeMethods;
@@ -230,11 +231,53 @@ public final class Bl0jv2_Compiler {
         throw new Bl0j_CompilerException("unexpected field default node: " + defaultNode);
     }
 
+    // names a shared library declares (see Bl0jv2_Linker): defining one of them here too would
+    // make two different things with one name
+    private final Set<String> externalNames = new HashSet<>();
+    private final Set<String> localNames = new HashSet<>();
+
+    // the constant-pool index of a function; a shared library's function gets its EXTERN
+    // constant when first referred to, so a program carries only the names it actually uses
+    private Integer functionConst(String name) {
+        Integer index = functionMapping.get(name);
+        if (index != null && index == -1) {
+            index = constant(new ExternDef(name));
+            functionMapping.put(name, index);
+        }
+        return index;
+    }
+
+    private final Map<String, Integer> externClassConsts = new HashMap<>();
+
+    private int classConst(ClassInfo info) {
+        if (info.constIndex() != -1) return info.constIndex();
+        return externClassConsts.computeIfAbsent(info.name(), n -> constant(new ExternDef(n)));
+    }
+
+    private void checkNotDefinedTwice(String name, boolean external) {
+        if (external) {
+            if (localNames.contains(name))
+                throw new Bl0j_CompilerException("'" + name + "' is defined here and by a shared library");
+            externalNames.add(name);
+        } else {
+            if (externalNames.contains(name))
+                throw new Bl0j_CompilerException("'" + name + "' is defined here and by a shared library");
+            localNames.add(name);
+        }
+    }
+
     private void fetchFunctions(PROGRAM_N program) {
         for(var node : program.nodes) {
             if(node instanceof FunNode funNode){
-                lazy_functions.add(new PendingFunction(funNode));
-                int constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
+                checkNotDefinedTwice(funNode.name, funNode.external);
+                int constIndex;
+                if (funNode.external) {
+                    // a shared library's function: nothing to compile, the loader links it by name
+                    constIndex = -1;   // the constant is made when something refers to it (see functionConst)
+                } else {
+                    lazy_functions.add(new PendingFunction(funNode));
+                    constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
+                }
                 functionMapping.put(funNode.name, constIndex);
                 functionArity.put(funNode.name, funNode.args.args.size());
             }
@@ -245,6 +288,7 @@ public final class Bl0jv2_Compiler {
             // itself is then a ClassDef constant that just points at each
             // method's own FunDef constant by index
             if (node instanceof ClassNode classNode) {
+                checkNotDefinedTwice(classNode.name, classNode.external);
                 List<String> methodNames = new ArrayList<>();
                 List<Integer> methodConstIndices = new ArrayList<>();
                 boolean hasInit = false;
@@ -252,9 +296,12 @@ public final class Bl0jv2_Compiler {
                 int initArity = -1;
 
                 for (FunNode method : classNode.methods) {
-                    lazy_functions.add(new PendingFunction(method));
-                    int constIndex = constant(new FunDef(method.name, -1, (short)0, (short)0));
-                    functionMapping.put(method.name, constIndex);
+                    int constIndex = -1;
+                    if (!classNode.external) {
+                        lazy_functions.add(new PendingFunction(method));
+                        constIndex = constant(new FunDef(method.name, -1, (short)0, (short)0));
+                        functionMapping.put(method.name, constIndex);
+                    }
 
                     String plainName = method.name.substring(classNode.name.length() + 1);
                     methodNames.add(plainName);
@@ -268,11 +315,15 @@ public final class Bl0jv2_Compiler {
                 }
                 allFieldNames.addAll(classNode.fieldNames);
 
-                List<Integer> fieldDefaultConstIndices = new ArrayList<>();
-                for (Node defaultNode : classNode.fieldDefaultNodes)
-                    fieldDefaultConstIndices.add(fieldDefaultConstIndex(defaultNode));
-
-                int classConstIndex = constant(new ClassDef(classNode.name, classNode.fieldNames, fieldDefaultConstIndices, methodNames, methodConstIndices, classNode.staticFieldNames.size()));
+                int classConstIndex;
+                if (classNode.external) {
+                    classConstIndex = -1;   // made on first use (see classConst)
+                } else {
+                    List<Integer> fieldDefaultConstIndices = new ArrayList<>();
+                    for (Node defaultNode : classNode.fieldDefaultNodes)
+                        fieldDefaultConstIndices.add(fieldDefaultConstIndex(defaultNode));
+                    classConstIndex = constant(new ClassDef(classNode.name, classNode.fieldNames, fieldDefaultConstIndices, methodNames, methodConstIndices, classNode.staticFieldNames.size()));
+                }
                 Map<String, Integer> staticMethodArity = new HashMap<>();
                 for (FunNode staticMethod : classNode.staticMethods)
                     staticMethodArity.put(staticMethod.name.substring(classNode.name.length() + 1), staticMethod.args.args.size());
@@ -286,8 +337,13 @@ public final class Bl0jv2_Compiler {
                 // instance dispatch, so they're deliberately left out of
                 // the ClassDef's own method table above
                 for (FunNode staticMethod : classNode.staticMethods) {
-                    lazy_functions.add(new PendingFunction(staticMethod));
-                    int constIndex = constant(new FunDef(staticMethod.name, -1, (short)0, (short)0));
+                    int constIndex;
+                    if (classNode.external) {
+                        constIndex = -1;
+                    } else {
+                        lazy_functions.add(new PendingFunction(staticMethod));
+                        constIndex = constant(new FunDef(staticMethod.name, -1, (short)0, (short)0));
+                    }
                     functionMapping.put(staticMethod.name, constIndex);
                 }
             }
@@ -1207,7 +1263,7 @@ public final class Bl0jv2_Compiler {
                         throw err("function " + staticTarget.name() + "." + fieldAccess.fieldName + " expects " + argumentCount(staticExpected) + ", got " + funCall.args.size());
 
                     String mangledName = staticTarget.name() + "." + fieldAccess.fieldName;
-                    Integer staticConstIndex = functionMapping.get(mangledName);
+                    Integer staticConstIndex = functionConst(mangledName);
                     if (staticConstIndex == null)
                         throw new Bl0j_CompilerException(
                                 "class " + staticTarget.name() + " has no static method '" + fieldAccess.fieldName + "'");
@@ -1373,7 +1429,7 @@ public final class Bl0jv2_Compiler {
                     // not a static field - a static method used as a value
                     // (Class.method without a call): its function constant
                     // is the callable, same as a bare function name
-                    Integer methodConst = functionMapping.get(staticTarget.name() + "." + fieldAccess.fieldName);
+                    Integer methodConst = functionConst(staticTarget.name() + "." + fieldAccess.fieldName);
                     if (methodConst != null) {
                         int methodReg = regIndex++;
                         _emit(OpCodes.LOAD_CONST, methodReg, methodConst);
@@ -1383,7 +1439,7 @@ public final class Bl0jv2_Compiler {
                 }
 
                 int classReg = regIndex++;
-                _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());
+                _emit(OpCodes.LOAD_CONST, classReg, classConst(staticTarget));
                 _emit(OpCodes.GET_STATIC_FIELD, classReg, fieldIndex);
                 return classReg;
             }
@@ -1401,7 +1457,7 @@ public final class Bl0jv2_Compiler {
                 throw new Bl0j_CompilerException("unknown class: " + newNode.className);
 
             int instanceReg = regIndex++;
-            _emit(OpCodes.LOAD_CONST, instanceReg, info.constIndex());
+            _emit(OpCodes.LOAD_CONST, instanceReg, classConst(info));
             _emit(OpCodes.NEW_INSTANCE, instanceReg); // class-ref in, instance-ref out
 
             if (info.hasInit())
@@ -1591,7 +1647,7 @@ public final class Bl0jv2_Compiler {
                 // assignment to a function's name is rejected, so a local
                 // that exists here is always a parameter.
                 if (functionMapping.containsKey(n.name) && !currentScope().identityMapping.containsKey(n.name)) {
-                    constIndex = functionMapping.get(n.name);
+                    constIndex = functionConst(n.name);
                     int reg = regIndex++;
                     _emit(OpCodes.LOAD_CONST, reg, constIndex);
                     return reg;
@@ -1894,7 +1950,7 @@ public final class Bl0jv2_Compiler {
                     // not a static field - a static method used as a value
                     // (Class.method without a call): its function constant
                     // is the callable, same as a bare function name
-                    Integer methodConst = functionMapping.get(staticTarget.name() + "." + fieldAccess.fieldName);
+                    Integer methodConst = functionConst(staticTarget.name() + "." + fieldAccess.fieldName);
                     if (methodConst != null) {
                         int methodReg = regIndex++;
                         _emit(OpCodes.LOAD_CONST, methodReg, methodConst);
@@ -1904,7 +1960,7 @@ public final class Bl0jv2_Compiler {
                 }
 
                 int classReg = regIndex++;
-                _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());
+                _emit(OpCodes.LOAD_CONST, classReg, classConst(staticTarget));
                 int valueRegRaw = compileInner(valueNode);
 
                 _emit(OpCodes.SET_STATIC_FIELD, classReg, valueRegRaw, fieldIndex);
@@ -2166,6 +2222,12 @@ public final class Bl0jv2_Compiler {
                     case Double d -> {
                         dos.writeByte(Constants.FLOAT);
                         dos.writeDouble(d);
+                    }
+                    case ExternDef e -> {
+                        dos.writeByte(Constants.EXTERN);
+                        byte[] bytes = e.name().getBytes(StandardCharsets.UTF_8);
+                        dos.writeShort(bytes.length);
+                        dos.write(bytes);
                     }
                     case ClassDef cd -> {
                         dos.writeByte(Constants.CLASS);
