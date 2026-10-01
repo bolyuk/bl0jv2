@@ -41,12 +41,17 @@ import 'kernel.bl0';
 import 'lib/drivers.bl0';
 import 'lib/netutil.bl0';
 import '../stdlib/str/split.bl0';
+import '../stdlib/str/trim.bl0';
 import '../stdlib/str/fmt.bl0';
 import 'lib/loader.bl0';
 import 'lib/userland.bl0';
 import 'lib/lineedit.bl0';
 import 'lib/cmdline.bl0';
 import 'lib/proc.bl0';
+import 'lib/perm.bl0';
+import 'lib/users.bl0';
+import 'lib/power.bl0';
+import '../stdlib/time/clock.bl0';
 
 // when boot.bl0 exec()s this file, it already called kernel.bl0's
 // initHeap() with ITS OWN reserved regions accounted for (see its own
@@ -86,10 +91,11 @@ Log.write('shell: started');
 
 // --- built-in commands ---
 def cmdHelp() {
-    say('built in: help, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
+    say('built in: help, clear, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
+    say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump df mkdir rmdir edit sleep yes ps kill wait - and any program you put there, run by its name');
+    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo service logs shutdown mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
 }
@@ -102,7 +108,75 @@ def cmdWhoami() {
     if (isPrivileged()) {
         say('kernel');
     } else {
-        say('user');
+        say(ShellState.userName + ' (user mode)');
+    }
+}
+
+// id: the numbers behind the name
+def cmdId() {
+    me = syscall(Sys.who, nil);
+    names = [];
+    i = 0;
+    while (i < len(me[4])) {
+        push(names, me[4][i] + '(' + Users.groupNameOf(me[4][i]) + ')');
+        i += 1;
+    }
+    say('uid=' + me[0] + '(' + me[3] + ') gid=' + me[1] + '(' + Users.groupNameOf(me[1]) + ') groups=' + strJoin(names, ','));
+}
+
+// what logging in as this user changes in the shell: the history is theirs, and so are the settings
+def adoptIdentity(me) {
+    ShellState.userName = me[3];
+    ShellState.home = me[2] == '' ? 'root' : me[2];
+    LineEditor.history = [];
+    histLoad();
+}
+
+// su [user]: become that user (root by default); exit comes back
+def cmdSu(words) {
+    if (len(words) > 2) { sayErr('usage: su [user]'); return nil; }
+    target = len(words) == 2 ? words[1] : 'root';
+    password = '';
+    if (syscall(Sys.who, nil)[0] != 0) {
+        password = LineEditor.readSecret('Password: ');
+        if (password == nil) { return nil; }
+    }
+    result = syscall(Sys.login, [target, password, false]);
+    if (isString(result)) {
+        sayErr('su: ' + result);
+        return nil;
+    }
+    adoptIdentity(result);
+}
+
+// ends the shell, or - after su - goes back to the user it was run from
+def cmdExit() {
+    previous = syscall(Sys.logout, nil);
+    if (previous == nil) {
+        // root leaving the shell for good stops the machine, in order; anybody else just ends their session
+        if (Ctx.me().uid == 0) { Shutdown.stopAll(true); }
+        say('bye');
+        ShellState.running = false;
+        return nil;
+    }
+    adoptIdentity(previous);
+}
+
+// the login prompt, when root has a password: the shell does not start for anyone who cannot give one
+def loginIfNeeded() {
+    if (!Fs.mounted || !Users.hasPasswordForLogin()) { return nil; }
+    while (true) {
+        name = LineEditor.read('login: ');
+        if (name == nil) { ShellState.running = false; return nil; }
+        if (name == '') { continue; }
+        password = LineEditor.readSecret('Password: ');
+        if (password == nil) { continue; }
+        result = syscall(Sys.login, [name, password, true]);
+        if (!isString(result)) {
+            adoptIdentity(result);
+            return nil;
+        }
+        sayErr('login incorrect');
     }
 }
 
@@ -152,10 +226,20 @@ def class ShellState {
     static field running;
     static field cwd;
     static field pipeSeq;
+    static field vars;         // [[name, value], ...]: the shell's variables
+    static field aliases;      // [[name, text], ...]
+    static field depth;        // scripts running inside scripts
+    static field home;         // the folder of whoever is logged in (their history lives there)
+    static field userName;
 }
 ShellState.running = true;
 ShellState.cwd = '';
 ShellState.pipeSeq = 0;
+ShellState.vars = [['PATH', 'bin']];
+ShellState.aliases = [];
+ShellState.depth = 0;
+ShellState.home = 'root';
+ShellState.userName = 'root';
 
 // a path as typed -> the stored name, relative to the current folder
 def here(path) {
@@ -163,8 +247,9 @@ def here(path) {
 }
 
 def prompt() {
-    if (ShellState.cwd == '') { return '$ '; }
-    return '/' + ShellState.cwd + ' $ ';
+    who = ShellState.userName == 'root' ? '' : Term.paint(3, ShellState.userName) + ' ';
+    if (ShellState.cwd == '') { return who + Term.paintBold(2, '$') + ' '; }
+    return who + Term.paintBold(4, '/' + ShellState.cwd) + ' ' + Term.paintBold(2, '$') + ' ';
 }
 
 def cmdPwd() {
@@ -213,12 +298,142 @@ registerHandler(sysExec, Exec.vector, 1);
 // the kernel half of starting a process on another core: [true, the Process] or [false, the error]
 def sysSpawn(request) {
     try {
-        return [true, Proc.spawn(request[0], request[1], request[2], request[3])];
+        return [true, Proc.spawn(request[0], request[1], request[2], request[3], len(request) > 4 ? request[4] : nil)];
     } catch (e) {
         return [false, str(e)];
     }
 }
 registerHandler(sysSpawn, Exec.spawnVector, 1);
+Clock.init();
+
+// ---- who may do what: the kernel's half (system calls, so they run privileged) ----
+
+// every file operation of a program in user mode: allowed for the caller's user, or an error
+def sysFsGate(request) {
+    c = Ctx.me();
+    Perm.check(c.uid, c.groups, request[0], request[1], request[2]);
+    return Fs.runAs(c.uid, c.gid, request[0], request[1], request[2]);
+}
+registerHandler(sysFsGate, Sys.fsGate, 1);
+registerHandler(Log.writeDirect, Log.vector, 1);
+
+// The raw disk and the host folder are reachable from user mode through system calls the drivers registered.
+// With the gate in place only root may use them directly: everybody else goes through the file system.
+def sysDiskGuard(request) {
+    if (Ctx.me().uid != 0) { throw('fs: permission denied (the raw disk is for root)'); }
+    return onDiskSyscall(request);
+}
+def sysHostFolderGuard(request) {
+    if (Ctx.me().uid != 0) { throw('fs: permission denied (the host folder is reached through host/)'); }
+    return onHfsSyscall(request);
+}
+registerHandler(sysDiskGuard, Disk.vector, 1);
+registerHandler(sysHostFolderGuard, Hfs.vector, 1);
+
+// [name, password, firstLogin]: becomes that user, and says [uid, gid, home, name]; an error text when it
+// cannot. Root may become anyone; anybody else needs the password. 'firstLogin' is the prompt when the
+// shell starts: it asks for the password whoever the shell runs as, and there is nothing to switch back to.
+def sysLogin(request) {
+    c = Ctx.me();
+    u = Users.find(request[0]);
+    if (u == nil) { return 'no such user'; }
+    asked = request[2] || c.uid != 0;
+    if (asked && !Users.verify(u[0], request[1])) {
+        Log.writeDirect('login failed for ' + request[0]);
+        return 'wrong password';
+    }
+    if (!request[2]) { push(c.stack, [c.uid, c.gid, c.groups]); }
+    c.uid = u[1];
+    c.gid = u[2];
+    c.groups = Users.groupsOf(u[0]);
+    if (len(c.groups) == 0) { c.groups = [u[2]]; }
+    Log.writeDirect('login: ' + u[0] + ' (uid ' + u[1] + ')');
+    return [u[1], u[2], u[3], u[0]];
+}
+registerHandler(sysLogin, Sys.login, 1);
+
+// back to who the shell was before the last su: [uid, gid, home, name], or nil when there is nowhere to go back to
+def sysLogout(request) {
+    c = Ctx.me();
+    if (len(c.stack) == 0) { return nil; }
+    previous = pop(c.stack);
+    c.uid = previous[0];
+    c.gid = previous[1];
+    c.groups = previous[2];
+    return sysWho(nil);
+}
+registerHandler(sysLogout, Sys.logout, 1);
+
+// who the caller runs as: [uid, gid, home, name, groups]
+def sysWho(request) {
+    c = Ctx.me();
+    u = Users.findUid(c.uid);
+    if (u == nil) { return [c.uid, c.gid, c.uid == 0 ? 'root' : '', c.uid == 0 ? 'root' : '#' + c.uid, c.groups]; }
+    return [c.uid, c.gid, u[3], u[0], c.groups];
+}
+registerHandler(sysWho, Sys.who, 1);
+
+// [user, oldPassword, newPassword]: '' when changed, else why not. Root may change anyone's without the old one.
+def sysSetPassword(request) {
+    c = Ctx.me();
+    u = Users.find(request[0]);
+    if (u == nil) { return 'no such user'; }
+    if (c.uid != 0) {
+        if (c.uid != u[1]) { return 'only root may change another user\'s password'; }
+        if (!Users.verify(u[0], request[1])) { return 'wrong password'; }
+    }
+    Users.setPassword(u[0], request[2]);
+    Log.writeDirect('password changed for ' + u[0]);
+    return '';
+}
+registerHandler(sysSetPassword, Sys.setPassword, 1);
+
+// root only: the processes have been stopped (the shutdown command did that); now the shell ends, which halts the machine
+def sysShutdown(request) {
+    if (Ctx.me().uid != 0) { return 'only root may do that'; }
+    Log.writeDirect('shutdown: halting');
+    Power.requested = true;
+    ShellState.running = false;
+    return '';
+}
+registerHandler(sysShutdown, Sys.shutdown, 1);
+
+// folders the system needs, made while the shell is still privileged: tmp/ for everybody, root's home
+def ensureSystemDirs() {
+    if (!Fs.mounted) { return nil; }
+    if (!Fs.exists('tmp/')) { Fs.write('tmp/', ''); }
+    if (Fs.stat('tmp')[2] != 0x3FF) { Fs.chmod('tmp', 0x3FF); }      // 1777: anyone may make files there (pipes use it), only their owners remove them
+    if (!Fs.exists('root/')) {
+        Fs.write('root/', '');
+        Fs.chmod('root', 0x1C0);             // 0700
+    }
+    if (!Fs.exists('home/')) { Fs.write('home/', ''); }
+    if (!Fs.exists('var/run/')) { Fs.write('var/run/', ''); }
+    // users' own cron tables: anyone may make theirs here, only they (and root) may remove it
+    if (!Fs.exists('var/cron/')) { Fs.write('var/cron/', ''); }
+    if (Fs.stat('var/cron')[2] != 0x3FF) { Fs.chmod('var/cron', 0x3FF); }
+}
+
+// etc/fstab: one line per drive to mount at start, '<drive number> <folder>'; # starts a comment. A line that
+// cannot be done (no such drive, no file system on it) is logged and skipped.
+def mountFstab() {
+    if (!Fs.mounted || !Fs.exists('etc/fstab')) { return nil; }
+    lines = Split.split(Fs.read('etc/fstab'), strChar(10));
+    i = 0;
+    while (i < len(lines)) {
+        words = tokens(lines[i]);
+        if (len(words) == 2 && strSub(words[0], 0, 1) != '#') {
+            unit = unsignedNumber(words[0]);
+            try {
+                if (unit == nil) { throw('not a drive number'); }
+                Fs.mountDrive(unit, FsPath.resolve('', words[1]));
+            } catch (e) {
+                Log.write('fstab: ' + lines[i] + ': ' + str(e));
+            }
+        }
+        i += 1;
+    }
+}
 
 def isBuiltin(cmd) {
     return Arr.contains(shellBuiltins(), cmd);
@@ -228,12 +443,49 @@ def programPath(cmd) {
     return 'bin/' + cmd + '.bl0c';
 }
 
+// the folders programs are looked for in: the variable PATH, folders separated by ':' ('.' is the
+// current folder, a leading '/' is ignored)
+def pathDirs() {
+    value = varGet('PATH');
+    dirs = [];
+    if (value == nil) { return dirs; }
+    parts = Split.split(value, ':');
+    i = 0;
+    while (i < len(parts)) {
+        d = parts[i];
+        if (d == '.') { push(dirs, ShellState.cwd); }
+        else if (d != '') { push(dirs, FsPath.resolve('', d)); }
+        i += 1;
+    }
+    return dirs;
+}
+
+// the file of the program 'cmd' names, or nil. A name with a '/' is a path (the .bl0c may be left
+// off); any other name is looked for in the PATH folders.
+def findProgram(cmd) {
+    if (!Fs.mounted) { return nil; }
+    if (strFind(cmd, '/', 0) >= 0) {
+        path = here(cmd);
+        if (Fs.size(path) >= 0 && !Dirs.isDir(path)) { return path; }
+        if (Fs.size(path + '.bl0c') >= 0) { return path + '.bl0c'; }
+        return nil;
+    }
+    dirs = pathDirs();
+    i = 0;
+    while (i < len(dirs)) {
+        path = FsPath.prefix(dirs[i]) + cmd + '.bl0c';
+        if (Fs.size(path) >= 0) { return path; }
+        i += 1;
+    }
+    return nil;
+}
+
 // Runs the program at 'path' here, on the shell's own core, with 'words' as its command line (words[0]
 // is its name). Whatever redirection or pipe this core's Ctx holds applies; the ends of the pipes
 // close when it is over. Ctrl-C meanwhile is a request to stop it, not text for it.
 def runProgram(path, words, label) {
     c = Ctx.me();
-    if (!Disk.present() || !Fs.mounted || Fs.size(path) < 0) {
+    if (path == nil || !Disk.present() || !Fs.mounted || Fs.size(path) < 0) {
         sayErr(label + ': command not found');
         c.finish();
         return nil;
@@ -286,25 +538,32 @@ def guarded(command, words) {
 def runStage(words) {
     cmd = words[0];
     if (cmd == 'help') { cmdHelp(); return nil; }
+    if (cmd == 'clear') { consoleWrite(Term.clearScreen()); return nil; }
     if (cmd == 'uptime') { cmdUptime(); return nil; }
     if (cmd == 'whoami') { cmdWhoami(); return nil; }
     if (cmd == 'reboot') { cmdReboot(); return nil; }
-    if (cmd == 'exit') {
-        say('bye');
-        ShellState.running = false;
-        return nil;
-    }
+    if (cmd == 'exit') { cmdExit(); return nil; }
+    if (cmd == 'su') { cmdSu(words); return nil; }
+    if (cmd == 'id') { cmdId(); return nil; }
     if (cmd == 'echo') { cmdEcho(words); return nil; }
     if (cmd == 'pwd') { cmdPwd(); return nil; }
     if (cmd == 'cd') { guarded(cmdCd, words); return nil; }
     if (cmd == 'exec') { guarded(cmdExec, words); return nil; }
+    if (cmd == 'sh') { guarded(cmdSh, words); return nil; }
+    if (cmd == 'set') { cmdSet(words); return nil; }
+    if (cmd == 'unset') { guarded(cmdUnset, words); return nil; }
+    if (cmd == 'alias') { guarded(cmdAlias, words); return nil; }
+    if (cmd == 'unalias') { guarded(cmdUnalias, words); return nil; }
+    if (cmd == 'which') { cmdWhich(words); return nil; }
+    if (cmd == 'history') { cmdHistory(words); return nil; }
     if (cmd == 'format') { guarded(cmdFormat, words); return nil; }
     // anything else: a program on the disk
-    runProgram(programPath(cmd), words, cmd);
+    found = findProgram(cmd);
+    runProgram(found, words, cmd);
 }
 
 // Runs the stages one after another, on this core. Each stage's standard input and output are files:
-// what a stage prints is written to a temporary file (var/tmp/pipe<N>) that the next stage reads.
+// what a stage prints is written to a temporary file (tmp/pipe<N>) that the next stage reads.
 // This is how a pipeline runs when the machine has too few cores to run its stages at the same time, or
 // a stage is a built-in (which only the shell can run). '< file' and '> file' / '>> file' name the
 // first stage's input and the last stage's output. The temporary files are removed afterwards,
@@ -328,7 +587,7 @@ def runSequential(stages) {
         }
         if (i < last) {
             ShellState.pipeSeq += 1;
-            outPath = 'var/tmp/pipe' + ShellState.pipeSeq;
+            outPath = 'tmp/pipe' + ShellState.pipeSeq;
             push(temps, outPath);
             Fs.write(outPath, '');
         } else if (stage.outFile != nil) {
@@ -391,12 +650,13 @@ def runConcurrent(stages, background) {
             outPath = here(stage.outFile);
             if (!stage.append) { Fs.write(outPath, ''); }
         }
-        if (!failed && Fs.size(programPath(cmd)) < 0) {
+        found = failed ? nil : findProgram(cmd);
+        if (!failed && found == nil) {
             sayErr(cmd + ': command not found');
             failed = true;
         }
         if (!failed) {
-            result = syscall(Exec.spawnVector, [programPath(cmd), stage.words, ShellState.cwd, [inPath, outPath, pipeIn, pipeOut, background]]);
+            result = syscall(Exec.spawnVector, [found, stage.words, ShellState.cwd, [inPath, outPath, pipeIn, pipeOut, background]]);
             if (result[0]) {
                 push(spawned, result[1]);
                 if (background) { say('[' + result[1].pid + '] ' + cmd); }
@@ -476,21 +736,281 @@ def runCommand(line) {
     Log.write('shell: ' + line);
     stages = [];
     try {
-        stages = Cmdline.parse(line);
+        stages = Cmdline.parse(Cmdline.expand(line, varGet));
     } catch (e) {
         sayErr(str(e));
         return nil;
     }
-    if (len(stages) > 0) { runPipeline(stages); }
+    if (len(stages) == 1 && isAssignments(stages[0])) {
+        i = 0;
+        while (i < len(stages[0].words)) {
+            eq = strFind(stages[0].words[i], '=', 0);
+            varSet(strSub(stages[0].words[i], 0, eq), strSub(stages[0].words[i], eq + 1, len(stages[0].words[i])));
+            i += 1;
+        }
+        return nil;
+    }
+    if (len(stages) > 0) {
+        expandAliases(stages);
+        try {
+            runPipeline(stages);
+        } catch (e) {
+            // a redirection to a file the user may not write, a full disk: the command fails, the shell goes on
+            sayErr(str(e));
+        }
+    }
+}
+
+// --- aliases ---
+
+def aliasGet(name) {
+    i = 0;
+    while (i < len(ShellState.aliases)) {
+        if (ShellState.aliases[i][0] == name) { return ShellState.aliases[i][1]; }
+        i += 1;
+    }
+    return nil;
+}
+
+// alias               lists them
+// alias name=text     'name' now stands for 'text' (a simple command: no pipe, no redirection)
+// alias name          shows one
+def cmdAlias(words) {
+    if (len(words) == 1) {
+        i = 0;
+        while (i < len(ShellState.aliases)) {
+            say('alias ' + ShellState.aliases[i][0] + "='" + ShellState.aliases[i][1] + "'");
+            i += 1;
+        }
+        return nil;
+    }
+    i = 1;
+    while (i < len(words)) {
+        eq = strFind(words[i], '=', 0);
+        if (eq < 0) {
+            v = aliasGet(words[i]);
+            if (v == nil) { sayErr(words[i] + ': no such alias'); }
+            else { say('alias ' + words[i] + "='" + v + "'"); }
+        } else {
+            name = strSub(words[i], 0, eq);
+            text = strSub(words[i], eq + 1, len(words[i]));
+            if (name == '' || strFind(name, ' ', 0) >= 0) {
+                sayErr('alias: bad name');
+            } else {
+                parsed = Cmdline.parse(text);
+                if (len(parsed) != 1 || parsed[0].inFile != nil || parsed[0].outFile != nil || parsed[0].background || len(parsed[0].words) == 0) {
+                    sayErr('alias: the text must be one simple command');
+                } else {
+                    unaliasOne(name);
+                    push(ShellState.aliases, [name, text]);
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+def unaliasOne(name) {
+    kept = [];
+    i = 0;
+    while (i < len(ShellState.aliases)) {
+        if (ShellState.aliases[i][0] != name) { push(kept, ShellState.aliases[i]); }
+        i += 1;
+    }
+    ShellState.aliases = kept;
+}
+
+def cmdUnalias(words) {
+    if (len(words) < 2) { sayErr('usage: unalias <name>...'); return nil; }
+    i = 1;
+    while (i < len(words)) {
+        if (aliasGet(words[i]) == nil) { sayErr(words[i] + ': no such alias'); }
+        unaliasOne(words[i]);
+        i += 1;
+    }
+}
+
+// the first word of each stage that is an alias is replaced by the alias's words (an alias that names
+// another alias is followed, each at most once, so 'alias ls=ls' is fine)
+def expandAliases(stages) {
+    i = 0;
+    while (i < len(stages)) {
+        seen = [];
+        while (len(stages[i].words) > 0 && !Arr.contains(seen, stages[i].words[0])) {
+            text = aliasGet(stages[i].words[0]);
+            if (text == nil) { break; }
+            push(seen, stages[i].words[0]);
+            parsed = Cmdline.parse(text);
+            stages[i].words = Arr.concat(parsed[0].words, Arr.slice(stages[i].words, 1, len(stages[i].words)));
+        }
+        i += 1;
+    }
+}
+
+// which <name>...: what a command word stands for
+def cmdWhich(words) {
+    if (len(words) < 2) { sayErr('usage: which <name>...'); return nil; }
+    i = 1;
+    while (i < len(words)) {
+        w = words[i];
+        if (aliasGet(w) != nil) { say(w + ": alias for '" + aliasGet(w) + "'"); }
+        else if (isBuiltin(w)) { say(w + ': a built-in command'); }
+        else {
+            found = findProgram(w);
+            if (found == nil) { sayErr(w + ': not found'); } else { say('/' + found); }
+        }
+        i += 1;
+    }
+}
+
+// --- history ---
+
+// history: the remembered commands, numbered (the numbers are positions in the list the editor keeps:
+// the last 200). '!!' is the previous command, '!N' command N, '!-N' the Nth from the last, '!text' the
+// latest one that starts with text; what follows on the line is appended.
+def cmdHistory(words) {
+    h = LineEditor.history;
+    i = 0;
+    while (i < len(h)) {
+        say(Fmt.format('{:>5}  {}', [i + 1, h[i]]));
+        i += 1;
+    }
+}
+
+// the line with a leading !-reference replaced, or nil when there is no such command. The line itself
+// (just remembered by the editor) is the last history entry and is not a candidate.
+def histExpand(line) {
+    h = LineEditor.history;
+    last = len(h) - 2;
+    sp = strFind(line, ' ', 0);
+    token = sp < 0 ? line : strSub(line, 0, sp);
+    rest = sp < 0 ? '' : strSub(line, sp, len(line));
+    ref = strSub(token, 1, len(token));
+    entry = nil;
+    if (ref == '!') {
+        if (last >= 0) { entry = h[last]; }
+    } else if (ref != '' && strFind('0123456789', strSub(ref, 0, 1), 0) >= 0) {
+        n = portNumber(ref);
+        if (n != nil && n >= 1 && n <= last + 1) { entry = h[n - 1]; }
+    } else if (len(ref) > 1 && strSub(ref, 0, 1) == '-') {
+        n = portNumber(strSub(ref, 1, len(ref)));
+        if (n != nil && n >= 1 && last + 1 - n >= 0) { entry = h[last + 1 - n]; }
+    } else if (ref != '') {
+        i = last;
+        while (i >= 0 && entry == nil) {
+            if (strFind(h[i], ref, 0) == 0) { entry = h[i]; }
+            i -= 1;
+        }
+    }
+    if (entry == nil) { return nil; }
+    return entry + rest;
+}
+
+// --- variables and scripts ---
+
+def varGet(name) {
+    i = 0;
+    while (i < len(ShellState.vars)) {
+        if (ShellState.vars[i][0] == name) { return ShellState.vars[i][1]; }
+        i += 1;
+    }
+    return nil;
+}
+
+def varSet(name, value) {
+    i = 0;
+    while (i < len(ShellState.vars)) {
+        if (ShellState.vars[i][0] == name) { ShellState.vars[i][1] = value; return nil; }
+        i += 1;
+    }
+    push(ShellState.vars, [name, value]);
+}
+
+def varUnset(name) {
+    kept = [];
+    i = 0;
+    while (i < len(ShellState.vars)) {
+        if (ShellState.vars[i][0] != name) { push(kept, ShellState.vars[i]); }
+        i += 1;
+    }
+    ShellState.vars = kept;
+}
+
+// NAME=value (a letter or _ first, then letters, digits, _): the line only sets variables
+def isAssignments(stage) {
+    if (stage.inFile != nil || stage.outFile != nil || stage.background) { return false; }
+    i = 0;
+    while (i < len(stage.words)) {
+        w = stage.words[i];
+        eq = strFind(w, '=', 0);
+        if (eq < 1) { return false; }
+        j = 0;
+        while (j < eq) {
+            c = strSub(w, j, j + 1);
+            if (!Cmdline.isNameChar(c) || (j == 0 && strFind('0123456789', c, 0) >= 0)) { return false; }
+            j += 1;
+        }
+        i += 1;
+    }
+    return len(stage.words) > 0;
+}
+
+def cmdSet(words) {
+    i = 0;
+    while (i < len(ShellState.vars)) {
+        say(ShellState.vars[i][0] + '=' + ShellState.vars[i][1]);
+        i += 1;
+    }
+}
+
+def cmdUnset(words) {
+    if (len(words) < 2) { sayErr('usage: unset <name>...'); return nil; }
+    i = 1;
+    while (i < len(words)) {
+        varUnset(words[i]);
+        i += 1;
+    }
+}
+
+// sh <file> [arguments]: the lines of a text file, run as commands. Empty lines and lines starting with
+// # are skipped. The arguments are the variables $1, $2, ... and $0 is the file's name; they are what they
+// were before once the script has ended.
+def cmdSh(words) {
+    if (len(words) < 2) { sayErr('usage: sh <file> [arguments]'); return nil; }
+    if (!fsReady()) { return nil; }
+    if (ShellState.depth >= 8) { sayErr('sh: scripts nested too deeply'); return nil; }
+    text = Fs.read(here(words[1]));
+    if (text == nil) { sayErr(words[1] + ': no such file'); return nil; }
+    saved = [];
+    i = 0;
+    while (i < len(words) - 1 || i < 10) {
+        saved = Arr.concat(saved, [varGet('' + i)]);
+        if (i < len(words) - 1) { varSet('' + i, words[i + 1]); } else { varUnset('' + i); }
+        i += 1;
+    }
+    ShellState.depth += 1;
+    lines = Split.split(text, strChar(10));
+    n = 0;
+    while (n < len(lines) && ShellState.running) {
+        line = Trim.trim(lines[n]);
+        if (line != '' && strSub(line, 0, 1) != '#') { runCommand(line); }
+        n += 1;
+    }
+    ShellState.depth -= 1;
+    i = 0;
+    while (i < len(saved)) {
+        if (saved[i] == nil) { varUnset('' + i); } else { varSet('' + i, saved[i]); }
+        i += 1;
+    }
 }
 
 // --- command history and completion for the line editor ---
 
-// the history lives on the disk (var/history), one line per command; the editor
+// the history lives on the disk (<home>/.history), one line per command; the editor
 // keeps the last 200 in memory
 def histLoad() {
     if (!Fs.mounted) { return nil; }
-    text = Fs.read('var/history');
+    text = Fs.read(histPath());
     if (text == nil) { return nil; }
     lines = Split.split(text, strChar(10));
     kept = [];
@@ -502,7 +1022,7 @@ def histLoad() {
     if (len(kept) > 400) {
         // the file only grows: cut it back to the lines that count
         kept = Arr.slice(kept, len(kept) - 200, len(kept));
-        Fs.write('var/history', strJoin(kept, strChar(10)) + strChar(10));
+        Fs.write(histPath(), strJoin(kept, strChar(10)) + strChar(10));
     }
     i = 0;
     while (i < len(kept)) {
@@ -511,17 +1031,21 @@ def histLoad() {
     }
 }
 
+def histPath() {
+    return ShellState.home + '/.history';
+}
+
 def histSave(line) {
     if (!Fs.mounted) { return nil; }
     try {
-        Fs.append('var/history', line + strChar(10));
+        Fs.append(histPath(), line + strChar(10));
     } catch (e) {
         // a full disk must not stop the shell
     }
 }
 
 def shellBuiltins() {
-    return ['help', 'echo', 'uptime', 'whoami', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec'];
+    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec', 'sh', 'set', 'unset', 'alias', 'unalias', 'which', 'history', 'su', 'id'];
 }
 
 // Tab: what could replace the word under the cursor. The first word is a command
@@ -539,14 +1063,26 @@ def shellComplete(line, pos) {
             if (strFind(names[i], word, 0) == 0) { push(found, names[i]); }
             i += 1;
         }
+        i = 0;
+        while (i < len(ShellState.aliases)) {
+            if (strFind(ShellState.aliases[i][0], word, 0) == 0 && !Arr.contains(found, ShellState.aliases[i][0])) { push(found, ShellState.aliases[i][0]); }
+            i += 1;
+        }
         if (Fs.mounted) {
-            programs = Dirs.list('bin');
-            i = 0;
-            while (i < len(programs)) {
-                n = programs[i][0];
-                if (!programs[i][2] && len(n) > 5 && strSub(n, len(n) - 5, len(n)) == '.bl0c') { n = strSub(n, 0, len(n) - 5); }
-                if (strFind(n, word, 0) == 0 && !Arr.contains(found, n)) { push(found, n); }
-                i += 1;
+            dirs = pathDirs();
+            d = 0;
+            while (d < len(dirs)) {
+                if (Dirs.isDir(dirs[d])) {
+                    programs = Dirs.list(dirs[d]);
+                    i = 0;
+                    while (i < len(programs)) {
+                        n = programs[i][0];
+                        if (!programs[i][2] && len(n) > 5 && strSub(n, len(n) - 5, len(n)) == '.bl0c') { n = strSub(n, 0, len(n) - 5); }
+                        if (strFind(n, word, 0) == 0 && !Arr.contains(found, n)) { push(found, n); }
+                        i += 1;
+                    }
+                }
+                d += 1;
             }
         }
         return [start, found];
@@ -575,13 +1111,32 @@ def shellComplete(line, pos) {
 }
 
 LineEditor.completer = shellComplete;
-histLoad();
+ensureSystemDirs();
+mountFstab();
+
 
 consoleWriteLine('=== aeon-os shell booting ===');
 
+// from here on a program in user mode reaches the disk only through the kernel's gate
+Fs.gate = Sys.fsGate;
 dropToUserMode();
 
-consoleWriteLine('aeon-shell ready - type a command, press enter (try: help)');
+consoleWriteLine(Term.paintBold(6, '  aeon-os') + Term.paint(7, ' - ' + coreCount() + ' core(s)'));
+consoleWriteLine('aeon-shell ready - type a command, press enter (try: ' + Term.paint(3, 'help') + ')');
+
+// the machine's own start-up: etc/rc is run as root before anybody logs in (service boot is there)
+if (Fs.mounted && Fs.exists('etc/rc')) { cmdSh(['sh', 'etc/rc']); }
+
+// who is at the keyboard: root straight away, unless root has a password
+loginIfNeeded();
+if (ShellState.running) {
+    me = syscall(Sys.who, nil);
+    adoptIdentity(me);
+    if (me[0] != 0 && Fs.stat(ShellState.home) != nil) { ShellState.cwd = ShellState.home; }
+}
+
+// the user's own settings: etc/profile is run as a script before the first prompt
+if (ShellState.running && Fs.mounted && Fs.exists('etc/profile')) { cmdSh(['sh', 'etc/profile']); }
 
 commandsRun = 0;
 // The line editor sleeps in kbWait() while there is no input: the keyboard handler
@@ -592,9 +1147,23 @@ commandsRun = 0;
 while (ShellState.running) {
     line = LineEditor.read(prompt());
     if (line == nil) {
-        // Ctrl-D on an empty line
-        ShellState.running = false;
+        // Ctrl-D on an empty line is exit (unless the machine is already going down)
+        if (Power.requested) { ShellState.running = false; } else { cmdExit(); }
     } else {
+        if (len(line) > 1 && strSub(line, 0, 1) == '!') {
+            // the editor remembered the line as typed; what runs (and is remembered) is what it stands for
+            expanded = histExpand(line);
+            h = LineEditor.history;
+            pop(h);
+            if (expanded == nil) {
+                sayErr(line + ': event not found');
+                line = '';
+            } else {
+                line = expanded;
+                LineEditor.remember(line);
+                say(line);
+            }
+        }
         if (line != '') { histSave(line); }
         runCommand(line);
         commandsRun = commandsRun + 1;
@@ -603,3 +1172,4 @@ while (ShellState.running) {
 
 Log.write('shell: exiting after ' + commandsRun + ' commands');
 consoleWriteLine('=== aeon-shell exiting after ' + commandsRun + ' commands ===');
+consoleFlush();

@@ -11,8 +11,15 @@
 //                       sector of a file, otherwise (next data sector + 1)
 //   directory           64-byte entries, 8 per sector: name (UTF-8, zero
 //                       padded, at most 47 bytes) at 0, first data sector + 1
-//                       at 48 (0 = empty file), size in bytes at 52. An entry
-//                       whose first name byte is 0 is free.
+//                       at 48 (0 = empty file), size in bytes at 52, owner
+//                       user id (16 bits) at 56, group id at 58, mode at 60 (bit
+//                       15 set = the mode is recorded, bits 0-8 rwxrwxrwx, bit 9
+//                       the sticky bit (only the owner of a file or of its folder may
+//                       remove or rename it there - the kernel enforces it); an
+//                       entry written before these existed has all zero there
+//                       and counts as owner 0, group 0, mode 0644 for a file and
+//                       0755 for a folder). An entry whose first name byte is 0
+//                       is free.
 //   data                the rest
 //
 // The namespace is flat: a name may contain '/', which is just a character -
@@ -28,7 +35,7 @@
 // below - read, write, append, remove, rename, size, list, mkdir via a name ending
 // in '/' - works on it exactly as on the disk, and rename/copy-by-readData can
 // cross between the two. Code never needs to know which one it is talking to.
-// (Disk-only limits - 47-byte names, the 128-entry directory - do not apply there.)
+// (Disk-only limits - 47-byte names, the directory's fixed size - do not apply there.)
 //
 // Errors are exceptions whose message starts with "fs: " (catch them with
 // try/catch); "not found" is a nil/false return instead. Every public call
@@ -51,6 +58,13 @@ def class Fs {
     static field dataSectors;
     static field hint;        // where the next free-sector search starts
     static field freeSlot;    // set by lookup(): first empty directory entry, -1 if none
+    static field curUid;      // who the operation in progress is for (see runAs): owner of what it creates
+    static field curGid;
+    static field umask;       // permission bits a new file or folder does not get
+    static field gate;        // the system call that user-mode callers go through, or nil (see run)
+    static field volumes;     // the file systems found on the drives: [unit, total, fatStart, fatSectors, dirStart, dirSectors, dataStart, dataSectors, hint]; [0] is the root (nil = gone)
+    static field mounts;      // [[folder, index into volumes], ...]: other drives shown as folders of the root
+    static field current;     // the volume the statics above describe
 
     // ---- sector buffer helpers ----
 
@@ -210,7 +224,20 @@ def class Fs {
         return peek32(Fs.entryAddr(e) + 52);
     }
 
-    static def setEntry(e, nameBytes, first, size) {
+    // owner, group and mode as recorded in entry e: [uid, gid, mode] with mode as stored (bit 15 = recorded)
+    static def entryMeta(e) {
+        Fs.readSector(Fs.entrySector(e));
+        addr = Fs.entryAddr(e);
+        return [(peek8(addr + 56) << 8) | peek8(addr + 57), (peek8(addr + 58) << 8) | peek8(addr + 59), (peek8(addr + 60) << 8) | peek8(addr + 61)];
+    }
+
+    // the meta of a file or folder that is being created now
+    static def newMeta(folder) {
+        base = folder ? 0x1FF : 0x1B6;          // 0777 / 0666, less the umask (which only ever takes rwx bits away)
+        return [Fs.curUid, Fs.curGid, 0x8000 | (base & ~Fs.umask)];
+    }
+
+    static def setEntry(e, nameBytes, first, size, meta) {
         Fs.readSector(Fs.entrySector(e));
         addr = Fs.entryAddr(e);
         i = 0;
@@ -225,6 +252,12 @@ def class Fs {
         }
         poke32(addr + 48, first);
         poke32(addr + 52, size);
+        poke8(addr + 56, (meta[0] >> 8) & 255);
+        poke8(addr + 57, meta[0] & 255);
+        poke8(addr + 58, (meta[1] >> 8) & 255);
+        poke8(addr + 59, meta[1] & 255);
+        poke8(addr + 60, (meta[2] >> 8) & 255);
+        poke8(addr + 61, meta[2] & 255);
         Fs.writeSector(Fs.entrySector(e));
     }
 
@@ -311,39 +344,83 @@ def class Fs {
         first = 0;
         if (n > 0) { first = sectors[0] + 1; }
         target = e < 0 ? slot : e;
-        Fs.setEntry(target, nameBytes, first, size);
+        // an existing file keeps its owner and mode; a new one gets the caller's
+        meta = e >= 0 ? Fs.entryMeta(e) : Fs.newMeta(nameBytes[len(nameBytes) - 1] == 47);
+        Fs.setEntry(target, nameBytes, first, size, meta);
         Fs.freeChain(old);
         free(sectors);
     }
 
     // ---- mounting and formatting ----
 
+    // the file system on the drive that is selected, as a volume record; nil if there is none
+    static def readVolume() {
+        if (!Disk.present() || !Disk.read(0)) { return nil; }
+        b = Disk.bufAddr;
+        if (peek32(b) != Fs.magic || peek32(b + 4) != 1) { return nil; }
+        total = peek32(b + 8);
+        if (total != Disk.sectors) { return nil; }
+        return [Disk.unit, total, peek32(b + 12), peek32(b + 16), peek32(b + 20), peek32(b + 24), peek32(b + 28), total - peek32(b + 28), 0];
+    }
+
+    // makes volume i the one the statics describe (and its drive the one the disk driver talks to)
+    static def useVolume(i) {
+        if (i == Fs.current) { return nil; }
+        Fs.volumes[Fs.current][8] = Fs.hint;
+        v = Fs.volumes[i];
+        Disk.select(v[0]);
+        Fs.total = v[1];
+        Fs.fatStart = v[2];
+        Fs.fatSectors = v[3];
+        Fs.dirStart = v[4];
+        Fs.dirSectors = v[5];
+        Fs.dataStart = v[6];
+        Fs.dataSectors = v[7];
+        Fs.hint = v[8];
+        Fs.current = i;
+    }
+
+    // the root file system: the one on drive 0
     static def doMount() {
         Fs.mounted = false;
-        if (!Disk.present() || !Disk.read(0)) { return false; }
-        b = Disk.bufAddr;
-        if (peek32(b) != Fs.magic || peek32(b + 4) != 1) { return false; }
-        total = peek32(b + 8);
-        if (total != Disk.sectors) { return false; }
-        Fs.total = total;
-        Fs.fatStart = peek32(b + 12);
-        Fs.fatSectors = peek32(b + 16);
-        Fs.dirStart = peek32(b + 20);
-        Fs.dirSectors = peek32(b + 24);
-        Fs.dataStart = peek32(b + 28);
-        Fs.dataSectors = total - Fs.dataStart;
-        Fs.hint = 0;
+        Disk.select(0);
+        v = Fs.readVolume();
+        if (v == nil) { return false; }
+        if (len(Fs.volumes) == 0) { push(Fs.volumes, v); } else { Fs.volumes[0] = v; }
+        Fs.current = -1;
+        Fs.useVolumeFresh(0);
         Fs.mounted = true;
         return true;
     }
 
+    // like useVolume, without saving the old statics (they are not a volume's yet)
+    static def useVolumeFresh(i) {
+        Fs.current = i;
+        v = Fs.volumes[i];
+        Fs.total = v[1];
+        Fs.fatStart = v[2];
+        Fs.fatSectors = v[3];
+        Fs.dirStart = v[4];
+        Fs.dirSectors = v[5];
+        Fs.dataStart = v[6];
+        Fs.dataSectors = v[7];
+        Fs.hint = 0;
+    }
+
     static def doFormat() {
+        Disk.select(0);
+        Fs.formatDisk();
+        Fs.doMount();
+    }
+
+    // writes an empty file system on the selected drive
+    static def formatDisk() {
         if (!Disk.present()) { throw('fs: no disk'); }
         total = Disk.sectors;
         if (total < 16) { throw('fs: the disk is too small (16 sectors at least)'); }
         dirSectors = total >> 5;
         if (dirSectors < 1) { dirSectors = 1; }
-        if (dirSectors > 16) { dirSectors = 16; }
+        if (dirSectors > 32) { dirSectors = 32; }        // up to 256 entries; a disk keeps the size it was formatted with
         fat = 1;
         while (true) {
             need = (total - 1 - dirSectors - fat + 127) >> 7;
@@ -370,7 +447,6 @@ def class Fs {
         poke32(b + 24, dirSectors);
         poke32(b + 28, dataStart);
         Fs.writeSector(0);
-        Fs.doMount();
     }
 
     // ---- the shared host folder, mounted at 'host/' ----
@@ -378,7 +454,7 @@ def class Fs {
     // the path inside the shared folder for a name under 'host/', nil if the name is
     // on the disk (also when no folder is attached: then 'host' is an ordinary name)
     static def host(name) {
-        if (!Hfs.present) { return nil; }
+        if (!Hfs.present || Fs.current != 0) { return nil; }
         if (name == 'host' || name == 'host/') { return ''; }
         if (strFind(name, 'host/', 0) != 0) { return nil; }
         rel = strSub(name, 5, len(name));
@@ -540,7 +616,7 @@ def class Fs {
             Fs.fatSet(last, sectors[0] + 1);
             free(sectors);
         }
-        Fs.setEntry(e, nb, first, size + n);
+        Fs.setEntry(e, nb, first, size + n, Fs.entryMeta(e));
         free(extra);
         free(nb);
     }
@@ -641,7 +717,7 @@ def class Fs {
         }
         first = Fs.entryFirst(e);
         size = Fs.entrySize(e);
-        Fs.setEntry(e, tb, first, size);
+        Fs.setEntry(e, tb, first, size, Fs.entryMeta(e));
         free(fb);
         free(tb);
         return true;
@@ -663,7 +739,7 @@ def class Fs {
 
     // array of [name, size], sorted by name, for the files whose name starts with 'prefix'
     static def doList(prefix) {
-        if (strFind(prefix, 'host/', 0) == 0 && Hfs.present) {
+        if (strFind(prefix, 'host/', 0) == 0 && Hfs.present && Fs.current == 0) {
             result = Fs.hostList(prefix);
             Fs.sortEntries(result);
             return result;
@@ -691,7 +767,7 @@ def class Fs {
             e += 1;
         }
         // the shared folder shows up as a directory of the root
-        if (Hfs.present && strFind('host/', prefix, 0) == 0) { push(result, ['host/', 0]); }
+        if (Hfs.present && Fs.current == 0 && strFind('host/', prefix, 0) == 0) { push(result, ['host/', 0]); }
         Fs.sortEntries(result);
         return result;
     }
@@ -733,30 +809,367 @@ def class Fs {
         return [Fs.total, Fs.dataSectors, Fs.freeCount(), files];
     }
 
+    // ---- owners and modes ----
+
+    // overwrites the owner, group and mode of entry e
+    static def writeMeta(e, meta) {
+        Fs.readSector(Fs.entrySector(e));
+        addr = Fs.entryAddr(e);
+        poke8(addr + 56, (meta[0] >> 8) & 255);
+        poke8(addr + 57, meta[0] & 255);
+        poke8(addr + 58, (meta[1] >> 8) & 255);
+        poke8(addr + 59, meta[1] & 255);
+        poke8(addr + 60, (meta[2] >> 8) & 255);
+        poke8(addr + 61, meta[2] & 255);
+        Fs.writeSector(Fs.entrySector(e));
+    }
+
+    // [owner, group, permission bits (rwxrwxrwx = 0-511, sticky = 512), size, kind] for a file (kind 0) or a folder (kind 1), nil if
+    // there is none. A folder is its marker entry 'name/' when it has one, otherwise it only exists as long
+    // as something is below it (owner 0, group 0, 0755). The shared host folder has no owners: 0777.
+    static def doStat(name) {
+        if (name == '') { return [0, 0, 0x1ED, 0, 1]; }
+        rel = Fs.host(name);
+        if (rel != nil) {
+            n = rel == '' ? -2 : Hfs.size(rel);
+            if (n == -1) { return nil; }
+            return [0, 0, 0x1FF, n < 0 ? 0 : n, n < 0 ? 1 : 0];
+        }
+        Fs.need();
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        free(nb);
+        folder = false;
+        if (e < 0) {
+            mb = Fs.encodeName(name + '/');
+            e = Fs.lookup(mb);
+            free(mb);
+            folder = true;
+        }
+        if (e >= 0) {
+            meta = Fs.entryMeta(e);
+            perm = (meta[2] & 0x8000) != 0 ? (meta[2] & 0x3FF) : (folder ? 0x1ED : 0x1A4);
+            return [meta[0], meta[1], perm, folder ? 0 : Fs.entrySize(e), folder ? 1 : 0];
+        }
+        inside = Fs.doList(name + '/');
+        if (len(inside) > 0) { return [0, 0, 0x1ED, 0, 1]; }
+        return nil;
+    }
+
+    // the entry index holding the meta of 'name' (a file, or the marker of a folder, which is made when
+    // the folder has none yet); -1 for something that is not on the disk
+    static def metaEntry(name) {
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        free(nb);
+        if (e >= 0) { return e; }
+        mb = Fs.encodeName(name + '/');
+        e = Fs.lookup(mb);
+        if (e < 0) {
+            if (len(Fs.doList(name + '/')) == 0) { free(mb); return -1; }
+            Fs.store(mb, []);
+            e = Fs.lookup(mb);
+        }
+        free(mb);
+        return e;
+    }
+
+    // false if there is no such file or folder
+    static def doChmod(name, mode) {
+        if (Fs.host(name) != nil) { throw('fs: the shared host folder has no modes'); }
+        Fs.need();
+        e = Fs.metaEntry(name);
+        if (e < 0) { return false; }
+        meta = Fs.entryMeta(e);
+        meta[2] = 0x8000 | (mode & 0x3FF);
+        Fs.writeMeta(e, meta);
+        return true;
+    }
+
+    // who = [uid, gid]; false if there is no such file or folder
+    static def doChown(name, who) {
+        if (Fs.host(name) != nil) { throw('fs: the shared host folder has no owners'); }
+        Fs.need();
+        e = Fs.metaEntry(name);
+        if (e < 0) { return false; }
+        st = Fs.doStat(name);
+        meta = Fs.entryMeta(e);
+        meta[2] = 0x8000 | st[2];                   // an entry from before modes were recorded keeps what it counted as
+        meta[0] = who[0];
+        meta[1] = who[1];
+        Fs.writeMeta(e, meta);
+        return true;
+    }
+
     // ---- public API: one lock around every operation ----
 
+    // Every file-system call comes through here. A caller in user mode does not touch the disk: it asks the
+    // kernel (the 'gate', a system call the kernel registers with Fs.gate = vector), which checks who may do
+    // what and calls runAs() for them. Kernel code, and anything before the gate exists, runs directly.
     static def run(op, a, b) {
+        if (Fs.gate != nil && !isPrivileged()) { return syscall(Fs.gate, [op, a, b]); }
+        return Fs.runAs(0, 0, op, a, b);
+    }
+
+    // the operation for user 'uid', group 'gid': what it creates is theirs
+    static def runAs(uid, gid, op, a, b) {
         lock(Fs.lock);
+        Fs.curUid = uid;
+        Fs.curGid = gid;
         result = nil;
         try {
-            if (op == 1) { Fs.doWrite(a, b); }
-            else if (op == 2) { result = Fs.doRead(a); }
-            else if (op == 3) { result = Fs.doRemove(a); }
-            else if (op == 4) { result = Fs.doList(a); }
-            else if (op == 5) { result = Fs.doRename(a, b); }
-            else if (op == 6) { result = Fs.doSize(a); }
-            else if (op == 7) { result = Fs.doInfo(); }
-            else if (op == 8) { Fs.doFormat(); }
-            else if (op == 9) { result = Fs.doMount(); }
-            else if (op == 10) { Fs.doAppend(a, b); }
-            else if (op == 11) { result = Fs.doReadData(a); }
-            else if (op == 12) { Fs.doWriteData(a, b); }
+            result = Fs.routed(op, a, b);
         } catch (err) {
+            Fs.useVolume(0);
             unlock(Fs.lock);
             throw(err);
         }
         unlock(Fs.lock);
         return result;
+    }
+
+    // one operation on the volume that is current
+    static def dispatch(op, a, b) {
+        result = nil;
+        if (op == 1) { Fs.doWrite(a, b); }
+        else if (op == 2) { result = Fs.doRead(a); }
+        else if (op == 3) { result = Fs.doRemove(a); }
+        else if (op == 4) { result = Fs.doList(a); }
+        else if (op == 5) { result = Fs.doRename(a, b); }
+        else if (op == 6) { result = Fs.doSize(a); }
+        else if (op == 7) { result = Fs.doInfo(); }
+        else if (op == 8) { Fs.doFormat(); }
+        else if (op == 9) { result = Fs.doMount(); }
+        else if (op == 10) { Fs.doAppend(a, b); }
+        else if (op == 11) { result = Fs.doReadData(a); }
+        else if (op == 12) { Fs.doWriteData(a, b); }
+        else if (op == 13) { result = Fs.doStat(a); }
+        else if (op == 14) { result = Fs.doChmod(a, b); }
+        else if (op == 15) { result = Fs.doChown(a, b); }
+        else if (op == 16) { result = Fs.doMountUnit(a, b); }
+        else if (op == 17) { result = Fs.doUmount(a); }
+        else if (op == 18) { Fs.doFormatUnit(a); }
+        else if (op == 19) { result = Fs.doMounts(); }
+        else if (op == 20) { result = Fs.doUnits(); }
+        return result;
+    }
+
+    // ---- other drives, mounted as folders ----
+    //
+    // A drive with a file system of its own appears as a folder of the root: after Fs.mountDrive(1, 'mnt/usb'), a name
+    // below 'mnt/usb/' lives on drive 1, and the folder itself is the drive's top level. The folder must exist (it
+    // is an ordinary one on the root disk). routed() looks at the first name of an operation, switches to that
+    // drive's volume for the duration (the sector buffer and geometry are one set of statics, so everything
+    // happens under Fs.lock) and gives the answer back with the folder's name put in front where names come back.
+
+    // [volume index, the name inside that volume] for a name below a mount point, nil for the root disk. The
+    // mount point itself (no trailing '/') stays the root's own folder for what is about the folder - its owner,
+    // its mode, removing it - and is the drive's top level for everything else.
+    static def resolve(name, op) {
+        i = 0;
+        while (i < len(Fs.mounts)) {
+            point = Fs.mounts[i][0];
+            idx = Fs.mounts[i][1];
+            if (name == point) {
+                if (op == 3 || op == 5 || op == 6 || op == 13 || op == 14 || op == 15) { return nil; }
+                return [idx, ''];
+            }
+            if (strFind(name, point + '/', 0) == 0) { return [idx, strSub(name, len(point) + 1, len(name))]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    static def onVolume(idx, op, a, b) {
+        Fs.useVolume(idx);
+        result = nil;
+        try {
+            result = Fs.dispatch(op, a, b);
+        } catch (err) {
+            Fs.useVolume(0);
+            throw(err);
+        }
+        Fs.useVolume(0);
+        return result;
+    }
+
+    static def routed(op, a, b) {
+        if (len(Fs.mounts) == 0 || op >= 16 || op == 8 || op == 9) { return Fs.dispatch(op, a, b); }
+        if (op == 5) { return Fs.routedRename(a, b); }
+        if (a == nil) { return Fs.dispatch(op, a, b); }
+        if (op == 4) { return Fs.routedList(a); }
+        r = Fs.resolve(a, op);
+        if (r == nil) { return Fs.dispatch(op, a, b); }
+        if (r[1] == '') {
+            // the drive's top level is a folder: it cannot be written to as a file or taken away
+            if (op == 1) { return nil; }                 // making the folder that is already there
+            if (op == 3) { throw('fs: ' + strSub(a, 0, len(a) - (strSub(a, len(a) - 1, len(a)) == '/' ? 1 : 0)) + ' is a mount point (unmount it)'); }
+            if (op == 2 || op == 10 || op == 11 || op == 12) { throw('fs: ' + a + ' is a folder'); }
+        }
+        return Fs.onVolume(r[0], op, r[1], b);
+    }
+
+    static def withPoint(names, point) {
+        i = 0;
+        while (i < len(names)) {
+            names[i] = [point + '/' + names[i][0], names[i][1]];
+            i += 1;
+        }
+        return names;
+    }
+
+    // the listing of everything whose name starts with 'prefix': the root's, plus - for mount points below the
+    // prefix - what the drives hold, and - for a prefix inside a mount point - only the drive's
+    static def routedList(prefix) {
+        r = Fs.resolve(prefix, 4);
+        if (r != nil) {
+            point = '';
+            i = 0;
+            while (i < len(Fs.mounts)) {
+                if (Fs.mounts[i][1] == r[0]) { point = Fs.mounts[i][0]; }
+                i += 1;
+            }
+            names = Fs.withPoint(Fs.onVolume(r[0], 4, r[1], nil), point);
+            if (r[1] == '') { push(names, [point + '/', 0]); }        // the folder itself exists even when the drive is empty
+            Fs.sortEntries(names);
+            return names;
+        }
+        result = Fs.dispatch(4, prefix, nil);
+        i = 0;
+        while (i < len(Fs.mounts)) {
+            point = Fs.mounts[i][0];
+            if (strFind(point + '/', prefix, 0) == 0) {
+                inside = Fs.withPoint(Fs.onVolume(Fs.mounts[i][1], 4, '', nil), point);
+                j = 0;
+                while (j < len(inside)) { push(result, inside[j]); j += 1; }
+            }
+            i += 1;
+        }
+        Fs.sortEntries(result);
+        return result;
+    }
+
+    static def routedRename(from, to) {
+        ra = Fs.resolve(from, 5);
+        rb = Fs.resolve(to, 5);
+        i = 0;
+        while (i < len(Fs.mounts)) {
+            if (from == Fs.mounts[i][0] || to == Fs.mounts[i][0]) { throw('fs: ' + Fs.mounts[i][0] + ' is a mount point'); }
+            i += 1;
+        }
+        ia = ra == nil ? 0 : ra[0];
+        ib = rb == nil ? 0 : rb[0];
+        if (ia == ib) {
+            if (ia == 0) { return Fs.dispatch(5, from, to); }
+            return Fs.onVolume(ia, 5, ra[1], rb[1]);
+        }
+        // from one drive to another: copy, then delete the original
+        data = Fs.routed(11, from, nil);
+        if (data == nil) { return false; }
+        if (Fs.routed(6, to, nil) >= 0) {
+            free(data);
+            throw('fs: ' + to + ' already exists');
+        }
+        Fs.routed(12, to, data);
+        free(data);
+        Fs.routed(3, from, nil);
+        return true;
+    }
+
+    // mounts drive 'unit' (which holds a file system) as the folder 'point'
+    static def doMountUnit(unit, point) {
+        Fs.need();
+        if (point == '' || point == 'host' || strFind(point, 'host/', 0) == 0) { throw('fs: cannot mount there'); }
+        if (unit < 1 || unit >= Disk.units()) { throw('fs: no drive ' + unit); }
+        i = 0;
+        while (i < len(Fs.mounts)) {
+            if (Fs.volumes[Fs.mounts[i][1]][0] == unit) { throw('fs: drive ' + unit + ' is already mounted on ' + Fs.mounts[i][0]); }
+            if (Fs.mounts[i][0] == point || strFind(point, Fs.mounts[i][0] + '/', 0) == 0 || strFind(Fs.mounts[i][0], point + '/', 0) == 0) {
+                throw('fs: ' + point + ' is in a mounted drive or holds one');
+            }
+            i += 1;
+        }
+        st = Fs.doStat(point);
+        if (st == nil || st[4] != 1) { throw('fs: ' + point + ': no such folder'); }
+        Disk.select(unit);
+        v = Fs.readVolume();
+        Disk.select(Fs.volumes[Fs.current][0]);
+        if (v == nil) { throw('fs: drive ' + unit + ' holds no file system (format it first)'); }
+        push(Fs.volumes, v);
+        push(Fs.mounts, [point, len(Fs.volumes) - 1]);
+        return true;
+    }
+
+    // the folder 'point' goes back to being an ordinary folder of the root disk
+    static def doUmount(point) {
+        kept = [];
+        found = false;
+        i = 0;
+        while (i < len(Fs.mounts)) {
+            if (Fs.mounts[i][0] == point) {
+                Fs.volumes[Fs.mounts[i][1]] = nil;
+                found = true;
+            } else {
+                push(kept, Fs.mounts[i]);
+            }
+            i += 1;
+        }
+        if (!found) { throw('fs: ' + point + ' is not a mount point'); }
+        Fs.mounts = kept;
+        return true;
+    }
+
+    // an empty file system on drive 'unit', which must not be mounted (nor be the root's)
+    static def doFormatUnit(unit) {
+        if (unit < 0 || unit >= Disk.units()) { throw('fs: no drive ' + unit); }
+        i = 0;
+        while (i < len(Fs.volumes)) {
+            if (Fs.volumes[i] != nil && Fs.volumes[i][0] == unit) { throw('fs: drive ' + unit + ' is in use (unmount it first)'); }
+            i += 1;
+        }
+        Disk.select(unit);
+        try {
+            Fs.formatDisk();
+        } catch (err) {
+            Disk.select(Fs.volumes[Fs.current][0]);
+            throw(err);
+        }
+        Disk.select(Fs.volumes[Fs.current][0]);
+    }
+
+    // [[folder, drive, total sectors, free data sectors], ...] for what is mounted
+    static def doMounts() {
+        out = [];
+        i = 0;
+        while (i < len(Fs.mounts)) {
+            idx = Fs.mounts[i][1];
+            Fs.useVolume(idx);
+            push(out, [Fs.mounts[i][0], Fs.volumes[idx][0], Fs.total, Fs.freeCount()]);
+            Fs.useVolume(0);
+            i += 1;
+        }
+        return out;
+    }
+
+    // [[drive, sectors, where it is mounted ('/' = the root, '' = nowhere)], ...] for every drive
+    static def doUnits() {
+        out = [];
+        n = Disk.units();
+        u = 0;
+        while (u < n) {
+            Disk.select(u);
+            where = '';
+            if (u == 0) { where = '/'; }
+            i = 0;
+            while (i < len(Fs.mounts)) {
+                if (Fs.volumes[Fs.mounts[i][1]][0] == u) { where = Fs.mounts[i][0]; }
+                i += 1;
+            }
+            push(out, [u, Disk.sectors, where]);
+            u += 1;
+        }
+        Disk.select(Fs.volumes[Fs.current][0]);
+        return out;
     }
 
     // Disk.init() must have run. False when the disk holds no filesystem.
@@ -779,7 +1192,29 @@ def class Fs {
     static def list(prefix) { return Fs.run(4, prefix, nil); }
     // [total sectors, data sectors, free data sectors, files]
     static def info() { return Fs.run(7, nil, nil); }
+    // the same for the drive that holds 'name'
+    static def infoOf(name) { return Fs.run(7, name, nil); }
+    // mounts drive 'unit' (it must hold a file system) as the existing folder 'point'; unmount puts it away
+    static def mountDrive(unit, point) { return Fs.run(16, unit, point); }
+    static def unmountDrive(point) { return Fs.run(17, point, nil); }
+    // an empty file system on an unused drive
+    static def formatUnit(unit) { Fs.run(18, unit, nil); }
+    // [[folder, drive, total sectors, free data sectors], ...]
+    static def mountList() { return Fs.run(19, nil, nil); }
+    // [[drive, sectors, where mounted], ...]
+    static def driveList() { return Fs.run(20, nil, nil); }
+    // [owner, group, permission bits (0-511: rwxrwxrwx), size, kind (0 file, 1 folder)], nil if there is none
+    static def stat(name) { return Fs.run(13, name, nil); }
+    static def chmod(name, mode) { return Fs.run(14, name, mode); }
+    static def chown(name, uid, gid) { return Fs.run(15, name, [uid, gid]); }
 }
 Fs.magic = 0x424C3046; // 'BL0F'
 Fs.mounted = false;
 Fs.lock = newMutex();
+Fs.volumes = [];
+Fs.mounts = [];
+Fs.current = 0;
+Fs.curUid = 0;
+Fs.curGid = 0;
+Fs.umask = 0x12;     // 022
+Fs.gate = nil;

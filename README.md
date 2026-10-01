@@ -15,8 +15,8 @@ suite, but it is a young language: see [Known limitations](#known-limitations).
 mvn package
 ```
 
-produces `target/bl0jv2-1.0-SNAPSHOT-fat.jar` (runnable) and, if `native-image`
-is on the PATH, a GraalVM native binary `target/bl0jv2`.
+produces `bl0jv2-cli/target/bl0jv2-vm-fat.jar` (runnable) and, if `native-image`
+is on the PATH, a GraalVM native binary `bl0jv2-cli/target/bl0jv2`.
 
 If packaging is unavailable (for example no native-image plugin offline),
 `mvn -DskipTests compile` is enough: run the CLI from the module `target/classes`
@@ -25,7 +25,7 @@ directories. On Windows, `aeon-os\aeon.cmd` does that for aeon-os.
 Modules: `bl0jv2-common` (opcodes, constant formats, exceptions),
 `bl0jv2-compiler` (lexer, parser, compiler, linker, `stdlib/`),
 `bl0jv2-runtime` (the VM), `bl0jv2-cli` (command line, host network bridges),
-`aeon-os/` (the OS and demo programs).
+`aeon-os/` (the OS and demo programs), `bl0jv2-ide` (placeholder for a future IDE: no code yet).
 
 ## Command line
 
@@ -41,16 +41,17 @@ bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
   -b, --bridge-udp PORT          relay a real UDP socket into the VM's NIC
       --bridge-tcp HOSTPORT:VMPORT  relay a real TCP socket to a Tcp listener
       --bridge-outbound          let VM code open real sockets (see below)
-      --disk FILE [--disk-sectors N]  present FILE as a block device (created if missing)
+      --disk FILE [--disk-sectors N]  present FILE as a block device (created if missing); repeatable: drives 0, 1, ...
       --bridge-fs DIR    show the host folder DIR to the program (stdlib/fs/hostfs.bl0)
       --shared MANIFEST  shared libraries: programs put on the disk link to them (see below)
       --disk-put HOSTFILE[:NAME]  copy a host file or folder onto the --disk image first
                          (a .bl0 is compiled and stored as .bl0c); repeatable
   -I, --include DIR  look an import up in DIR when it is not next to the importing file
+      --no-shake     keep every imported function and class (see below)
 ```
 
 ```
-java -jar bl0jv2-1.0-SNAPSHOT-fat.jar -c -e hello.bl0   # compile and run
+java -jar bl0jv2-cli/target/bl0jv2-vm-fat.jar -c -e hello.bl0   # compile and run
 ```
 
 `-c -e` together compile and run; `-e` alone expects an already compiled
@@ -200,6 +201,17 @@ x, y = (1, 2)            // destructuring
 imports by itself, so the CLI needs no list of files; `-I` only adds places to
 look. It works at the `-t` prompt too.
 
+### Leaving out what is not used
+
+An import splices a whole file in, so the linker then removes the imported functions, classes and
+class methods that nothing reachable uses (`Bl0jv2_Shaker`). The entry file's own definitions are
+always kept - so a library compiled as an entry file exports everything it declares - and so is every
+top-level statement. Use is by name: a function or class stays when its name occurs in kept code, a
+static method when `Class.name` does, an instance method when `.name` does anywhere (methods are found
+by name at run time; `init`, `toString` and `equals` are called by the VM). An imported file that has
+`@library` in a comment among its first lines is never thinned, and `--no-shake` turns it all off.
+On aeon-os this takes a quarter to a third off every program (`ls` 49 KB to 33 KB).
+
 ### Shared libraries
 
 `import` normally splices a file's code into the program. For an operating system that is
@@ -267,7 +279,7 @@ zero padding and width.
 The VM's only file primitive is a **block device**, the thing every machine
 already has: `--disk image` presents a host file as sectors of 512 bytes behind
 five ports (`0x0F00` sector count, `0x0F04` sector, `0x0F08` buffer address,
-`0x0F0C` command 1 = read / 2 = write, `0x0F0D` status). The controller moves a
+`0x0F0C` command 1 = read / 2 = write, `0x0F0D` status, `0x0F0E` select a drive, `0x0F0F` number of drives). The controller moves a
 sector by DMA between the device and a buffer in raw memory and the command has
 finished when `out8` returns. Everything above that is bl0:
 
@@ -280,7 +292,7 @@ print Fs.read('notes/a.txt');       // nil if there is no such file
 Fs.list('notes/')  // [[name, size], ...] sorted;  Fs.rename Fs.remove Fs.size Fs.exists Fs.info
 ```
 
-Layout: superblock, a FAT, a flat directory (64-byte entries, up to 128 files,
+Layout: superblock, a FAT, a flat directory (64-byte entries, sized when the disk is formatted - one sector per 32 disk sectors, at most 32, so up to 256 files -;
 names up to 47 bytes - `/` is just a character, `Fs.list(prefix)` makes it
 look like folders), data. Text is stored as UTF-8. A write goes to fresh
 sectors first and only then switches the directory entry, so a failure keeps the
@@ -328,6 +340,13 @@ ports, `in16(0x0F50)` columns and `in16(0x0F52)` rows. `-k` connects the host te
 (raw mode via `stty` where there is one). Keys, editing and screen handling are the
 guest's job: see aeon-os/README.md. `Utf8Stream` (stdlib/str/utf8.bl0) decodes a byte
 stream one byte at a time.
+
+### The clock
+
+A **real-time clock**, read the way a PC's CMOS one is: the date and time as separate fields, in UTC. Reading the seconds
+port latches a snapshot, so the fields read after it agree: `in8(0x0F70)` second, `0x0F71` minute, `0x0F72` hour, `0x0F73`
+day of the month, `0x0F74` month, `0x0F75` weekday (0 = Sunday), `in16(0x0F76)` year. The host's clock by default;
+`Bl0jv2_jVM.set_clock(LongSupplier)` gives it another (a test moves one by hand). `stdlib/time/clock.bl0` reads it.
 
 ### The display
 

@@ -1,0 +1,52 @@
+// aeon-os program: the folders and files below a folder, indented; tree [folder]
+// Loaded from the virtual disk by the shell (bin/tree.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) > 2) { sayErr('usage: tree [folder]'); return nil; }
+    dir = progCwd();
+    if (len(words) == 2) { dir = inCwd(words[1]); }
+    if (!Dirs.isDir(dir)) { sayErr(words[1] + ': no such folder'); return nil; }
+    entries = allUnder(dir);
+    prefix = FsPath.prefix(dir);
+    say(paintBold(4, '/' + dir));
+    shown = [];                                  // the folders currently open, outermost first
+    files = 0;
+    folders = 0;
+    i = 0;
+    while (i < len(entries)) {
+        rest = strSub(entries[i][0], len(prefix), len(entries[i][0]));
+        if (rest != '') {
+            parts = Split.split(rest, '/');
+            isFolderMarker = parts[len(parts) - 1] == '';
+            if (isFolderMarker) { pop(parts); }
+            depth = 0;
+            // folders on the way to this entry that are not open yet
+            while (depth < len(parts) - (isFolderMarker ? 0 : 1)) {
+                if (depth >= len(shown) || shown[depth] != parts[depth]) {
+                    shown = Arr.slice(shown, 0, depth);
+                    push(shown, parts[depth]);
+                    say(strRepeat('  ', depth + 1) + paintBold(4, parts[depth] + '/'));
+                    folders += 1;
+                }
+                depth += 1;
+            }
+            if (!isFolderMarker) {
+                say(strRepeat('  ', len(parts)) + parts[len(parts) - 1] + paint(7, '  ' + entries[i][1]));
+                files += 1;
+            }
+        }
+        i += 1;
+    }
+    say(folders + ' folders, ' + files + ' files');
+}
+
+def strRepeat(s, n) {
+    out = '';
+    k = 0;
+    while (k < n) { out += s; k += 1; }
+    return out;
+}
+
+programMain(main);

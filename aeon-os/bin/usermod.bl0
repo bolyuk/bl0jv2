@@ -1,0 +1,35 @@
+// aeon-os program: change a user's groups; usermod -aG <group> <user>  |  usermod -g <group> <user>
+// -aG adds the user to a group (they have it from their next login or su); -g sets the primary group.
+// Only root. Loaded from the virtual disk by the shell (bin/usermod.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/users.bl0';
+
+def main(words) {
+    if (len(words) != 4 || (words[1] != '-aG' && words[1] != '-g')) { sayErr('usage: usermod -aG <group> <user>  |  usermod -g <group> <user>'); return nil; }
+    g = Users.findGroup(words[2]);
+    if (g == nil) { sayErr(words[2] + ': no such group'); return nil; }
+    u = Users.find(words[3]);
+    if (u == nil) { sayErr(words[3] + ': no such user'); return nil; }
+    if (words[1] == '-g') {
+        users = Users.all();
+        i = 0;
+        while (i < len(users)) {
+            if (users[i][0] == u[0]) { users[i][2] = g[1]; }
+            i += 1;
+        }
+        Users.writePasswd(users);
+        say(u[0] + ': primary group is now ' + g[0]);
+        return nil;
+    }
+    all = Users.groups();
+    i = 0;
+    while (i < len(all)) {
+        if (all[i][0] == g[0] && !Arr.contains(all[i][2], u[0])) { push(all[i][2], u[0]); }
+        i += 1;
+    }
+    Users.writeGroups(all);
+    say(u[0] + ' is now in ' + g[0]);
+}
+
+programMain(main);

@@ -190,12 +190,14 @@ def kbReadByte() {
 def class Console {
     static field port;
     static field sysWriteVector;
+    static field sysFlushVector;   // waits until everything written has left the serial line
     static field columns;
     static field rows;
     static field mutex;     // one writer at a time (set up by the driver)
 }
 Console.port = 0x0F40;       // the UART's data register: what 'reboot' in the shell tries to poke
 Console.sysWriteVector = 1;
+Console.sysFlushVector = 3;
 Console.columns = 80;
 Console.rows = 24;
 
@@ -203,6 +205,12 @@ Console.rows = 24;
 // must not land in the middle of whatever the user is typing: while the line editor is waiting for
 // input, consoleAsync() only queues the text and wakes the editor, which clears its line, prints the
 // text above it and draws the line again. When no editor is waiting the text is simply written.
+// the machine is being shut down (see lib/power.bl0): whoever waits for something at the keyboard stops waiting
+def class Power {
+    static field requested;
+}
+Power.requested = false;
+
 def class Console2 {
     static field editing;     // the line editor is waiting for input
     static field pending;     // text queued for it
@@ -244,6 +252,11 @@ def consoleSetEditing(on) {
 
 def consoleWrite(s) {
     if (len(s) > 0) { syscall(Console.sysWriteVector, s); }
+}
+
+// returns when the transmit ring is empty and the chip has sent it: call before the machine stops
+def consoleFlush() {
+    syscall(Console.sysFlushVector, 0);
 }
 
 def consoleWriteLine(s) {

@@ -1,0 +1,14 @@
+// aeon-os program: print the words; echo [-n] <words>...   (the shell has its own echo; this one is for jobs that
+// run without it, such as the commands in a crontab). Loaded from the virtual disk by the shell (bin/echo.bl0c).
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    newline = true;
+    from = 1;
+    if (len(words) > 1 && words[1] == '-n') { newline = false; from = 2; }
+    text = restOf(words, from);
+    if (newline) { say(text); } else { sayRaw(text); }
+}
+
+programMain(main);

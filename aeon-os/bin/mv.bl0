@@ -1,12 +1,33 @@
-// aeon-os program: rename or move a file
-// Loaded from the virtual disk by the shell (bin/mv.bl0c); see lib/userland.bl0.
+// aeon-os program: move or rename a file or a folder; mv <from> <to>
+// Into an existing folder it keeps its name. Loaded from the virtual disk by the shell (bin/mv.bl0c).
 
 import '../lib/userland.bl0';
 
 def main(words) {
     if (len(words) != 3) { sayErr('usage: mv <from> <to>'); return nil; }
     from = inCwd(words[1]);
-    if (!Fs.rename(from, destination(from, words[2]))) { sayErr(words[1] + ': no such file'); }
+    to = destination(from, words[2]);
+    if (isMountPoint(from) || isMountPoint(to)) { sayErr('mv: ' + words[1] + ' is a mount point'); return nil; }
+    if (!Fs.exists(from) && Dirs.isDir(from)) {
+        if (to == from || strFind(to, FsPath.prefix(from), 0) == 0) {
+            sayErr('mv: cannot move a folder into itself');
+            return nil;
+        }
+        entries = allUnder(from);
+        prefix = FsPath.prefix(from);
+        target = FsPath.prefix(to);
+        ensureDir(to);
+        i = 0;
+        while (i < len(entries)) {
+            name = entries[i][0];
+            rest = strSub(name, len(prefix), len(name));
+            if (rest != '') { Fs.rename(name, target + rest); }
+            else { Fs.remove(name); }
+            i += 1;
+        }
+        return nil;
+    }
+    if (!Fs.rename(from, to)) { sayErr(words[1] + ': no such file'); }
 }
 
 programMain(main);

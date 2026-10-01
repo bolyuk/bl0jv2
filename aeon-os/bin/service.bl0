@@ -1,0 +1,114 @@
+// aeon-os program: start and stop the background services; service list | service <name> <action> | service boot
+// A service is a definition in etc/services/<name> (lines 'key = value': description, command, and optionally
+// user - who it runs for, default root - and log - where what it prints is appended, default var/log/<name>.log)
+// and a process: its number is kept in var/run/<name>.pid. Actions: start, stop, restart, status, enable,
+// disable (enabled services start at boot: 'service boot' is the line in etc/rc, and the list is
+// etc/services.enabled). Everything but list and status is for root. Loaded from the virtual disk by the shell
+// (bin/service.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/jobs.bl0';
+import '../lib/services.bl0';
+import '../lib/users.bl0';
+import '../lib/proc.bl0';
+import '../lib/perm.bl0';
+import '../../stdlib/str/trim.bl0';
+
+def amRoot() {
+    if (Ctx.me().uid != 0) {
+        sayErr('service: only root may do that');
+        return false;
+    }
+    return true;
+}
+
+def start(name, svc) {
+    if (Services.running(name, svc) != nil) { say(name + ' is already running'); return nil; }
+    if (svc[1] == '') { sayErr(name + ': the definition has no command'); return nil; }
+    user = Users.find(svc[2]);
+    if (user == nil) { sayErr(name + ': no such user ' + svc[2]); return nil; }
+    who = [user[1], user[2], Users.groupsOf(user[0])];
+    result = Jobs.launch(svc[1], '', who, svc[3]);
+    if (result[0] != '') { sayErr(name + ': ' + result[0]); return nil; }
+    Fs.write(Services.pidFile(name), '' + result[1][0].pid + '\n');
+    Log.write('service: ' + name + ' started (pid ' + result[1][0].pid + ')');
+    say('started ' + name + ' (pid ' + result[1][0].pid + ')');
+}
+
+def stop(name, svc) {
+    p = Services.running(name, svc);
+    if (p == nil) {
+        Fs.remove(Services.pidFile(name));
+        say(name + ' is not running');
+        return nil;
+    }
+    if (Services.stop(name, p)) { say('stopped ' + name); }
+    else { sayErr(name + ' did not stop (it looks for a stop request only at a checkpoint)'); }
+}
+
+def status(name, svc) {
+    p = Services.running(name, svc);
+    say(name + ': ' + (p == nil ? 'stopped' : 'running (pid ' + p.pid + ', core ' + p.core + ')')
+        + (Arr.contains(Services.enabledNames(), name) ? ', enabled at boot' : ', not enabled at boot'));
+    if (svc[0] != '') { say('  ' + svc[0]); }
+}
+
+def main(words) {
+    if (len(words) == 2 && words[1] == 'list') {
+        all = Services.names();
+        i = 0;
+        while (i < len(all)) {
+            svc = Services.definition(all[i]);
+            p = Services.running(all[i], svc);
+            say(Fmt.format('{:<12} {:<8} {:<8} {}', [all[i], p == nil ? 'stopped' : 'running',
+                Arr.contains(Services.enabledNames(), all[i]) ? 'enabled' : '', svc[0]]));
+            i += 1;
+        }
+        if (len(all) == 0) { say('(no services: etc/services/<name> defines one)'); }
+        return nil;
+    }
+    if (len(words) == 2 && words[1] == 'boot') {
+        if (!amRoot()) { return nil; }
+        list = Services.enabledNames();
+        i = 0;
+        while (i < len(list)) {
+            svc = Services.definition(list[i]);
+            if (svc == nil) { Log.write('service: ' + list[i] + ' is enabled but not defined'); sayErr('service: ' + list[i] + ': not defined'); }
+            else { start(list[i], svc); }
+            i += 1;
+        }
+        return nil;
+    }
+    if (len(words) != 3) {
+        sayErr('usage: service list | service boot | service <name> start|stop|restart|status|enable|disable');
+        return nil;
+    }
+    name = words[1];
+    action = words[2];
+    svc = Services.definition(name);
+    if (svc == nil) { sayErr(name + ': no such service (etc/services/' + name + ')'); return nil; }
+    if (action == 'status') { status(name, svc); return nil; }
+    if (!amRoot()) { return nil; }
+    if (action == 'start') { start(name, svc); }
+    else if (action == 'stop') { stop(name, svc); }
+    else if (action == 'restart') { stop(name, svc); start(name, svc); }
+    else if (action == 'enable') {
+        list = Services.enabledNames();
+        if (!Arr.contains(list, name)) { push(list, name); Services.writeEnabled(list); }
+        say(name + ' will start at boot');
+    } else if (action == 'disable') {
+        kept = [];
+        list = Services.enabledNames();
+        i = 0;
+        while (i < len(list)) {
+            if (list[i] != name) { push(kept, list[i]); }
+            i += 1;
+        }
+        Services.writeEnabled(kept);
+        say(name + ' will not start at boot');
+    } else {
+        sayErr(action + ': not an action (start, stop, restart, status, enable, disable)');
+    }
+}
+
+programMain(main);

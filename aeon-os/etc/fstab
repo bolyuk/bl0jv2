@@ -1,0 +1,3 @@
+# aeon-os: drives mounted at start - one line each: <drive number> <folder>
+# The folder must exist (mkdir) and the drive must hold a file system (mkfs <drive> yes).
+# 1 mnt/usb

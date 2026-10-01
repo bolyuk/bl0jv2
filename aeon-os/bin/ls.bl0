@@ -1,20 +1,41 @@
-// aeon-os program: list a folder
-// Loaded from the virtual disk by the shell (bin/ls.bl0c); see lib/userland.bl0.
+// aeon-os program: list a folder; ls [-l] [folder]
+// -l adds the mode, the owner and the size to each line. Loaded from the virtual disk by the shell (bin/ls.bl0c).
 
 import '../lib/userland.bl0';
+import '../lib/perm.bl0';
+import '../lib/users.bl0';
 
 def main(words) {
-    if (len(words) > 2) { sayErr('usage: ls [folder]'); return nil; }
+    long = false;
+    target = nil;
+    i = 1;
+    while (i < len(words)) {
+        if (words[i] == '-l') { long = true; }
+        else if (target == nil) { target = words[i]; }
+        else { sayErr('usage: ls [-l] [folder]'); return nil; }
+        i += 1;
+    }
     dir = progCwd();
-    if (len(words) == 2) { dir = inCwd(words[1]); }
-    if (!Dirs.isDir(dir)) { sayErr(words[1] + ': no such folder'); return nil; }
+    if (target != nil) { dir = inCwd(target); }
+    if (!Dirs.isDir(dir)) { sayErr(target + ': no such folder'); return nil; }
     entries = Dirs.list(dir);
     i = 0;
     while (i < len(entries)) {
-        if (entries[i][2]) {
-            say(Fmt.format('   <dir>  {}/', [entries[i][0]]));
+        isDir = entries[i][2];
+        name = entries[i][0];
+        shown = isDir ? paintBold(4, name + '/') : name;
+        if (!isDir && Affix.endsWith(name, '.bl0c')) { shown = paint(2, name); }
+        if (long) {
+            st = Fs.stat(FsPath.prefix(dir) + name);
+            if (st == nil) {
+                say('?         ' + shown);
+            } else {
+                say((isDir ? 'd' : '-') + Perm.modeText(st[2]) + Fmt.format(' {:<8} {:<8} {:>8}  ', [Users.nameOf(st[0]), Users.groupNameOf(st[1]), entries[i][1]]) + shown);
+            }
+        } else if (isDir) {
+            say('   <dir>  ' + shown);
         } else {
-            say(Fmt.format('{:>8}  {}', [entries[i][1], entries[i][0]]));
+            say(Fmt.format('{:>8}  ', [entries[i][1]]) + shown);
         }
         i += 1;
     }

@@ -1,11 +1,26 @@
-// aeon-os program: free space
+// aeon-os program: free space, of the root disk and of every mounted drive
 // Loaded from the virtual disk by the shell (bin/df.bl0c); see lib/userland.bl0.
 
 import '../lib/userland.bl0';
 
-def main(words) {
-    info = Fs.info();
+def show(label, info) {
+    used = info[1] - info[2];
+    cells = info[1] > 0 ? (used * 30) / info[1] : 0;
+    bar = '';
+    k = 0;
+    while (k < 30) { bar += (k < cells ? '#' : '-'); k += 1; }
+    say('[' + paint(cells > 24 ? 1 : 2, bar) + '] ' + label);
     say(Fmt.format('{} files, {} of {} data sectors free ({} bytes free)', [info[3], info[2], info[1], info[2] * 512]));
+}
+
+def main(words) {
+    show('/', Fs.info());
+    mounts = Fs.mountList();
+    i = 0;
+    while (i < len(mounts)) {
+        show('/' + mounts[i][0], Fs.infoOf(mounts[i][0] + '/'));
+        i += 1;
+    }
 }
 
 programMain(main);

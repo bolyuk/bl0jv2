@@ -1,0 +1,104 @@
+// aeon-os: starting a command line as a job - a process (or, for a pipeline, several) on worker cores that nobody
+// is sitting at: no terminal, output to a file. crond uses it; it is the same spawn the shell asks the kernel for.
+//
+// A job line is parsed like a shell line (quotes, | pipes, < > >> redirections), but only programs run - a
+// built-in belongs to the shell - and they are looked for in bin/ (a name with a '/' is a path). Redirections
+// are relative to the job's folder. What the last command prints, when the line does not redirect it, is appended
+// to 'defaultOut'. The job runs as 'who' = [uid, gid, groups] when the starter is root, else as the starter.
+
+import 'cmdline.bl0';
+import 'pipe.bl0';
+import 'proc.bl0';
+import 'perm.bl0';
+import '../../stdlib/fs/path.bl0';
+
+def class Jobs {
+    // the program file a command word names, or nil
+    static def program(cmd, cwd) {
+        if (strFind(cmd, '/', 0) >= 0) {
+            path = FsPath.resolve(cwd, cmd);
+            if (Fs.size(path) >= 0) { return path; }
+            if (Fs.size(path + '.bl0c') >= 0) { return path + '.bl0c'; }
+            return nil;
+        }
+        path = 'bin/' + cmd + '.bl0c';
+        return Fs.size(path) >= 0 ? path : nil;
+    }
+
+    // starts the line; '' when it is running, else why it could not be
+    static def start(line, cwd, who, defaultOut) {
+        return Jobs.launch(line, cwd, who, defaultOut)[0];
+    }
+
+    // the same, and the processes it started: [problem, [Process, ...]]
+    static def launch(line, cwd, who, defaultOut) {
+        stages = nil;
+        try {
+            stages = Cmdline.parse(line);
+        } catch (e) {
+            return [str(e), []];
+        }
+        n = len(stages);
+        if (n == 0) { return ['nothing to run', []]; }
+        paths = [];
+        i = 0;
+        while (i < n) {
+            found = Jobs.program(stages[i].words[0], cwd);
+            if (found == nil) { return [stages[i].words[0] + ': command not found', []]; }
+            push(paths, found);
+            i += 1;
+        }
+        pipes = [];
+        i = 0;
+        while (i < n - 1) {
+            push(pipes, new Pipe());
+            i += 1;
+        }
+        spawned = [];
+        problem = '';
+        i = 0;
+        while (i < n && problem == '') {
+            stage = stages[i];
+            inPath = '';
+            outPath = '';
+            pipeIn = i > 0 ? pipes[i - 1] : nil;
+            pipeOut = i < n - 1 ? pipes[i] : nil;
+            if (stage.inFile != nil) {
+                inPath = FsPath.resolve(cwd, stage.inFile);
+                if (!Fs.exists(inPath)) { problem = stage.inFile + ': no such file'; }
+            }
+            if (i == n - 1) {
+                if (stage.outFile != nil) {
+                    outPath = FsPath.resolve(cwd, stage.outFile);
+                    if (!stage.append) {
+                        Fs.write(outPath, '');
+                        if (who != nil) { Fs.chown(outPath, who[0], who[1]); }       // made by root here, but the job's to write
+                    }
+                } else {
+                    outPath = defaultOut;
+                }
+            }
+            if (problem == '') {
+                result = syscall(Sys.spawn, [paths[i], stage.words, cwd, [inPath, outPath, pipeIn, pipeOut, true, true], who]);
+                if (result[0]) { push(spawned, result[1]); } else { problem = result[1]; }
+            }
+            i += 1;
+        }
+        if (problem != '') {
+            // what started cannot finish without the rest: stop it, and let the pipes close
+            i = 0;
+            while (i < len(spawned)) {
+                Proc.kill(spawned[i].pid);
+                i += 1;
+            }
+            i = 0;
+            while (i < len(pipes)) {
+                pipes[i].closeWrite();
+                pipes[i].closeRead();
+                i += 1;
+            }
+            spawned = [];
+        }
+        return [problem, spawned];
+    }
+}

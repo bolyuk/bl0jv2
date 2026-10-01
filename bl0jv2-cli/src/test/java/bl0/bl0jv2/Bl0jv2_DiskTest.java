@@ -36,6 +36,21 @@ class Bl0jv2_DiskTest {
     }
 
     @Test
+    void severalDrivesAreSelectedByPort() {
+        var first = new MemoryDisk(8);
+        var second = new MemoryDisk(16);
+        String out = Bl0jv2_TestRunner.run(DRIVER +
+                "print str(in8(0x0F0F)) + '|' + str(in32(0x0F00)) + '|'; " +
+                "out8(0x0F0E, 1); print str(in32(0x0F00)) + '|'; " +
+                "poke32(4096, 0x11223344); print str(diskCmd(2, 3)) + '|'; " +          // written to drive 1
+                "out8(0x0F0E, 0); poke32(4096, 0); print str(diskCmd(1, 3)) + '|' + str(peek32(4096)) + '|'; " +   // drive 0 is untouched
+                "out8(0x0F0E, 1); print str(diskCmd(1, 3)) + '|' + str(peek32(4096)) + '|'; " +
+                "out8(0x0F0E, 2); print str(in32(0x0F00)) + '|' + str(diskCmd(1, 0));",   // no such drive
+                vm -> { vm.attach_disk(first); vm.attach_disk(second); });
+        assertEquals("2|8|16|0|0|0|0|287454020|0|1", out);
+    }
+
+    @Test
     void aSectorPastTheEndAndAnUnknownCommandFail() {
         String out = Bl0jv2_TestRunner.run(DRIVER + "print str(diskCmd(1, 8)) + '|' + str(diskCmd(9, 0)) + '|' + str(diskCmd(1, 7));",
                 vm -> vm.attach_disk(new MemoryDisk(8)));

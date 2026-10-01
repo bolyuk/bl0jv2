@@ -113,7 +113,7 @@ public final class Bl0jv2_Utils {
                 case OpCodes.LR_SUB -> writer.append(String.format("SUB r%d = r%d - r%d", c, a, b));
                 case OpCodes.LR_MUL -> writer.append(String.format("MUL r%d = r%d * r%d", c, a, b));
                 case OpCodes.LR_DIV -> writer.append(String.format("DIV r%d = r%d / r%d", c, a, b));
-                case OpCodes.LR_REM -> writer.append(String.format("REM r%d = r%d % r%d", c, a, b));
+                case OpCodes.LR_REM -> writer.append(String.format("REM r%d = r%d %% r%d", c, a, b));
                 case OpCodes.LR_POW -> writer.append(String.format("POW r%d = r%d ** r%d", c, a, b));
                 case OpCodes.LR_AND -> writer.append(String.format("AND r%d = r%d & r%d", c, a, b));
                 case OpCodes.LR_OR -> writer.append(String.format("OR r%d = r%d | r%d", c, a, b));
@@ -121,11 +121,18 @@ public final class Bl0jv2_Utils {
                 case OpCodes.LR_SHL -> writer.append(String.format("SHL r%d = r%d << r%d", c, a, b));
                 case OpCodes.LR_SHR -> writer.append(String.format("SHR r%d = r%d >> r%d", c, a, b));
                 case OpCodes.LR_USHR -> writer.append(String.format("USHR r%d = r%d >>> r%d", c, a, b));
-                case OpCodes.BIT_NOT -> writer.append(String.format("BIT_NOT r%d", a));
+                case OpCodes.BIT_NOT -> writer.append(String.format("BIT_NOT r%d = ~r%d", a, b));
 
                 case OpCodes.JUMP -> writer.append(String.format("JUMP %d", a));
                 case OpCodes.JUMP_IF -> writer.append(String.format("JUMP_IF r%d -> %d", a, b));
                 case OpCodes.JUMP_IF_NOT -> writer.append(String.format("JUMP_IF_NOT r%d -> %d", a, b));
+
+                case OpCodes.JUMP_IF_NOT_LESS -> writer.append(String.format("JUMP_IF_NOT r%d < r%d -> %d", a, b, c));
+                case OpCodes.JUMP_IF_NOT_GREATER -> writer.append(String.format("JUMP_IF_NOT r%d > r%d -> %d", a, b, c));
+                case OpCodes.JUMP_IF_NOT_LESS_EQ -> writer.append(String.format("JUMP_IF_NOT r%d <= r%d -> %d", a, b, c));
+                case OpCodes.JUMP_IF_NOT_GREATER_EQ -> writer.append(String.format("JUMP_IF_NOT r%d >= r%d -> %d", a, b, c));
+                case OpCodes.JUMP_IF_NOT_EQ -> writer.append(String.format("JUMP_IF_NOT r%d == r%d -> %d", a, b, c));
+                case OpCodes.JUMP_IF_EQ -> writer.append(String.format("JUMP_IF r%d == r%d -> %d", a, b, c));
 
                 case OpCodes.EQ -> writer.append(String.format("EQ r%d = r%d == r%d", c, a, b));
                 case OpCodes.LESS -> writer.append(String.format("LESS r%d = r%d < r%d", c, a, b));
@@ -135,8 +142,8 @@ public final class Bl0jv2_Utils {
 
                 case OpCodes.MOV -> writer.append(String.format("MOV r%d = r%d", a, b));
                 case OpCodes.SET -> writer.append(String.format("SET r%d = r%d", a, b));
-                case OpCodes.NEG -> writer.append(String.format("NEG r%d", a));
-                case OpCodes.NOT -> writer.append(String.format("NOT r%d", a));
+                case OpCodes.NEG -> writer.append(String.format("NEG r%d = -r%d", a, b));
+                case OpCodes.NOT -> writer.append(String.format("NOT r%d = !r%d", a, b));
 
                 case OpCodes.HALT -> writer.append("HALT");
                 case OpCodes.CALL_NATIVE -> writer.append(String.format("CALL_NATIVE r%d r%d", a, b));
@@ -145,18 +152,18 @@ public final class Bl0jv2_Utils {
                 case OpCodes.NEW_ARRAY -> writer.append(String.format("NEW_ARRAY r%d elements@%d count=%d", a, a + 1, b));
                 case OpCodes.NEW_TUPLE -> writer.append(String.format("NEW_TUPLE r%d elements@%d count=%d", a, a + 1, b));
                 case OpCodes.UNPACK -> writer.append(String.format("UNPACK r%d into @%d count=%d", a, a + 1, b));
-                case OpCodes.INDEX_GET -> writer.append(String.format("INDEX_GET r%d = r%d[r%d]", a, a, b));
+                case OpCodes.INDEX_GET -> writer.append(String.format("INDEX_GET r%d = r%d[r%d]", c, a, b));
                 case OpCodes.INDEX_SET -> writer.append(String.format("INDEX_SET r%d[r%d] = r%d", a, b, b + 1));
-                case OpCodes.LENGTH -> writer.append(String.format("LENGTH r%d = len(r%d)", a, a));
+                case OpCodes.LENGTH -> writer.append(String.format("LENGTH r%d = len(r%d)", a, b));
                 case OpCodes.PUSH -> writer.append(String.format("PUSH r%d, r%d", a, b));
                 case OpCodes.POP -> writer.append(String.format("POP r%d = pop(r%d)", a, b));
-                case OpCodes.TO_INT -> writer.append(String.format("TO_INT r%d = int(r%d)", a, a));
-                case OpCodes.TO_FLOAT -> writer.append(String.format("TO_FLOAT r%d = float(r%d)", a, a));
-                case OpCodes.TO_STRING -> writer.append(String.format("TO_STRING r%d = str(r%d)", a, a));
-                case OpCodes.TYPE_OF -> writer.append(String.format("TYPE_OF r%d = typeOf(r%d)", a, a));
+                case OpCodes.TO_INT -> writer.append(String.format("TO_INT r%d = int(r%d)", a, b));
+                case OpCodes.TO_FLOAT -> writer.append(String.format("TO_FLOAT r%d = float(r%d)", a, b));
+                case OpCodes.TO_STRING -> writer.append(String.format("TO_STRING r%d = str(r%d)", a, b));
+                case OpCodes.TYPE_OF -> writer.append(String.format("TYPE_OF r%d = typeOf(r%d)", a, b));
                 case OpCodes.TRY_ENTER -> writer.append(String.format("TRY_ENTER catch@%d errReg=r%d", b, a));
                 case OpCodes.TRY_EXIT -> writer.append("TRY_EXIT");
-                case OpCodes.MAKE_ERR -> writer.append(String.format("MAKE_ERR r%d = err(r%d)", a, a));
+                case OpCodes.MAKE_ERR -> writer.append(String.format("MAKE_ERR r%d = err(r%d)", a, b));
                 case OpCodes.NEW_INSTANCE -> writer.append(String.format("NEW_INSTANCE r%d = new(r%d)", a, a));
                 case OpCodes.GET_FIELD -> writer.append(String.format("GET_FIELD r%d = r%d.field[const %d]", c, a, b));
                 case OpCodes.SET_FIELD -> writer.append(String.format("SET_FIELD r%d.const[%d] = r%d", a, c, b));

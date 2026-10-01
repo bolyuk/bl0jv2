@@ -1,0 +1,72 @@
+// aeon-os program: show text a screenful at a time; more [file] (standard input when no file)
+// Space or PgDn: the next screen. Enter or Down: one more line. q, Esc or Ctrl-C: quit.
+// When the output is not the terminal (a pipe or a file) it just copies. Loaded from the virtual disk by the
+// shell (bin/more.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+import '../lib/input.bl0';
+import '../lib/keys.bl0';
+
+// the terminal rows a line takes (a long one wraps)
+def rowsOf(line, columns) {
+    n = len(line);
+    return n <= columns ? 1 : (n + columns - 1) / columns;
+}
+
+// what the user asks for at the prompt: 'page', 'line' or 'quit'
+def askMore(percent) {
+    consoleWrite(Term.invert() + ' --More-- (' + percent + '%) ' + Term.normal());
+    answer = 'ignore';
+    while (answer == 'ignore') {
+        key = Keys.read(1000);
+        checkAbort();
+        if (key == nil) { continue; }
+        if (key.name == 'ESC' || key.name == 'CTRL-C') { answer = 'quit'; }
+        else if (key.name == 'ENTER' || key.name == 'DOWN') { answer = 'line'; }
+        else if (key.name == 'PGDN') { answer = 'page'; }
+        else if (key.name == nil && key.text == ' ') { answer = 'page'; }
+        else if (key.name == nil && (key.text == 'q' || key.text == 'Q')) { answer = 'quit'; }
+    }
+    consoleWrite(strChar(13) + Term.clearLine());
+    return answer;
+}
+
+def main(words) {
+    if (len(words) > 2) { sayErr('usage: more [file]'); return nil; }
+    reader = openInput(len(words) == 2 ? words[1] : nil);
+    if (reader == nil) { sayErr(words[1] + ': no such file'); return nil; }
+    lines = new Lines(reader);
+    if (!toTerminal()) {
+        while (true) {
+            line = lines.next();
+            if (line == nil) { break; }
+            say(line);
+        }
+        return nil;
+    }
+    columns = Console.columns > 20 ? Console.columns : 80;
+    screen = (Console.rows > 4 ? Console.rows : 24) - 1;     // the last row is the prompt
+    // the whole text is read first, so the prompt can say how far along it is
+    items = [];
+    total = 0;
+    while (true) {
+        line = lines.next();
+        if (line == nil) { break; }
+        push(items, line);
+        total += 1;
+    }
+    used = 0;
+    i = 0;
+    while (i < total) {
+        say(items[i]);
+        used += rowsOf(items[i], columns);
+        i += 1;
+        if (i < total && used >= screen) {
+            answer = askMore((i * 100) / total);
+            if (answer == 'quit') { return nil; }
+            used = answer == 'line' ? screen - 1 : 0;
+        }
+    }
+}
+
+programMain(main);

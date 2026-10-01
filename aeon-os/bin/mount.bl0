@@ -1,0 +1,26 @@
+// aeon-os program: show the drives, or attach one as a folder; mount | mount <drive> <folder>
+// A drive holding a file system is mounted as an existing folder of the root disk: after
+// 'mkdir mnt', 'mkdir mnt/usb', 'mount 1 mnt/usb' the drive's files are under mnt/usb. Only root mounts. To have it
+// done at every start put the line '1 mnt/usb' in etc/fstab. Loaded from the virtual disk by the shell (bin/mount.bl0c).
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) == 1) {
+        drives = Fs.driveList();
+        i = 0;
+        while (i < len(drives)) {
+            where = drives[i][2] == '' ? 'not mounted' : (drives[i][2] == '/' ? 'the root' : '/' + drives[i][2]);
+            say(Fmt.format('drive {}: {} sectors ({} KiB), {}', [drives[i][0], drives[i][1], drives[i][1] / 2, where]));
+            i += 1;
+        }
+        return nil;
+    }
+    if (len(words) != 3) { sayErr('usage: mount | mount <drive> <folder>'); return nil; }
+    unit = unsignedNumber(words[1]);
+    if (unit == nil) { sayErr(words[1] + ': not a drive number'); return nil; }
+    Fs.mountDrive(unit, inCwd(words[2]));
+    say('drive ' + unit + ' is now ' + words[2]);
+}
+
+programMain(main);

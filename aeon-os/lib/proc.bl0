@@ -26,6 +26,9 @@ def class Process {
     field ended;
     field reported;    // the shell has told the user it ended
     field background;
+    field uid;         // who it runs for
+    field quiet;       // a job started by crond: no notice on the terminal when it ends, a line in the log instead
+    field system;      // the shell: listed by ps, but not something to wait for or stop
 
     def init(pid, name, path, core) {
         this.pid = pid;
@@ -38,6 +41,9 @@ def class Process {
         this.ended = 0;
         this.reported = false;
         this.background = false;
+        this.system = false;
+        this.quiet = false;
+        this.uid = 0;
     }
 }
 
@@ -50,8 +56,11 @@ def class Proc {
 
     // privileged, once, after Ctx and the abort words exist
     static def init() {
-        Proc.table = [];
-        Proc.nextPid = 1;
+        // the shell is a process too: pid 1, on core 0, running as long as the machine is
+        shell = new Process(1, 'shell', '', 0);
+        shell.system = true;
+        Proc.table = [shell];
+        Proc.nextPid = 2;
         Proc.mutex = newMutex();
         Proc.changed = newEvent();
         Proc.busy = [];
@@ -88,8 +97,9 @@ def class Proc {
 
     // Starts 'path' with 'words' as its command line on a free worker core, and returns the Process.
     // Privileged (it dispatches): the shell calls it through a syscall. 'io' is [inPath, outPath, pipeIn,
-    // pipeOut, background].
-    static def spawn(path, words, cwd, io) {
+    // pipeOut, background] or [..., background, quiet]. 'who' - [uid, gid, groups] - is who it runs for when the
+    // caller is root; in every other case it runs for the caller.
+    static def spawn(path, words, cwd, io, who) {
         lock(Proc.mutex);
         core = -1;
         i = 1;
@@ -106,11 +116,22 @@ def class Proc {
         Proc.nextPid += 1;
         p = new Process(pid, words[0], path, core);
         p.background = io[4];
+        p.quiet = len(io) > 5 && io[5];
         push(Proc.table, p);
         unlock(Proc.mutex);
         Proc.trim();
         c = Ctx.table[core];
         c.reset();
+        parent = Ctx.me();                 // the job runs for whoever started it
+        c.uid = parent.uid;
+        c.gid = parent.gid;
+        c.groups = parent.groups;
+        if (who != nil && parent.uid == 0) {
+            c.uid = who[0];
+            c.gid = who[1];
+            c.groups = who[2];
+        }
+        p.uid = c.uid;
         c.words = words;
         c.cwd = cwd;
         c.inPath = io[0];
@@ -156,20 +177,25 @@ def class Proc {
         unlock(Proc.mutex);
         signalEvent(Proc.changed);
         if (p.background) {
-            // tell the user, without breaking into what they are typing
             text = '[' + p.pid + '] ' + p.name + ' ';
             if (state == 'done') { text = text + 'done'; }
             else if (state == 'killed') { text = text + 'killed'; }
             else { text = text + 'failed: ' + message; }
             p.reported = true;
-            consoleAsync(text + '\n');
+            if (p.quiet) {
+                // a job nobody is watching: the log is where it says how it went
+                Log.write('job ' + text);
+            } else {
+                // tell the user, without breaking into what they are typing
+                consoleAsync(text + '\n');
+            }
         }
     }
 
     // asks the process to stop; true if there was a running process of that number
     static def kill(pid) {
         p = Proc.find(pid);
-        if (p == nil || p.state != 'running') { return false; }
+        if (p == nil || p.state != 'running' || p.system) { return false; }
         abortRequest(p.core);
         return true;
     }
@@ -188,7 +214,7 @@ def class Proc {
         i = 0;
         while (i < len(Proc.table)) {
             p = Proc.table[i];
-            if (p.state == 'running' && (pid == 0 || p.pid == pid)) { return true; }
+            if (p.state == 'running' && !p.system && (pid == 0 || p.pid == pid)) { return true; }
             i += 1;
         }
         return false;

@@ -1,0 +1,26 @@
+// aeon-os program: change the owner of a file or folder; chown <user>[:<group>] <path>...
+// The user is a name from etc/passwd or a number; the group is a number (default: the user's own).
+// Only root may. Loaded from the virtual disk by the shell (bin/chown.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/users.bl0';
+
+def main(words) {
+    if (len(words) < 3) { sayErr('usage: chown <user>[:<group>] <path>...'); return nil; }
+    spec = Split.split(words[1], ':');
+    user = Users.find(spec[0]);
+    uid = user != nil ? user[1] : unsignedNumber(spec[0]);
+    if (uid == nil) { sayErr(spec[0] + ': no such user'); return nil; }
+    gid = user != nil ? user[2] : uid;
+    if (len(spec) > 1) {
+        gid = unsignedNumber(spec[1]);
+        if (gid == nil) { sayErr(spec[1] + ': not a group number'); return nil; }
+    }
+    i = 2;
+    while (i < len(words)) {
+        if (!Fs.chown(inCwd(words[i]), uid, gid)) { sayErr(words[i] + ': no such file or folder'); }
+        i += 1;
+    }
+}
+
+programMain(main);

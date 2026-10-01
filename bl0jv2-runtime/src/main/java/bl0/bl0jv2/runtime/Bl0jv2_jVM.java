@@ -9,6 +9,7 @@ import bl0.bl0jv2.runtime.interrupt.TimerService;
 import bl0.bl0jv2.runtime.device.BlockDevice;
 import bl0.bl0jv2.runtime.device.DisplayController;
 import bl0.bl0jv2.runtime.device.DiskController;
+import bl0.bl0jv2.runtime.device.RealTimeClock;
 import bl0.bl0jv2.runtime.device.UartController;
 import bl0.bl0jv2.runtime.device.PortDevice;
 import bl0.bl0jv2.runtime.device.HostShare;
@@ -71,7 +72,8 @@ public final class Bl0jv2_jVM {
         }
     }, () -> this.interrupts.raiseInterruptOn(0, 2));   // the serial port's interrupt is taken by core 0, always: its handler is not written for two cores at once
     private final DisplayController display = new DisplayController(portIO, rawMemory);
-    private final PortDevice[] devices = {disk, share, uart, display};
+    private final RealTimeClock clock = new RealTimeClock();
+    private final PortDevice[] devices = {disk, share, uart, display, clock};
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
 
@@ -455,7 +457,7 @@ public final class Bl0jv2_jVM {
 
         int stackDepthBefore = ctx.callStack.size();
         boolean privilegedBefore = ctx.privileged;
-        ctx.callStack.push(new Frame(newRegisters(registersLength), -1, -1));
+        ctx.callStack.push(newRegisters(registersLength), -1, -1);
         if (unprivileged) ctx.privileged = false;
         try {
             execute(entryAddr, stackDepthBefore, true);
@@ -595,6 +597,14 @@ public final class Bl0jv2_jVM {
 
     // a condition, '!' operand, ... must be a bool - 'if (5)' and 'while
     // (nil)' are errors, not truthiness
+    // ==: same-kind ints/bools compare as bits (ofInt/ofBoolean are canonical); everything else - cross
+    // int/double, strings, instances with their own equals() - goes through valuesEqual
+    private boolean rawEquals(long x, long y) {
+        if ((NanBox.isInt(x) && NanBox.isInt(y)) || (NanBox.isBool(x) && NanBox.isBool(y)))
+            return x == y;
+        return valuesEqual(unbox(x), unbox(y));
+    }
+
     private boolean truth(long bits, String what) {
         if (NanBox.isBool(bits))
             return NanBox.asBoolean(bits);
@@ -872,7 +882,7 @@ public final class Bl0jv2_jVM {
         exports.clear();
         externConsts.clear();
         definedNames.clear();
-        ctx.callStack.add(new Frame(newRegisters(registers_length), -1, -1));
+        ctx.callStack.push(newRegisters(registers_length), -1, -1);
         consts = new long[constants_length];
 
         rawMemory.reset();
@@ -974,6 +984,10 @@ public final class Bl0jv2_jVM {
                 case OpCodes.JUMP -> relocateOperand(newInstructions, addr + 1, instrOffset);
                 case OpCodes.JUMP_IF, OpCodes.JUMP_IF_NOT, OpCodes.TRY_ENTER ->
                         relocateOperand(newInstructions, addr + 3, instrOffset);
+                // the fused compare-and-jump instructions keep their target in 'c'
+                case OpCodes.JUMP_IF_NOT_LESS, OpCodes.JUMP_IF_NOT_GREATER, OpCodes.JUMP_IF_NOT_LESS_EQ,
+                     OpCodes.JUMP_IF_NOT_GREATER_EQ, OpCodes.JUMP_IF_NOT_EQ, OpCodes.JUMP_IF_EQ ->
+                        relocateOperand(newInstructions, addr + 5, instrOffset);
                 // constant-pool-index operands - shift by constOffset.
                 // LOAD_CONST's b IS the index; GET_FIELD/LOOKUP_METHOD's b
                 // is a field/method NAME's const index (the object/target
@@ -1069,8 +1083,7 @@ public final class Bl0jv2_jVM {
     private void collectGarbage(CoreContext ctx) {
         Collector collector = new Collector(heap);
         collector.markValues(consts);
-        for (Frame frame : ctx.callStack)
-            collector.markValues(frame.regs());
+        ctx.callStack.forEachLive(collector::markValues);
         interrupts.forEachHandlerFn(collector::markObject);
         collector.drain();
         collector.sweep();
@@ -1140,8 +1153,8 @@ public final class Bl0jv2_jVM {
     // a bridge thread polls this directly (a sequence-number port bl0jv2
     // code bumps on every new write is the usual way to tell a fresh write
     // apart from re-reading stale data - see nic.bl0's own TX port layout).
-    // attaches the disk behind the controller ports (see DiskController);
-    // null detaches it
+    // attaches a disk behind the controller ports (see DiskController): the first call is drive 0, each
+    // further call the next drive; null detaches them all
     public void attach_disk(BlockDevice device) {
         disk.attach(device);
     }
@@ -1156,6 +1169,11 @@ public final class Bl0jv2_jVM {
         for (PortDevice device : devices)
             if (device.claimsRead(port)) return device.read(port, widthBytes);
         return portIO.read(port, widthBytes);
+    }
+
+    /** what the real-time clock (ports 0x0F70-0x0F77) reads: milliseconds since 1970-01-01 UTC; the host's clock by default */
+    public void set_clock(java.util.function.LongSupplier epochMillis) {
+        clock.setSource(epochMillis);
     }
 
     /** the terminal sent these bytes: they go through the UART's receiver, which interrupts vector 2 */
@@ -1256,7 +1274,7 @@ public final class Bl0jv2_jVM {
         public void run() {
             CoreContext ctx = new CoreContext(coreId);
             coreContext.set(ctx);
-            ctx.callStack.push(new Frame(new long[1], -1, -1));
+            ctx.callStack.push(new long[1], -1, -1);
 
             while (true) {
                 DispatchedWork work;
@@ -1352,7 +1370,7 @@ public final class Bl0jv2_jVM {
         // resultReg=0 is safe to reuse here: every frame's own reg[0] is
         // never assigned to a real variable by the compiler (regIndex
         // starts at 1), so it's free scratch space for exactly this
-        ctx.callStack.push(new Frame(regs, -1, 0));
+        ctx.callStack.push(regs, -1, 0);
         ctx.invokeDepth++;
         try {
             execute(fun.address() * C.INSTR_WIDTH, stopAtDepth, pollEligible);
@@ -1361,7 +1379,7 @@ public final class Bl0jv2_jVM {
         } finally {
             ctx.invokeDepth--;
         }
-        return unbox(ctx.callStack.peek().regs()[0]);
+        return unbox(ctx.callStack.top()[0]);
     }
 
     // the trap gate: invoke()s callee with this core temporarily forced
@@ -1430,7 +1448,7 @@ public final class Bl0jv2_jVM {
             // refreshed wherever the top frame changes: CALL, RETURN, and an
             // exception unwinding to a handler (a nested invoke() always restores
             // the stack to where it was, so it needs nothing)
-            long[] reg = ctx.callStack.peek().regs();
+            long[] reg = ctx.callStack.top();
 
             for(int addr = startAddr; addr < code.length;){
                 try {
@@ -1512,32 +1530,30 @@ public final class Bl0jv2_jVM {
                     case OpCodes.LR_SHL -> reg[c] = box(ops.shl.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.LR_SHR -> reg[c] = box(ops.shr.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.LR_USHR -> reg[c] = box(ops.ushr.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.BIT_NOT -> reg[a] = NanBox.ofInt(bitNot(unbox(reg[a])));
+                    case OpCodes.BIT_NOT -> reg[a] = NanBox.ofInt(bitNot(unbox(reg[b])));
 
                     case OpCodes.JUMP -> addr = a * C.INSTR_WIDTH;
                     case OpCodes.JUMP_IF -> { if (truth(reg[a], "condition")) addr = b * C.INSTR_WIDTH; }
                     case OpCodes.JUMP_IF_NOT -> { if (!truth(reg[a], "condition")) addr = b * C.INSTR_WIDTH; }
 
-                    case OpCodes.EQ -> {
-                        long x = reg[a], y = reg[b];
-                        // same-kind ints/bools compare as bits (ofInt/ofBoolean
-                        // are canonical); everything else - cross int/double,
-                        // strings, instances with their own equals() - goes
-                        // through valuesEqual
-                        if ((NanBox.isInt(x) && NanBox.isInt(y)) || (NanBox.isBool(x) && NanBox.isBool(y)))
-                            reg[c] = NanBox.ofBoolean(x == y);
-                        else
-                            reg[c] = NanBox.ofBoolean(valuesEqual(unbox(x), unbox(y)));
-                    }
+                    case OpCodes.EQ -> reg[c] = NanBox.ofBoolean(rawEquals(reg[a], reg[b]));
+
+                    // comparison and conditional jump in one (a, b operands; c target)
+                    case OpCodes.JUMP_IF_NOT_LESS -> { if (!compare(reg[a], reg[b], COMPARE_LESS)) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT_GREATER -> { if (!compare(reg[a], reg[b], COMPARE_GREATER)) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT_LESS_EQ -> { if (!compare(reg[a], reg[b], COMPARE_LESS_EQ)) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT_GREATER_EQ -> { if (!compare(reg[a], reg[b], COMPARE_GREATER_EQ)) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT_EQ -> { if (!rawEquals(reg[a], reg[b])) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_EQ -> { if (rawEquals(reg[a], reg[b])) addr = c * C.INSTR_WIDTH; }
                     case OpCodes.LESS -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS));
                     case OpCodes.GREATER -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER));
                     case OpCodes.LESS_EQ -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS_EQ));
                     case OpCodes.GREATER_EQ -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER_EQ));
-                    case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!truth(reg[a], "operand of '!'"));
+                    case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!truth(reg[b], "operand of '!'"));
 
                     case OpCodes.MOV -> reg[a] = reg[b];
                     case OpCodes.SET -> reg[a] = NanBox.ofInt(b);
-                    case OpCodes.NEG  -> reg[a] = box(negate(unbox(reg[a])));
+                    case OpCodes.NEG  -> reg[a] = box(negate(unbox(reg[b])));
 
                     // reg[a] holds either a plain FunDef (an ordinary named
                     // function, called directly) or a Bl0jClosure (a
@@ -1571,10 +1587,11 @@ public final class Bl0jv2_jVM {
                         if (ctx.callStack.size() >= maxCallDepth)
                             throw stackOverflow(maxCallDepth);
 
-                        long[] regs = newRegisters(fun.regs());
+                        // the callee's registers come from the call stack's own slot for this depth
+                        // (reused, not allocated, when the size matches)
+                        long[] regs = ctx.callStack.pushNew(fun.regs(), addr, b);
                         System.arraycopy(capturedCells, 0, regs, 1, capturedCells.length);
                         System.arraycopy(reg, b + 1, regs, 1 + capturedCells.length, c);
-                        ctx.callStack.push(new Frame(regs, addr, b));
                         reg = regs;
                         addr = fun.address() * C.INSTR_WIDTH;
                     }
@@ -1616,7 +1633,7 @@ public final class Bl0jv2_jVM {
                     case OpCodes.INDEX_GET -> {
                         Object target = unbox(reg[a]);
                         int index = (int) unbox(reg[b]);
-                        reg[a] = switch (target) {
+                        reg[c] = switch (target) {
                             case Bl0jArray array -> array.getRaw(index);
                             case Bl0jTuple tuple -> tuple.getRaw(index);
                             case String s -> NanBox.ofChar(charAt(s, index));
@@ -1631,7 +1648,7 @@ public final class Bl0jv2_jVM {
                         array.setRaw(index, reg[b + 1]);
                     }
 
-                    case OpCodes.LENGTH -> reg[a] = NanBox.ofInt(length(unbox(reg[a])));
+                    case OpCodes.LENGTH -> reg[a] = NanBox.ofInt(length(unbox(reg[b])));
 
                     // mutates the Bl0jArray object the reference points at,
                     // not the register holding that reference - reg[a]
@@ -1655,27 +1672,27 @@ public final class Bl0jv2_jVM {
                             };
                     }
 
-                    case OpCodes.TO_INT -> reg[a] = box(toInt(unbox(reg[a])));
-                    case OpCodes.TO_FLOAT -> reg[a] = box(toFloat(unbox(reg[a])));
+                    case OpCodes.TO_INT -> reg[a] = box(toInt(unbox(reg[b])));
+                    case OpCodes.TO_FLOAT -> reg[a] = box(toFloat(unbox(reg[b])));
                     // str() and typeOf() used to take a fresh heap slot on every
                     // call, even though a string stays the same string and typeOf()
                     // only ever answers with one of a dozen words
                     case OpCodes.TO_STRING -> {
-                        Object value = unbox(reg[a]);
+                        Object value = unbox(reg[b]);
                         if (value instanceof String)
-                            ; // already a string: the register keeps referring to it
+                            reg[a] = reg[b];   // already a string
                         else if (value instanceof Boolean || value == NIL_OBJECT)
                             reg[a] = internedString(value.toString());
                         else
                             reg[a] = boxRef(value.toString());
                     }
-                    case OpCodes.TYPE_OF -> reg[a] = internedString(typeName(unbox(reg[a])));
+                    case OpCodes.TYPE_OF -> reg[a] = internedString(typeName(unbox(reg[b])));
 
                     // b holds the catch block's address (patched by the
                     // compiler), a the register the caught error lands in
                     case OpCodes.TRY_ENTER -> ctx.handlerStack.push(new Handler(b * C.INSTR_WIDTH, a, ctx.callStack.size()));
                     case OpCodes.TRY_EXIT -> ctx.handlerStack.pop();
-                    case OpCodes.MAKE_ERR -> reg[a] = boxRef(new Bl0jError(String.valueOf(unbox(reg[a]))));
+                    case OpCodes.MAKE_ERR -> reg[a] = boxRef(new Bl0jError(String.valueOf(unbox(reg[b]))));
 
                     // mutates a's own slot: class-ref in, instance-ref out
                     case OpCodes.NEW_INSTANCE -> reg[a] = boxRef(new Bl0jInstance((Bl0jClass) unbox(reg[a]), this));
@@ -1851,11 +1868,13 @@ public final class Bl0jv2_jVM {
                         while (!ctx.handlerStack.isEmpty() && ctx.handlerStack.peek().callStackDepth() >= ctx.callStack.size())
                             ctx.handlerStack.pop();
 
-                        Frame frame = ctx.callStack.pop();
-                        long[] callerRegs = ctx.callStack.peek().regs();
-                        callerRegs[frame.resultReg] = reg[a];
+                        int resultReg = ctx.callStack.topResultReg();
+                        int returnTo = ctx.callStack.topReturnAddress();
+                        ctx.callStack.pop();
+                        long[] callerRegs = ctx.callStack.top();
+                        callerRegs[resultReg] = reg[a];
                         reg = callerRegs;
-                        addr = frame.addressToReturn;
+                        addr = returnTo;
 
                         // the frame invoke() pushed has just returned -
                         // hand control back to the native Java caller
@@ -1898,7 +1917,7 @@ public final class Bl0jv2_jVM {
                         String message = e instanceof StackOverflowError ? "stack overflow: native recursion too deep"
                                 : e instanceof Bl0j_VM_Exception v ? v.plainMessage()
                                 : e.getMessage() != null ? e.getMessage() : e.toString();
-                        reg = ctx.callStack.peek().regs();
+                        reg = ctx.callStack.top();
                         reg[handler.errReg()] = box(new Bl0jError(message));
                         addr = handler.catchAddr();
                         continue;
@@ -1931,7 +1950,7 @@ public final class Bl0jv2_jVM {
         for (int i = 0; i < args.length; i++)
             regs[i+1] = args[i];
 
-        ctx.callStack.push(new Frame(regs, addressToReturn, resultReg));
+        ctx.callStack.push(regs, addressToReturn, resultReg);
     }
 
     private long boxRef(Object value) {
@@ -1977,7 +1996,58 @@ public final class Bl0jv2_jVM {
         return new String(strBytes, StandardCharsets.UTF_8);
     }
 
-    private record Frame(long[] regs, int addressToReturn, int resultReg) {}
+    // The call stack: one register file per active call, in parallel arrays (no object per call). The
+    // register array of a depth is kept after the call returns and reused by the next call at that depth
+    // when it needs the same number of registers - a recursive function allocates nothing per call, which
+    // is most of what a call used to cost. A frame's registers are only ever reached through here (closures
+    // capture cells, not registers), and only the live depths are scanned by the collector.
+    private static final class CallStack {
+        private long[][] regs = new long[32][];
+        private int[] returnAddress = new int[32];
+        private int[] resultReg = new int[32];
+        private int size;
+
+        int size() { return size; }
+        void clear() { size = 0; }
+        void pop() { size--; }
+        long[] top() { return regs[size - 1]; }
+        int topReturnAddress() { return returnAddress[size - 1]; }
+        int topResultReg() { return resultReg[size - 1]; }
+
+        private void grow() {
+            int n = regs.length * 2;
+            regs = Arrays.copyOf(regs, n);
+            returnAddress = Arrays.copyOf(returnAddress, n);
+            resultReg = Arrays.copyOf(resultReg, n);
+        }
+
+        void push(long[] registers, int returnTo, int result) {
+            if (size == regs.length) grow();
+            regs[size] = registers;
+            returnAddress[size] = returnTo;
+            resultReg[size] = result;
+            size++;
+        }
+
+        /** a new frame of 'count' registers, all nil - the array of this depth when it has the right size */
+        long[] pushNew(int count, int returnTo, int result) {
+            if (size == regs.length) grow();
+            long[] r = regs[size];
+            if (r == null || r.length != count) {
+                r = new long[count];
+                regs[size] = r;
+            }
+            Arrays.fill(r, NanBox.NIL);
+            returnAddress[size] = returnTo;
+            resultReg[size] = result;
+            size++;
+            return r;
+        }
+
+        void forEachLive(java.util.function.Consumer<long[]> action) {
+            for (int i = 0; i < size; i++) action.accept(regs[i]);
+        }
+    }
 
     // callStackDepth is callStack.size() at the moment TRY_ENTER ran, so a
     // RETURN that unwinds past this depth knows the handler no longer
@@ -1992,7 +2062,7 @@ public final class Bl0jv2_jVM {
     // core must not affect another core's own polling.
     private static final class CoreContext {
         final int coreId;
-        final ArrayDeque<Frame> callStack = new ArrayDeque<>();
+        final CallStack callStack = new CallStack();
         final ArrayDeque<Handler> handlerStack = new ArrayDeque<>();
         // this core's own interrupt-enable state - a nesting-safe counter,
         // not a flag (disableInterrupts()/enableInterrupts() must nest

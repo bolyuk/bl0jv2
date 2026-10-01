@@ -77,6 +77,9 @@ public final class Bl0jv2_Compiler {
         // legitimately read a variable above the line that first sets it).
         // Checked once the whole body has been compiled.
         final Set<String> suspectReads = new LinkedHashSet<>();
+        // literals loaded once before the loop being compiled (value -> register): inside the
+        // loop they cost nothing per iteration. Registers are written once and never again.
+        final Map<Object, Integer> hoisted = new HashMap<>();
 
         FunctionScope(boolean boxed) {
             this.boxed = boxed;
@@ -457,8 +460,12 @@ public final class Bl0jv2_Compiler {
         // the opcode mutates its operand in place, so a bare-variable
         // argument must not reuse its own register directly
         int result = regIndex++;
-        _emit(OpCodes.MOV, result, argReg);
-        _emit(opcode, result);
+        if (opcode == OpCodes.FREE) {
+            _emit(OpCodes.MOV, result, argReg);
+            _emit(opcode, result);
+        } else {
+            _emit(opcode, result, argReg);          // result = f(argReg): the argument is left alone
+        }
         return result;
     }
 
@@ -1056,8 +1063,7 @@ public final class Bl0jv2_Compiler {
 
         int argReg = compileInner(funCall.args.get(0));
         int typeReg = regIndex++;
-        _emit(OpCodes.MOV, typeReg, argReg);
-        _emit(OpCodes.TYPE_OF, typeReg);
+        _emit(OpCodes.TYPE_OF, typeReg, argReg);
 
         int expectedReg = regIndex++;
         _emit(OpCodes.LOAD_CONST, expectedReg, constant(expectedType));
@@ -1115,22 +1121,16 @@ public final class Bl0jv2_Compiler {
 
     private int compileMethodCall(int objReg, String methodName, List<Node> argNodes, ClassInfo known) {
         checkMethodCall(known, methodName, argNodes.size());
-        int[] valRegs = new int[argNodes.size()];
+        int startReg = regIndex;
+        regIndex += 2 + argNodes.size();                       // the result, 'this', the arguments
         for (int i = 0; i < argNodes.size(); i++)
-            valRegs[i] = compileInner(argNodes.get(i));
+            moveInto(startReg + 2 + i, compileInner(argNodes.get(i)));
 
         int methodReg = regIndex++;
         _emit(OpCodes.LOOKUP_METHOD, objReg, constant(methodName), methodReg);
+        _emit(OpCodes.MOV, startReg + 1, objReg); // 'this'
 
-        int startReg = regIndex++;
-        _emit(OpCodes.MOV, regIndex, objReg); // 'this'
-        regIndex++;
-        for (var val : valRegs) {
-            _emit(OpCodes.MOV, regIndex, val);
-            regIndex++;
-        }
-
-        _emit(OpCodes.CALL, methodReg, startReg, valRegs.length + 1); // + 'this'
+        _emit(OpCodes.CALL, methodReg, startReg, argNodes.size() + 1); // + 'this'
         return startReg;
     }
 
@@ -1268,20 +1268,17 @@ public final class Bl0jv2_Compiler {
                         throw new Bl0j_CompilerException(
                                 "class " + staticTarget.name() + " has no static method '" + fieldAccess.fieldName + "'");
 
-                    int[] staticValRegs = new int[funCall.args.size()];
+                    // the call's registers: the result (also where the arguments start) and one per
+                    // argument, reserved first so each argument can be computed straight into its slot
+                    int staticStartReg = regIndex;
+                    regIndex += 1 + funCall.args.size();
                     for (int i = 0; i < funCall.args.size(); i++)
-                        staticValRegs[i] = compileInner(funCall.args.get(i));
+                        moveInto(staticStartReg + 1 + i, compileInner(funCall.args.get(i)));
 
                     int staticMethodReg = regIndex++;
                     _emit(OpCodes.LOAD_CONST, staticMethodReg, staticConstIndex);
 
-                    int staticStartReg = regIndex++;
-                    for (var val : staticValRegs) {
-                        _emit(OpCodes.MOV, regIndex, val);
-                        regIndex++;
-                    }
-
-                    _emit(OpCodes.CALL, staticMethodReg, staticStartReg, staticValRegs.length);
+                    _emit(OpCodes.CALL, staticMethodReg, staticStartReg, funCall.args.size());
                     return staticStartReg;
                 }
 
@@ -1289,22 +1286,15 @@ public final class Bl0jv2_Compiler {
                 return compileMethodCall(objReg, fieldAccess.fieldName, funCall.args, knownReceiverClass(fieldAccess.target));
             }
 
-            int[] valRegs = new int[funCall.args.size()];
-
+            int startReg = regIndex;
+            regIndex += 1 + funCall.args.size();
             for(int i=0;i<funCall.args.size();i++) {
-                valRegs[i] = compileInner(funCall.args.get(i));
+                moveInto(startReg + 1 + i, compileInner(funCall.args.get(i)));
             }
 
             int method = compileInner(funCall.left);
 
-            int startReg = regIndex++;
-
-            for(var val : valRegs) {
-                _emit(OpCodes.MOV, regIndex, val);
-                regIndex++;
-            }
-
-            _emit(OpCodes.CALL, method, startReg, valRegs.length);
+            _emit(OpCodes.CALL, method, startReg, funCall.args.size());
             return startReg;
         }
 
@@ -1412,8 +1402,7 @@ public final class Bl0jv2_Compiler {
             int arrReg = compileInner(indexNode.left);
             int indexReg = compileInner(indexNode.index);
 
-            _emit(OpCodes.MOV, result, arrReg);
-            _emit(OpCodes.INDEX_GET, result, indexReg);
+            _emit(OpCodes.INDEX_GET, arrReg, indexReg, result);
 
             return result;
         }
@@ -1482,10 +1471,11 @@ public final class Bl0jv2_Compiler {
 
 
         if(node instanceof WhileNode whileNode){
+            List<Object> hoisted = hoistLiterals(whileNode.condition, whileNode.body);
             int startJump = _instr_len();
             int condReg = compileInner(whileNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+            int patchJumpIfNot = emitJumpIfNot(condReg);
 
             LoopContext loop = new LoopContext(tryDepth);
             loopStack.push(loop);
@@ -1504,6 +1494,7 @@ public final class Bl0jv2_Compiler {
             for (int patch : loop.breakPatches())
                 patchAddr(patch, loopEnd);
 
+            unhoist(hoisted);
             return -1;
         }
 
@@ -1513,10 +1504,11 @@ public final class Bl0jv2_Compiler {
             // jump back to the condition check
             compileInner(forNode.init);
 
+            List<Object> hoisted = hoistLiterals(forNode.condition, forNode.body, forNode.update);
             int startJump = _instr_len();
             int condReg = compileInner(forNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+            int patchJumpIfNot = emitJumpIfNot(condReg);
 
             LoopContext loop = new LoopContext(tryDepth);
             loopStack.push(loop);
@@ -1538,6 +1530,7 @@ public final class Bl0jv2_Compiler {
             for (int patch : loop.breakPatches())
                 patchAddr(patch, loopEnd);
 
+            unhoist(hoisted);
             return -1;
         }
 
@@ -1602,7 +1595,7 @@ public final class Bl0jv2_Compiler {
             int resultReg = regIndex++;
             int condReg = compileInner(ternaryIfNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+            int patchJumpIfNot = emitJumpIfNot(condReg);
             int bodyReg = compileInner(ternaryIfNode.body);
 
             _emit(OpCodes.MOV, resultReg, bodyReg);
@@ -1621,7 +1614,7 @@ public final class Bl0jv2_Compiler {
         if (node instanceof IfNode ifNode) {
             int condReg = compileInner(ifNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+            int patchJumpIfNot = emitJumpIfNot(condReg);
             compileInner(ifNode.body);
 
             if (ifNode.elseBody != null) {
@@ -1672,6 +1665,13 @@ public final class Bl0jv2_Compiler {
                 constIndex = constant(s.value);
             if(node instanceof BooleanNode b)
                 constIndex = constant(b.value);
+
+            Object literal = literalValue(node);
+            if (literal != null) {
+                Integer loaded = currentScope().hoisted.get(literal);
+                if (loaded != null)
+                    return loaded;
+            }
 
             int reg = regIndex++;
 
@@ -1738,7 +1738,7 @@ public final class Bl0jv2_Compiler {
             _emit(op, left, right, result);
 
             if(n.op == Operator.NOT_EQUALS)
-                _emit(OpCodes.NOT, result);
+                _emit(OpCodes.NOT, result, result);
 
             return result;
         }
@@ -1772,7 +1772,7 @@ public final class Bl0jv2_Compiler {
                 int updated = regIndex++;
                 _emit(op, oldValue, one, updated);
 
-                compileAssign(target, new RegValueNode(updated));
+                compileAssign(target, new RegValueNode(updated), true);
                 return oldValue;
             }
 
@@ -1791,8 +1791,7 @@ public final class Bl0jv2_Compiler {
                 // register, and NEG/NOT would otherwise corrupt it (-x
                 // would silently also change x)
                 int result = regIndex++;
-                _emit(OpCodes.MOV, result, reg);
-                _emit(op, result);
+                _emit(op, result, reg);
 
                 return result;
             }
@@ -1859,7 +1858,12 @@ public final class Bl0jv2_Compiler {
         bytecode.set(index + 1, (byte) addr);
     }
 
+    // the byte offset the most recent jump target / address was taken at: an instruction emitted
+    // there may be jumped to, so the one before it cannot be merged with it (see retargetLast)
+    private int labelAt = -1;
+
     private int _instr_len(){
+        labelAt = bytecode.size();
         if(bytecode.size() % C.INSTR_WIDTH != 0)
             throw new Bl0j_CompilerException("Invalid instruction len: " + bytecode.size());
         int len = bytecode.size() / C.INSTR_WIDTH;
@@ -1907,6 +1911,152 @@ public final class Bl0jv2_Compiler {
             throw err("undefined variable '" + scope.suspectReads.iterator().next() + "' (read, but never assigned)");
     }
 
+    // the value of a number/float/string/boolean literal, else null
+    private static Object literalValue(Node node) {
+        return switch (node) {
+            case NumberNode n -> n.value;
+            case FloatNode f -> f.value;
+            case StringNode s -> s.value;
+            case BooleanNode b -> b.value;
+            default -> null;
+        };
+    }
+
+    // the literals a loop's condition, body and update use (not the bodies of lambdas: those are
+    // compiled as functions of their own)
+    private void collectLiterals(Node node, Set<Object> out) {
+        if (node == null) return;
+        Object literal = literalValue(node);
+        if (literal != null) { out.add(literal); return; }
+        switch (node) {
+            case ReturnNode n -> collectLiterals(n.right, out);
+            case NativeCallNode n -> collectLiterals(n.right, out);
+            case FunCall n -> { collectLiterals(n.left, out); for (var arg : n.args) collectLiterals(arg, out); }
+            case ArrayLiteralNode n -> { for (var e : n.elements) collectLiterals(e, out); }
+            case TupleNode n -> { for (var v : n.values) collectLiterals(v, out); }
+            case IndexNode n -> { collectLiterals(n.left, out); collectLiterals(n.index, out); }
+            case FieldAccessNode n -> collectLiterals(n.target, out);
+            case NewNode n -> { for (var a : n.args) collectLiterals(a, out); }
+            case DestructuringAssignNode n -> collectLiterals(n.right, out);
+            case WhileNode n -> { collectLiterals(n.condition, out); collectLiterals(n.body, out); }
+            case ForNode n -> { collectLiterals(n.init, out); collectLiterals(n.condition, out); collectLiterals(n.body, out); collectLiterals(n.update, out); }
+            case TryNode n -> { collectLiterals(n.tryBody, out); collectLiterals(n.catchBody, out); }
+            case Ternary_IfNode n -> { collectLiterals(n.condition, out); collectLiterals(n.body, out); collectLiterals(n.elseBody, out); }
+            case IfNode n -> { collectLiterals(n.condition, out); collectLiterals(n.body, out); collectLiterals(n.elseBody, out); }
+            case BinaryNode n -> { collectLiterals(n.left, out); collectLiterals(n.right, out); }
+            case LUnaryNode n -> collectLiterals(n.left, out);
+            case RUnaryNode n -> collectLiterals(n.right, out);
+            case PROGRAM_N n -> { for (var st : n.nodes) collectLiterals(st, out); }
+            default -> { }
+        }
+    }
+
+    private static final int MAX_HOISTED_PER_LOOP = 24;
+
+    // loads, before a loop, the literals it uses that are not loaded already; returns what was
+    // added so the caller can take it back out when the loop ends
+    private List<Object> hoistLiterals(Node... parts) {
+        Set<Object> wanted = new LinkedHashSet<>();
+        for (Node part : parts) collectLiterals(part, wanted);
+        List<Object> added = new ArrayList<>();
+        for (Object value : wanted) {
+            if (added.size() >= MAX_HOISTED_PER_LOOP) break;
+            if (currentScope().hoisted.containsKey(value)) continue;
+            int reg = regIndex++;
+            _emit(OpCodes.LOAD_CONST, reg, constant(value));
+            currentScope().hoisted.put(value, reg);
+            added.add(value);
+        }
+        return added;
+    }
+
+    private void unhoist(List<Object> added) {
+        for (Object value : added) currentScope().hoisted.remove(value);
+    }
+
+    // The conditional jump that skips a body when a condition is false; returns the index to patch
+    // with the target. When the condition was just computed by a comparison into a temporary that
+    // only this jump reads, the two become one instruction (a, b operands, c target) - for '!=' the
+    // EQ and the NOT after it become a jump on equality. Not when something jumps to the place the
+    // jump would sit.
+    private int emitJumpIfNot(int condReg) {
+        int size = bytecode.size();
+        boolean temp = !currentScope().identityMapping.containsValue(condReg) && !currentScope().hoisted.containsValue(condReg);
+        if (temp && size >= C.INSTR_WIDTH && labelAt != size) {
+            int p = size - C.INSTR_WIDTH;
+            int op = bytecode.get(p) & 0xFF;
+            int fused = switch (op) {
+                case OpCodes.LESS -> OpCodes.JUMP_IF_NOT_LESS;
+                case OpCodes.GREATER -> OpCodes.JUMP_IF_NOT_GREATER;
+                case OpCodes.LESS_EQ -> OpCodes.JUMP_IF_NOT_LESS_EQ;
+                case OpCodes.GREATER_EQ -> OpCodes.JUMP_IF_NOT_GREATER_EQ;
+                case OpCodes.EQ -> OpCodes.JUMP_IF_NOT_EQ;
+                default -> -1;
+            };
+            if (fused >= 0 && operandAt(p + C_OFFSET) == condReg) {
+                bytecode.set(p, (byte) fused);
+                patchAddr(p + C_OFFSET, 0);
+                return p + C_OFFSET;
+            }
+            // 'a != b' is EQ followed by NOT on its result
+            if (op == OpCodes.NOT && p >= C.INSTR_WIDTH && labelAt != p && operandAt(p + A_OFFSET) == condReg) {
+                int q = p - C.INSTR_WIDTH;
+                if ((bytecode.get(q) & 0xFF) == OpCodes.EQ && operandAt(q + C_OFFSET) == condReg) {
+                    for (int i = 0; i < C.INSTR_WIDTH; i++)
+                        bytecode.remove(bytecode.size() - 1);
+                    bytecode.set(q, (byte) OpCodes.JUMP_IF_EQ);
+                    patchAddr(q + C_OFFSET, 0);
+                    return q + C_OFFSET;
+                }
+            }
+        }
+        return _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+    }
+
+    private int operandAt(int index) {
+        return ((bytecode.get(index) & 0xFF) << 8) | (bytecode.get(index + 1) & 0xFF);
+    }
+
+    // 'x = a + b' computes into a temporary and then copies it into x; when the instruction that
+    // just computed the temporary can write x directly, do that and drop the copy. Only for
+    // instructions with a single destination register that is not also needed afterwards: the
+    // arithmetic and comparison operators (destination c) and constant loads (destination a),
+    // and only when valueReg is a temporary - not a variable's own register - and nothing jumps
+    // to the place the copy would have gone (a conditional's result is written on two paths).
+    private boolean retargetLast(int valueReg, int destReg) {
+        int size = bytecode.size();
+        if (size < C.INSTR_WIDTH || labelAt == size)
+            return false;
+        if (currentScope().identityMapping.containsValue(valueReg) || currentScope().hoisted.containsValue(valueReg))
+            return false;
+        int p = size - C.INSTR_WIDTH;
+        int op = bytecode.get(p) & 0xFF;
+        int operand;
+        switch (op) {
+            case OpCodes.LR_ADD, OpCodes.LR_SUB, OpCodes.LR_MUL, OpCodes.LR_DIV, OpCodes.LR_REM, OpCodes.LR_POW,
+                 OpCodes.LR_AND, OpCodes.LR_OR, OpCodes.LR_XOR, OpCodes.LR_SHL, OpCodes.LR_SHR, OpCodes.LR_USHR,
+                 OpCodes.EQ, OpCodes.LESS, OpCodes.GREATER, OpCodes.LESS_EQ, OpCodes.GREATER_EQ, OpCodes.INDEX_GET -> operand = p + C_OFFSET;
+            case OpCodes.LOAD_CONST, OpCodes.LOAD_NIL,
+                 OpCodes.LENGTH, OpCodes.TO_INT, OpCodes.TO_FLOAT, OpCodes.TO_STRING, OpCodes.TYPE_OF,
+                 OpCodes.NEG, OpCodes.NOT, OpCodes.BIT_NOT, OpCodes.MAKE_ERR -> operand = p + A_OFFSET;
+            default -> { return false; }
+        }
+        int current = ((bytecode.get(operand) & 0xFF) << 8) | (bytecode.get(operand + 1) & 0xFF);
+        if (current != valueReg)
+            return false;
+        checkOperand(destReg, "operand");
+        bytecode.set(operand, (byte) (destReg >> 8));
+        bytecode.set(operand + 1, (byte) destReg);
+        return true;
+    }
+
+    // puts the value in valueReg into the call-argument register 'slot': the instruction that just
+    // computed it writes there directly when it can (see retargetLast), else a copy
+    private void moveInto(int slot, int valueReg) {
+        if (!retargetLast(valueReg, slot))
+            _emit(OpCodes.MOV, slot, valueReg);
+    }
+
     // writes valueReg into 'name', handling first-establishment of a cell
     // (MAKE_CELL) vs. an already-live one (just CELL_SET) - shared by plain
     // assignment and destructuring targets, which are always bare names
@@ -1928,6 +2078,10 @@ public final class Bl0jv2_Compiler {
     // the value, matching INDEX_SET/SET_FIELD's existing operand packing).
     // Returns a register holding the assigned value.
     private int compileAssign(Node target, Node valueNode) {
+        return compileAssign(target, valueNode, false);
+    }
+
+    private int compileAssign(Node target, Node valueNode, boolean freshTemp) {
         if (target instanceof IndexNode indexNode) {
             int arrReg = compileInner(indexNode.left);
             int indexRegRaw = compileInner(indexNode.index);
@@ -2017,6 +2171,17 @@ public final class Bl0jv2_Compiler {
             }
 
             int valueRegRaw = compileInner(valueNode);
+            // a RegValueNode is a register somebody else made: only the ++/-- path's own fresh one
+            // (freshTemp) may be taken over
+            boolean mayRetarget = !(valueNode instanceof RegValueNode) || freshTemp;
+            if (mayRetarget && !currentScope().isCell(idNode.name)) {
+                boolean known = currentScope().identityMapping.containsKey(idNode.name);
+                VarRef ref = resolve(idNode.name);
+                if (retargetLast(valueRegRaw, ref.reg()))
+                    return ref.reg();
+                // the name was just made by resolve(); writeToIdentity must not think it is new
+                // (it only matters for cells, which are excluded above)
+            }
             writeToIdentity(idNode.name, valueRegRaw);
             return valueRegRaw;
         }

@@ -19,6 +19,7 @@ set "DISPLAY_FLAG="
 if not "%SCREEN%"=="" set "DISPLAY_FLAG=--display"
 java -cp "%CP%" bl0.bl0jv2.cli.Bl0jv2_CLI -c -e -k -n %CORES% --disk "%IMG%" --disk-sectors 4096 --shared aeon-os/libs.txt ^
   --disk-put aeon-os/bin:bin ^
+  --disk-put aeon-os/etc:etc ^
   --disk-put aeon-os/shell.bl0:sbin/shell.bl0c ^
   --disk-put aeon-os/child_hello.bl0:sbin/child_hello.bl0c ^
   --disk-put aeon-os/child_crash.bl0:sbin/child_crash.bl0c ^

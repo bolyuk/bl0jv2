@@ -4,12 +4,13 @@
 import '../lib/proc.bl0';
 
 def main(words) {
-    say(Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {}', ['pid', 'state', 'core', 'time ms', 'command']));
+    say(paintBold(7, Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {}', ['pid', 'state', 'core', 'time ms', 'command'])));
     i = 0;
     while (i < len(Proc.table)) {
         p = Proc.table[i];
         end = p.state == 'running' ? ticks() : p.ended;
-        say(Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {}', [p.pid, p.state, p.core, end - p.started, p.name]));
+        line = Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {}', [p.pid, p.state, p.core, end - p.started, p.name]);
+        say(p.state == 'running' ? paint(2, line) : line);
         i += 1;
     }
     if (len(Proc.table) == 0) { say('(no processes)'); }

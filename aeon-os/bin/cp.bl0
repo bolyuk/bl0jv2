@@ -1,14 +1,31 @@
-// aeon-os program: copy a file
-// Loaded from the virtual disk by the shell (bin/cp.bl0c); see lib/userland.bl0.
+// aeon-os program: copy; cp [-r] <from> <to>  (-r copies a folder with everything in it)
+// Into an existing folder the copy keeps its name. Loaded from the virtual disk by the shell (bin/cp.bl0c).
 
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 3) { sayErr('usage: cp <from> <to>'); return nil; }
-    from = inCwd(words[1]);
+    recursive = false;
+    args = [];
+    i = 1;
+    while (i < len(words)) {
+        if (words[i] == '-r') { recursive = true; } else { push(args, words[i]); }
+        i += 1;
+    }
+    if (len(args) != 2) { sayErr('usage: cp [-r] <from> <to>'); return nil; }
+    from = inCwd(args[0]);
+    if (!Fs.exists(from) && Dirs.isDir(from)) {
+        if (!recursive) { sayErr(args[0] + ': is a folder (use cp -r)'); return nil; }
+        to = destination(from, args[1]);
+        if (to == from || strFind(to, FsPath.prefix(from), 0) == 0) {
+            sayErr('cp: cannot copy a folder into itself');
+            return nil;
+        }
+        say(copyTree(from, to) + ' files copied');
+        return nil;
+    }
     data = Fs.readData(from);
-    if (data == nil) { sayErr(words[1] + ': no such file'); return nil; }
-    Fs.writeData(destination(from, words[2]), data);
+    if (data == nil) { sayErr(args[0] + ': no such file'); return nil; }
+    Fs.writeData(destination(from, args[1]), data);
     free(data);
 }
 

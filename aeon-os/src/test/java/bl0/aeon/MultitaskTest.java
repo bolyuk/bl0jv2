@@ -5,6 +5,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -40,12 +41,12 @@ class MultitaskTest {
     void aBackgroundJobRunsWhileTheShellStaysUsable(@TempDir Path dir) throws Exception {
         var s = AeonSession.shellOnOsDisk(dir, 4);
         long t0 = System.currentTimeMillis();
-        expect(s, "sleep 2 &", "[1] sleep");
+        expect(s, "sleep 2 &", "[2] sleep");
         assertTrue(System.currentTimeMillis() - t0 < 1500, "the prompt came back at once");
         String ps = run(s, "ps");
         assertTrue(ps.contains("running") && ps.contains("sleep"), ps);
         expect(s, "echo still here", "still here");                 // the shell works meanwhile
-        waitForOutput(s, "[1] sleep done", 15_000);                   // reported at a later prompt
+        waitForOutput(s, "[2] sleep done", 15_000);                   // reported at a later prompt
         s.type(ENTER);
         expect(s, "wait", "$ ");
         assertTrue(run(s, "ps").contains("done"), s.output());
@@ -54,18 +55,18 @@ class MultitaskTest {
     @Test
     void killStopsABackgroundJob(@TempDir Path dir) throws Exception {
         var s = AeonSession.shellOnOsDisk(dir, 4);
-        expect(s, "sleep 60 &", "[1] sleep");
-        expect(s, "kill 1", "$ ");
-        waitForOutput(s, "[1] sleep killed", 15_000);
+        expect(s, "sleep 60 &", "[2] sleep");
+        expect(s, "kill 2", "$ ");
+        waitForOutput(s, "[2] sleep killed", 15_000);
         s.type(ENTER);
-        expect(s, "kill 1", "no such running process");
+        expect(s, "kill 2", "no such running process");
         expect(s, "kill 99", "no such running process");
     }
 
     @Test
     void aFailingBackgroundJobIsReported(@TempDir Path dir) throws Exception {
         var s = AeonSession.shellOnOsDisk(dir, 4);
-        expect(s, "cat nosuchfile.txt > out.txt &", "[1] cat");
+        expect(s, "cat nosuchfile.txt > out.txt &", "[2] cat");
         s.type(ENTER);
         expect(s, "wait", "$ ");
         String out = run(s, "ps");
@@ -75,7 +76,7 @@ class MultitaskTest {
     @Test
     void aBackgroundJobWritesToAFile(@TempDir Path dir) throws Exception {
         var s = AeonSession.shellOnOsDisk(dir, 4);
-        expect(s, "ls bin > list.txt &", "[1] ls");
+        expect(s, "ls bin > list.txt &", "[2] ls");
         expect(s, "wait", "$ ");
         expect(s, "wc list.txt", "lines,");
         expect(s, "grep sleep list.txt", "sleep.bl0c");
@@ -84,14 +85,14 @@ class MultitaskTest {
     @Test
     void thereAreAsManyBackgroundJobsAsWorkerCores(@TempDir Path dir) throws Exception {
         var s = AeonSession.shellOnOsDisk(dir, 3);                    // two workers
-        expect(s, "sleep 30 &", "[1] sleep");
         expect(s, "sleep 30 &", "[2] sleep");
+        expect(s, "sleep 30 &", "[3] sleep");
         expect(s, "sleep 30 &", "no free core");
-        expect(s, "kill 1", "$ ");
         expect(s, "kill 2", "$ ");
+        expect(s, "kill 3", "$ ");
         s.type(ENTER);
         expect(s, "wait", "$ ");
-        expect(s, "sleep 1 &", "[3] sleep");                           // cores are free again
+        expect(s, "sleep 1 &", "[4] sleep");                           // cores are free again
         expect(s, "wait", "$ ");
     }
 
@@ -119,7 +120,7 @@ class MultitaskTest {
         assertTrue(out.contains("hello\nhello\nhello"), out);
         String ps = run(s, "ps");
         assertTrue(ps.contains("failed") || ps.contains("done"), ps);       // yes ended, it is not still running
-        assertFalse(ps.contains("running"), ps);
+        assertFalse(ps.lines().anyMatch(l -> l.contains("running") && !l.contains("shell")), ps);
     }
 
     @Test
@@ -155,7 +156,7 @@ class MultitaskTest {
         while (System.currentTimeMillis() < deadline && !s.screen().lastLine().equals("$")) Thread.sleep(20);
         assertTrue(s.screen().lastLine().equals("$"), s.screen().screenText());
         String ps = run(s, "ps");
-        assertFalse(ps.contains("running"), ps);                            // yes was stopped with it
+        assertFalse(ps.lines().anyMatch(l -> l.contains("running") && !l.contains("shell")), ps);                            // yes was stopped with it
     }
 
     @Test
@@ -163,10 +164,38 @@ class MultitaskTest {
         var s = AeonSession.shellOnOsDisk(dir, 4);
         expect(s, "echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > a.txt", "$ ");
         expect(s, "echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > b.txt", "$ ");
-        expect(s, "cat a.txt &", "[1] cat");
-        expect(s, "cat b.txt &", "[2] cat");
+        expect(s, "cat a.txt &", "[2] cat");
+        expect(s, "cat b.txt &", "[3] cat");
         expect(s, "wait", "$ ");
         String screen = s.screen().screenText();
         assertTrue(screen.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") && screen.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), screen);
+    }
+
+    @Test
+    void topShowsTheCoresAndProcessesAndQLeaves(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir, 4);
+        expect(s, "sleep 30 &", "[2] sleep");
+        s.type("top" + "\r");
+        long deadline = System.currentTimeMillis() + 15_000;
+        String screen = "";
+        while (System.currentTimeMillis() < deadline) {
+            screen = s.screen().screenText();
+            if (screen.contains("core 1") && screen.contains("q quit") && screen.contains("sleep")) break;
+            Thread.sleep(50);
+        }
+        assertTrue(screen.contains("core 0") && screen.contains("shell") && screen.contains("core 1") && screen.contains("sleep")
+                && screen.contains("pid"), screen);
+        s.type("q");
+        deadline = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadline && !s.screen().screenText().contains("[2] sleep")) Thread.sleep(50);
+        assertTrue(s.screen().screenText().contains("aeon-shell ready"), s.screen().screenText());   // the normal screen is back
+        expect(s, "kill 2", "$ ");
+    }
+
+    @Test
+    void outputLargerThanTheTransmitRingArrivesWhole(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir, 4);
+        String out = run(s, "yes abcdefghij | head -n 1000");      // 11 KB, the ring holds 4 KB
+        assertEquals(1000, out.lines().filter(l -> l.equals("abcdefghij")).count(), "lines that arrived");
     }
 }

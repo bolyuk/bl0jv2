@@ -1,0 +1,42 @@
+// aeon-os program: add a user; useradd <name> [uid]
+// Makes the line in etc/passwd, a locked password (set one with passwd), and the home folder home/<name>
+// (mode 700), and a group of the same name and number. Only root can write those files. Loaded from the virtual disk by the shell (bin/useradd.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/users.bl0';
+
+def main(words) {
+    if (len(words) < 2 || len(words) > 3) { sayErr('usage: useradd <name> [uid]'); return nil; }
+    name = words[1];
+    if (!Users.validName(name)) { sayErr(name + ': a name is letters, digits, _ and -'); return nil; }
+    if (Users.find(name) != nil) { sayErr(name + ': that user exists'); return nil; }
+    users = Users.all();
+    uid = 1000;
+    i = 0;
+    while (i < len(users)) {
+        if (users[i][1] >= uid) { uid = users[i][1] + 1; }
+        i += 1;
+    }
+    if (len(words) == 3) {
+        uid = unsignedNumber(words[2]);
+        if (uid == nil) { sayErr(words[2] + ': not a number'); return nil; }
+        if (Users.findUid(uid) != nil) { sayErr('user id ' + uid + ' is taken'); return nil; }
+    }
+    home = 'home/' + name;
+    // every user has a group of their own, with their number
+    if (Users.findGid(uid) != nil || Users.findGroup(name) != nil) { sayErr('useradd: a group ' + name + ' or ' + uid + ' exists already'); return nil; }
+    groups = Users.groups();
+    push(groups, [name, uid, []]);
+    Users.writeGroups(groups);
+    push(users, [name, uid, uid, home]);
+    Users.writePasswd(users);
+    shadow = Users.shadow();
+    push(shadow, [name, '', '*']);
+    Users.writeShadow(shadow);
+    Fs.write(home + '/', '');
+    Fs.chown(home, uid, uid);
+    Fs.chmod(home, 0x1C0);
+    say('added ' + name + ' (uid ' + uid + '), home ' + home + ' - set a password with: passwd ' + name);
+}
+
+programMain(main);

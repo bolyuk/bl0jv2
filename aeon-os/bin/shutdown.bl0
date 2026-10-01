@@ -1,0 +1,19 @@
+// aeon-os program: stop the machine; shutdown
+// The services are stopped, every other process is asked to stop, then the shell ends and the machine halts. Only
+// root. (halt and poweroff are aliases of it in etc/profile.) The same happens when root leaves the shell with
+// exit or Ctrl-D. Loaded from the virtual disk by the shell (bin/shutdown.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/power.bl0';
+import '../lib/perm.bl0';
+
+def main(words) {
+    if (len(words) != 1) { sayErr('usage: shutdown'); return nil; }
+    if (Ctx.me().uid != 0) { sayErr('shutdown: only root may do that'); return nil; }
+    say('the system is going down');
+    left = Shutdown.stopAll(true);
+    problem = syscall(Sys.shutdown, left);
+    if (problem != '') { sayErr('shutdown: ' + problem); }
+}
+
+programMain(main);

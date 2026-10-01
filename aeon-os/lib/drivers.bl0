@@ -33,18 +33,25 @@ import '../kernel.bl0';
 // newest byte is dropped rather than overwriting unread input.
 //
 // Transmit: writing the data register sends a byte. The chip's transmit FIFO holds 16;
-// "transmit FIFO empty" in the line status says 16 more fit, and a driver that does not
-// look loses bytes - uartPut() looks, and spins until there is room ---
+// "transmit FIFO empty" in the line status says 16 more fit. Writers do not wait for that: they
+// put bytes in a transmit ring (raw memory, like the receive ring: +0 head, +4 tail, +8 bytes), and
+// the transmit-holding-register-empty interrupt moves 16 at a time into the chip as it empties.
+// The interrupt is enabled only while the ring is not empty. When the ring is full a writer does the
+// moving itself (polling the line status), so output is never lost. The ring is touched only with
+// Console.mutex held - by writers, by the interrupt handler, by consoleFlush() - which keeps it
+// to one user at a time ---
 def class Uart {
     static field base;
     static field ready;
-    static field room;       // bytes that may still be written before looking at the line status again
     static field overruns;
+    static field tx;         // the transmit ring
+    static field txSize;
 }
 Uart.base = 0x0F40;
 Uart.ready = false;
-Uart.room = 0;
 Uart.overruns = 0;
+Uart.tx = nil;
+Uart.txSize = 4096;
 
 def initUart() {
     if (Uart.ready) { return nil; }
@@ -61,8 +68,11 @@ def initUart() {
 // takes what the receive FIFO holds into the ring; the cause register says what to do
 def onUartIRQ(vector) {
     base = Uart.base;
-    while ((in8(base + 2) & 1) == 0) {
-        cause = in8(base + 2) & 0x0E;
+    while (true) {
+        // read once: reading the cause register acknowledges a transmit interrupt
+        iir = in8(base + 2);
+        if ((iir & 1) != 0) { break; }
+        cause = iir & 0x0E;
         if (cause == 0x06) {
             // line status: reading the status register clears it
             if ((in8(base + 5) & 2) != 0) { Uart.overruns += 1; }
@@ -81,6 +91,8 @@ def onUartIRQ(vector) {
                     poke32(Keyboard.base, next);
                 }
             }
+        } else if (cause == 0x02) {
+            uartTxService();         // the transmitter emptied: send the next bytes
         } else {
             return nil;
         }
@@ -103,14 +115,51 @@ def initKeyboard() {
     onUartIRQ(Keyboard.vector);
 }
 
-// one byte to the terminal, waiting for room in the transmit FIFO when it is full
-def uartPut(b) {
-    if (Uart.room == 0) {
-        while ((in8(Uart.base + 5) & 0x20) == 0) { }
-        Uart.room = 16;
+// Moves bytes from the transmit ring into the chip while it has room (call with Console.mutex held).
+// "Transmit FIFO empty" means 16 fit.
+def uartPump() {
+    base = Uart.base;
+    if ((in8(base + 5) & 0x20) == 0) { return nil; }
+    tail = peek32(Uart.tx + 4);
+    head = peek32(Uart.tx);
+    n = 0;
+    while (n < 16 && tail != head) {
+        out8(base, peek8(Uart.tx + 8 + tail));
+        tail = (tail + 1) % Uart.txSize;
+        n += 1;
     }
-    out8(Uart.base, b);
-    Uart.room -= 1;
+    poke32(Uart.tx + 4, tail);
+}
+
+// the transmit interrupt: send what is waiting, and stop asking once nothing is
+def uartTxService() {
+    lock(Console.mutex);
+    uartPump();
+    if (peek32(Uart.tx) == peek32(Uart.tx + 4)) { out8(Uart.base + 1, 0x05); }
+    unlock(Console.mutex);
+}
+
+// one byte to the terminal (Console.mutex held): into the ring, which a full ring empties by polling
+def uartPut(b) {
+    head = peek32(Uart.tx);
+    next = (head + 1) % Uart.txSize;
+    while (next == peek32(Uart.tx + 4)) { uartPump(); }
+    poke8(Uart.tx + 8 + head, b);
+    poke32(Uart.tx, next);
+}
+
+// after a write: start sending, and have the interrupt carry on with what does not fit yet
+def uartKick() {
+    uartPump();
+    if (peek32(Uart.tx) != peek32(Uart.tx + 4)) { out8(Uart.base + 1, 0x07); }
+}
+
+// returns when everything has been sent and the chip's transmitter is idle
+def sysConsoleFlush(arg) {
+    lock(Console.mutex);
+    while (peek32(Uart.tx) != peek32(Uart.tx + 4)) { uartPump(); }
+    while ((in8(Uart.base + 5) & 0x40) == 0) { }       // transmitter empty: the last byte has left
+    unlock(Console.mutex);
 }
 
 // ---------------------------------------------------------------------------
@@ -435,15 +484,19 @@ def consoleWriteLocked(text) {
             uartPut(0x80 | (c & 0x3F));
         }
     }
-    if (Tty.on) { Tty.syncCursor(); }
+    if (Tty.on) { Tty.syncCursor(); } else { uartKick(); }
 }
 
 // call once, privileged: the serial port, the display if there is one, and the write syscall
 def initConsole() {
     Console.mutex = newMutex();
     initUart();
+    Uart.tx = kalloc(8 + Uart.txSize);
+    poke32(Uart.tx, 0);
+    poke32(Uart.tx + 4, 0);
     Console.columns = in16(0x0F50);
     Console.rows = in16(0x0F52);
     if (in8(0x0F54) == 1) { Tty.init(Console.columns, Console.rows); }
     registerHandler(sysConsoleWrite, Console.sysWriteVector, 1);
+    registerHandler(sysConsoleFlush, Console.sysFlushVector, 1);
 }

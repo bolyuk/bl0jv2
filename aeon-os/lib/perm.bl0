@@ -1,0 +1,226 @@
+// aeon-os: who may do what to which file. This is the kernel's side of the file-system gate (see Fs.run in
+// stdlib/fs/fs.bl0): a program in user mode never touches the disk, it asks the kernel, and the kernel asks
+// Perm.check() whether the caller's user and group may do that, then does it on the caller's behalf.
+//
+// A file or folder has an owner, a group and nine permission bits, rwx for the owner, the group and
+// everyone else (Fs.stat). Of the three classes the first that matches the caller applies - the owner's
+// bits if the caller owns it, else the group's if the caller's group (the primary one or any other they belong
+// to, see etc/group) is the file's, else the others'. User 0 (root) is always allowed. The rules, by what is asked:
+//   read a file                       r on it
+//   write or append to a file         w on it; creating one needs w on the folder it goes in
+//   remove, rename                    w on the folder(s) involved (not on the file itself); in a folder with the
+//                                     sticky bit (mode 1777, like tmp/) only the owner of the file or of the folder
+//   list a folder                     r on it
+//   look at a name at all             x on every folder above it
+//   chmod                             the owner (or root)       chown, format, mount      root only
+//   chgrp                             the owner, to a group they are in
+// A folder that has no entry of its own (it exists because a file is below it) counts as root's, 0755.
+// The shared host folder (host/) has no owners and is open to everyone.
+//
+// What this protects, and what it does not: the check is made in the kernel, on the path every file operation
+// of a user-mode program takes. The virtual machine has no memory protection between programs, though, so a
+// program that goes out of its way to overwrite the kernel's variables (a Ctx's user id, say) is not stopped;
+// on real hardware those would live in memory only the kernel can map.
+
+import '../../stdlib/fs/fs.bl0';
+import '../../stdlib/arrlib.bl0';
+
+// the numbers of the system calls the kernel offers for identity and files (the shell registers them)
+def class Sys {
+    static field fsGate;       // every file operation of a program in user mode
+    static field login;        // [name, password, firstLogin] -> [uid, gid, home, name] or an error text
+    static field logout;       // back to who the shell was before su
+    static field who;          // [uid, gid, home, name] of the caller
+    static field setPassword;  // [user, old, new] -> '' or why not
+    static field shutdown;     // root only: the shell ends, the machine halts -> '' or why not
+    static field spawn;        // [path, words, folder, [inPath, outPath, pipeIn, pipeOut, background, quiet], who] -> [true, Process] or [false, why]
+}
+// (vectors 1-9 are the console, keyboard, NIC, host NIC, disk, exec, host folder and spawn)
+Sys.fsGate = 12;
+Sys.login = 13;
+Sys.logout = 14;
+Sys.who = 15;
+Sys.setPassword = 16;
+Sys.shutdown = 19;
+Sys.spawn = 9;             // (the shell's Exec.spawnVector)
+
+def class Perm {
+    // a name without a trailing '/', which a folder's own entry has
+    static def plain(name) {
+        if (len(name) > 0 && strSub(name, len(name) - 1, len(name)) == '/') { return strSub(name, 0, len(name) - 1); }
+        return name;
+    }
+
+    // the folder 'name' is in ('' for the root)
+    static def parent(name) {
+        i = len(name) - 1;
+        while (i >= 0) {
+            if (strSub(name, i, i + 1) == '/') { return strSub(name, 0, i); }
+            i -= 1;
+        }
+        return '';
+    }
+
+    // true when user 'uid', who is in the groups 'groups' (the primary one first), has all of 'want' (4 read, 2 write, 1 search/execute) on
+    // something whose Fs.stat is 'st'
+    static def allows(uid, groups, st, want) {
+        if (uid == 0) { return true; }
+        shift = 0;
+        if (uid == st[0]) { shift = 6; }
+        else if (Arr.contains(groups, st[1])) { shift = 3; }
+        return (((st[2] >> shift) & 7) & want) == want;
+    }
+
+    static def deny(what, name) {
+        throw('fs: permission denied' + (name == '' && what != 'create' && what != 'remove' ? '' : ': /' + name) + (what == '' ? '' : ' (' + what + ')'));
+    }
+
+    // every folder above 'name' must be searchable
+    static def traverse(uid, groups, name) {
+        dir = Perm.parent(name);
+        while (dir != '') {
+            st = Fs.stat(dir);
+            if (st != nil && !Perm.allows(uid, groups, st, 1)) { Perm.deny('search', dir); }
+            dir = Perm.parent(dir);
+        }
+    }
+
+    // 'name' (which must exist, else nothing is asked of it) allows 'want'
+    static def need(uid, groups, name, want, what) {
+        st = Fs.stat(name);
+        if (st != nil && !Perm.allows(uid, groups, st, want)) { Perm.deny(what, name); }
+    }
+
+    // the folder 'name' goes into must exist for the caller to change
+    static def needFolder(uid, groups, name, want, what) {
+        folder = Perm.parent(name);
+        st = Fs.stat(folder);
+        if (st == nil) { Perm.deny(what, folder); }
+        if (!Perm.allows(uid, groups, st, want)) { Perm.deny(what, folder); }
+    }
+
+    // In a folder with the sticky bit only the owner of the file, or of the folder, may take the file away.
+    static def sticky(uid, name) {
+        if (uid == 0) { return nil; }
+        folder = Fs.stat(Perm.parent(name));
+        file = Fs.stat(name);
+        if (folder != nil && file != nil && (folder[2] & 0x200) != 0 && file[0] != uid && folder[0] != uid) {
+            Perm.deny('sticky folder, not yours', name);
+        }
+    }
+
+    // throws unless user 'uid' (in the groups 'groups') may do operation 'op' (the numbers of Fs.run) on a and b
+    static def check(uid, groups, op, a, b) {
+        if (uid == 0) { return nil; }
+        if (op == 8 || op == 9 || op == 16 || op == 17 || op == 18) { Perm.deny('only root may do that', ''); }
+        if (op == 7 || op == 19 || op == 20) { return nil; }
+        name = Perm.plain(a);
+        if (op == 15) {
+            // an owner may give a file to one of their own groups (chgrp); changing the owner is for root
+            st = Fs.stat(name);
+            if (st == nil || st[0] != uid || b[0] != uid || !Arr.contains(groups, b[1])) {
+                Perm.deny('only root may change an owner, and an owner only the group, to one of theirs', a);
+            }
+            Perm.traverse(uid, groups, name);
+            return nil;
+        }
+        if (op == 4) {
+            // a listing: the prefix names a folder ('docs/') or begins a name inside one ('docs/rep')
+            folder = len(a) > 0 && strSub(a, len(a) - 1, len(a)) == '/' ? name : Perm.parent(name);
+            if (folder != '') {
+                Perm.traverse(uid, groups, folder);
+                Perm.need(uid, groups, folder, 4, 'read');
+            }
+            return nil;
+        }
+        if (name == '') { return nil; }
+        Perm.traverse(uid, groups, name);
+        if (op == 6 || op == 13) { return nil; }
+        if (op == 2 || op == 11) { Perm.need(uid, groups, name, 4, 'read'); return nil; }
+        if (op == 14) {
+            st = Fs.stat(name);
+            if (st != nil && st[0] != uid) { Perm.deny('only the owner may change the mode', name); }
+            return nil;
+        }
+        if (op == 1 || op == 10 || op == 12) {
+            st = Fs.stat(name);
+            if (st != nil) { Perm.need(uid, groups, name, 2, 'write'); }
+            else { Perm.needFolder(uid, groups, name, 3, 'create'); }
+            return nil;
+        }
+        if (op == 3) {
+            if (Fs.stat(name) != nil) {
+                Perm.needFolder(uid, groups, name, 3, 'remove');
+                Perm.sticky(uid, name);
+            }
+            return nil;
+        }
+        if (op == 5) {
+            Perm.needFolder(uid, groups, name, 3, 'remove');
+            Perm.sticky(uid, name);
+            to = Perm.plain(b);
+            Perm.traverse(uid, groups, to);
+            Perm.needFolder(uid, groups, to, 3, 'create');
+            return nil;
+        }
+    }
+
+    // 'rwxr-xr--' for permission bits (rwx and the sticky bit as a 't' at the end)
+    static def modeText(bits) {
+        out = '';
+        shift = 6;
+        while (shift >= 0) {
+            b = (bits >> shift) & 7;
+            x = (b & 1) != 0 ? 'x' : '-';
+            if (shift == 0 && (bits & 0x200) != 0) { x = (b & 1) != 0 ? 't' : 'T'; }       // the sticky bit shows in the last place
+            out = out + ((b & 4) != 0 ? 'r' : '-') + ((b & 2) != 0 ? 'w' : '-') + x;
+            shift -= 3;
+        }
+        return out;
+    }
+
+    // the new permission bits for 'spec' applied to 'bits': an octal number ('644'), or symbolic
+    // ('u+x', 'go-w', 'a=r', 'ug+rw'); nil when it makes no sense
+    static def applyMode(bits, spec) {
+        if (len(spec) > 0 && strFind('01234567', strSub(spec, 0, 1), 0) >= 0) {
+            n = 0;
+            i = 0;
+            while (i < len(spec)) {
+                d = strFind('01234567', strSub(spec, i, i + 1), 0);
+                if (d < 0) { return nil; }
+                n = n * 8 + d;
+                i += 1;
+            }
+            // a leading 1 of four digits is the sticky bit (1777); setuid and setgid do not exist here
+            return n > 0x3FF ? nil : n;
+        }
+        who = 0;
+        i = 0;
+        while (i < len(spec) && strFind('ugoa', strSub(spec, i, i + 1), 0) >= 0) {
+            c = strSub(spec, i, i + 1);
+            if (c == 'u' || c == 'a') { who = who | 0x1C0; }
+            if (c == 'g' || c == 'a') { who = who | 0x38; }
+            if (c == 'o' || c == 'a') { who = who | 0x7; }
+            i += 1;
+        }
+        if (who == 0) { who = 0x1FF; }
+        if (i >= len(spec)) { return nil; }
+        op = strSub(spec, i, i + 1);
+        if (op != '+' && op != '-' && op != '=') { return nil; }
+        i += 1;
+        what = 0;
+        while (i < len(spec)) {
+            c = strSub(spec, i, i + 1);
+            if (c == 'r') { what = what | 0x124; }
+            else if (c == 'w') { what = what | 0x92; }
+            else if (c == 'x') { what = what | 0x49; }
+            else if (c == 't') { what = what | 0x200; }
+            else { return nil; }
+            i += 1;
+        }
+        what = (what & who) | (what & 0x200);          // the sticky bit belongs to nobody in particular
+        if (op == '+') { return bits | what; }
+        if (op == '-') { return bits & ~what; }
+        return (bits & ~(who | (what & 0x200))) | what;
+    }
+}

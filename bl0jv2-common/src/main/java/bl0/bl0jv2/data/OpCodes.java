@@ -165,5 +165,15 @@ public final class OpCodes {
     public static final byte LESS_EQ = 0x43;
     public static final byte GREATER_EQ = 0x44;
 
+    // a comparison fused with the conditional jump after it (a, b = the operands, c = the target):
+    // jump when the comparison is NOT true, which is how 'if'/'while' skip their body
+    public static final byte JUMP_IF_NOT_LESS = 0x45;
+    public static final byte JUMP_IF_NOT_GREATER = 0x46;
+    public static final byte JUMP_IF_NOT_LESS_EQ = 0x47;
+    public static final byte JUMP_IF_NOT_GREATER_EQ = 0x48;
+    public static final byte JUMP_IF_NOT_EQ = 0x49;
+    // and its mirror for '!=': jump when a == b
+    public static final byte JUMP_IF_EQ = 0x4A;
+
     public static final byte HALT = (byte) 0xFF;
 }

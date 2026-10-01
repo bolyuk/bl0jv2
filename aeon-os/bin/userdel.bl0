@@ -1,0 +1,42 @@
+// aeon-os program: remove a user; userdel <name>
+// Takes the user out of etc/passwd and etc/shadow; the files in the home folder stay (they belong to a
+// number now). Root cannot be removed. Loaded from the virtual disk by the shell (bin/userdel.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/users.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: userdel <name>'); return nil; }
+    u = Users.find(words[1]);
+    if (u == nil) { sayErr(words[1] + ': no such user'); return nil; }
+    if (u[1] == 0) { sayErr('userdel: root cannot be removed'); return nil; }
+    kept = [];
+    users = Users.all();
+    i = 0;
+    while (i < len(users)) {
+        if (users[i][0] != u[0]) { push(kept, users[i]); }
+        i += 1;
+    }
+    Users.writePasswd(kept);
+    Users.removeShadow(u[0]);
+    // their private group goes too, and they leave the others
+    groups = [];
+    all = Users.groups();
+    i = 0;
+    while (i < len(all)) {
+        if (!(all[i][0] == u[0] && all[i][1] == u[2])) {
+            members = [];
+            j = 0;
+            while (j < len(all[i][2])) {
+                if (all[i][2][j] != u[0]) { push(members, all[i][2][j]); }
+                j += 1;
+            }
+            push(groups, [all[i][0], all[i][1], members]);
+        }
+        i += 1;
+    }
+    Users.writeGroups(groups);
+    say('removed ' + u[0]);
+}
+
+programMain(main);

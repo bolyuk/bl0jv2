@@ -215,4 +215,121 @@ class ShellFilesTest {
         command(s, "format yes", "no disk attached");
         command(s, "ls", "ls: command not found");
     }
+
+    @Test
+    void variablesAndScripts(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "name=world", "$ ");
+        command(s, "echo hello $name", "hello world");
+        command(s, "echo '$name'", "$name");
+        command(s, "set", "name=world");
+        command(s, "unset name", "$ ");
+        command(s, "echo [$name]", "[]");
+        command(s, "echo '# a comment' > s.sh", "$ ");
+        command(s, "echo 'echo [$0] [$1] [$2]' >> s.sh", "$ ");
+        command(s, "echo 'x=set-in-script' >> s.sh", "$ ");
+        command(s, "echo 'echo $x' >> s.sh", "$ ");
+        command(s, "sh s.sh a b", "[s.sh] [a] [b]");
+        command(s, "echo [$1]", "[]");                           // the arguments are gone after the script
+        command(s, "sh nosuch.sh", "no such file");
+    }
+
+    @Test
+    void sortUniqAndFind(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "echo \"pear\\napple\\npear\\n10\\n9\" > f.txt", "$ ");
+        command(s, "sort f.txt | head -n 1", "10");                          // text order: 10 < 9 < apple < pear
+        command(s, "sort -n f.txt | head -n 1", "apple");                    // apple counts as 0: stable, so first
+        command(s, "sort -r f.txt | head -n 1", "pear");
+        command(s, "sort f.txt | uniq -c | grep pear", "2 pear");
+        command(s, "mkdir sub", "$ ");
+        command(s, "echo x > sub/needle.txt", "$ ");
+        command(s, "find needle", "/sub/needle.txt");
+        command(s, "find needle sub", "/sub/needle.txt");
+        command(s, "find zzz", "nothing found");
+    }
+
+    @Test
+    void foldersCanBeCopiedMovedAndRemovedWithTheirContents(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "mkdir proj", "$ ");
+        command(s, "mkdir proj/sub", "$ ");
+        command(s, "mkdir proj/empty", "$ ");
+        command(s, "echo one > proj/a.txt", "$ ");
+        command(s, "echo two > proj/sub/b.txt", "$ ");
+        command(s, "tree proj", "2 folders, 2 files");
+        command(s, "rm proj", "is a folder");
+        command(s, "cp proj proj2", "is a folder");
+        command(s, "cp -r proj proj2", "2 files copied");
+        command(s, "cat proj2/sub/b.txt", "two");
+        command(s, "ls proj2", "empty/");
+        command(s, "cp -r proj proj/inner", "into itself");
+        command(s, "mv proj2 moved", "$ ");
+        command(s, "cat moved/a.txt", "one");
+        command(s, "cat moved/sub/b.txt", "two");
+        command(s, "ls proj2", "no such folder");
+        command(s, "mkdir into", "$ ");
+        command(s, "mv moved into", "$ ");
+        command(s, "cat into/moved/a.txt", "one");
+        command(s, "rm -r into", "$ ");
+        command(s, "ls into", "no such folder");
+        command(s, "rm -r proj", "$ ");
+        command(s, "ls proj", "no such folder");
+        command(s, "rm -r /", "will not remove the root");
+    }
+
+    @Test
+    void seqAndDiff(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "seq 3", "1\n2\n3");
+        command(s, "seq 5 7 | wc", "3 lines");
+        command(s, "seq 5 > a.txt", "$ ");
+        command(s, "seq 6 > b.txt", "$ ");
+        command(s, "diff a.txt a.txt", "identical");
+        command(s, "diff a.txt b.txt", "+ 6 6");
+        command(s, "echo \"1\\n2\\nX\\n4\\n5\" > c.txt", "$ ");
+        command(s, "diff a.txt c.txt", "- 3 3\n+ 3 X");
+        command(s, "diff a.txt nosuch", "no such file");
+    }
+
+    @Test
+    void aliasesPathAndHistory(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        // etc/profile ran: ll and h are aliases
+        command(s, "alias", "alias ll='ls'");
+        command(s, "ll bin", "seq.bl0c");
+        command(s, "alias both='echo a b'", "$ ");
+        command(s, "both c", "a b c");
+        command(s, "alias bad='ls | wc'", "one simple command");
+        command(s, "which both", "alias for 'echo a b'");
+        command(s, "which echo", "built-in");
+        command(s, "which seq", "/bin/seq.bl0c");
+        command(s, "which nosuchthing", "not found");
+        command(s, "unalias both", "$ ");
+        command(s, "both c", "both: command not found");
+        // PATH
+        command(s, "mkdir tools", "$ ");
+        command(s, "cp bin/seq.bl0c tools/myseq.bl0c", "$ ");
+        command(s, "myseq 2", "myseq: command not found");
+        command(s, "tools/myseq 2", "1\n2");                     // a path needs no PATH
+        command(s, "PATH=bin:tools", "$ ");
+        command(s, "myseq 2", "1\n2");
+        command(s, "which myseq", "/tools/myseq.bl0c");
+        command(s, "echo 3 | myseq 1 | wc", "1 lines");
+        command(s, "PATH=tools", "$ ");
+        command(s, "seq 2", "seq: command not found");
+        command(s, "cd tools", "$ ");
+        command(s, "PATH=.", "$ ");
+        command(s, "myseq 1", "1");
+        // history
+        command(s, "PATH=bin", "$ ");
+        command(s, "cd /", "$ ");
+        command(s, "echo one", "one");
+        command(s, "echo two", "two");
+        command(s, "!!", "echo two\ntwo");                       // the command is shown, then runs
+        command(s, "!echo o", "echo two o\ntwo o");              // the latest echo, with what follows appended
+        command(s, "!-2", "echo two\ntwo");
+        command(s, "!nosuchcommand", "event not found");
+        command(s, "history", "echo one");
+    }
 }

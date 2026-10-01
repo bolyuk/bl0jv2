@@ -1,0 +1,263 @@
+// aeon-os: the user database - two text files that only root can write:
+//   etc/passwd   one line per user: name:uid:gid:home
+//   etc/shadow   one line per user: name:salt:hash     (mode 0600; hash empty = no password)
+//   etc/group    one line per group: name:gid:member,member,...
+// A user's primary group is the gid in etc/passwd; the other groups they belong to are the lines of etc/group that
+// list them. Everything that is a group of theirs counts when files are checked (see lib/perm.bl0).
+// A password is stored as SHA-256 applied 200 times to salt + password, so the file does not hold it and two
+// users with the same password differ. This code runs in the kernel (the login and password calls) and in the
+// programs root runs to edit the files (useradd, userdel); it needs read access to etc/shadow, which a
+// user-mode caller does not have, so those calls go through the kernel's handlers (see shell.bl0).
+
+import '../../stdlib/fs/fs.bl0';
+import '../../stdlib/str/split.bl0';
+import '../../stdlib/crypto/sha256.bl0';
+import 'userland.bl0';
+
+def class Users {
+    static field rounds;
+    static field counter;
+
+    // [[name, uid, gid, home], ...]
+    static def all() {
+        out = [];
+        if (!Fs.mounted) { return out; }
+        text = Fs.read('etc/passwd');
+        if (text == nil) { return out; }
+        lines = Split.split(text, strChar(10));
+        i = 0;
+        while (i < len(lines)) {
+            parts = Split.split(lines[i], ':');
+            if (len(parts) >= 4) { push(out, [parts[0], unsignedNumber(parts[1]), unsignedNumber(parts[2]), parts[3]]); }
+            i += 1;
+        }
+        return out;
+    }
+
+    static def find(name) {
+        users = Users.all();
+        i = 0;
+        while (i < len(users)) {
+            if (users[i][0] == name) { return users[i]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    static def findUid(uid) {
+        users = Users.all();
+        i = 0;
+        while (i < len(users)) {
+            if (users[i][1] == uid) { return users[i]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    // the name of user 'uid' ('#N' when nobody has that number)
+    static def nameOf(uid) {
+        u = Users.findUid(uid);
+        return u == nil ? '#' + uid : u[0];
+    }
+
+    // [[name, salt, hash], ...]
+    static def shadow() {
+        out = [];
+        if (!Fs.mounted) { return out; }
+        text = Fs.read('etc/shadow');
+        if (text == nil) { return out; }
+        lines = Split.split(text, strChar(10));
+        i = 0;
+        while (i < len(lines)) {
+            parts = Split.split(lines[i], ':');
+            if (len(parts) >= 3) { push(out, [parts[0], parts[1], parts[2]]); }
+            i += 1;
+        }
+        return out;
+    }
+
+    // [[name, gid, [members]], ...]
+    static def groups() {
+        out = [];
+        if (!Fs.mounted) { return out; }
+        text = Fs.read('etc/group');
+        if (text == nil) { return out; }
+        lines = Split.split(text, strChar(10));
+        i = 0;
+        while (i < len(lines)) {
+            parts = Split.split(lines[i], ':');
+            if (len(parts) >= 3) {
+                members = [];
+                names = Split.split(parts[2], ',');
+                j = 0;
+                while (j < len(names)) {
+                    if (names[j] != '') { push(members, names[j]); }
+                    j += 1;
+                }
+                push(out, [parts[0], unsignedNumber(parts[1]), members]);
+            } else if (len(parts) == 2) {
+                push(out, [parts[0], unsignedNumber(parts[1]), []]);
+            }
+            i += 1;
+        }
+        return out;
+    }
+
+    static def findGroup(name) {
+        all = Users.groups();
+        i = 0;
+        while (i < len(all)) {
+            if (all[i][0] == name) { return all[i]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    static def findGid(gid) {
+        all = Users.groups();
+        i = 0;
+        while (i < len(all)) {
+            if (all[i][1] == gid) { return all[i]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    // the name of group 'gid' ('#N' when it has none)
+    static def groupNameOf(gid) {
+        g = Users.findGid(gid);
+        return g == nil ? '#' + gid : g[0];
+    }
+
+    static def writeGroups(all) {
+        lines = [];
+        i = 0;
+        while (i < len(all)) {
+            push(lines, all[i][0] + ':' + all[i][1] + ':' + strJoin(all[i][2], ','));
+            i += 1;
+        }
+        Fs.write('etc/group', len(lines) == 0 ? '' : strJoin(lines, strChar(10)) + strChar(10));
+    }
+
+    // every group number a user is in, the primary one first
+    static def groupsOf(name) {
+        u = Users.find(name);
+        out = [];
+        if (u == nil) { return out; }
+        push(out, u[2]);
+        all = Users.groups();
+        i = 0;
+        while (i < len(all)) {
+            if (Arr.contains(all[i][2], name) && !Arr.contains(out, all[i][1])) { push(out, all[i][1]); }
+            i += 1;
+        }
+        return out;
+    }
+
+    static def hashOf(salt, password) {
+        h = Sha256.hex(salt + password);
+        i = 1;
+        while (i < Users.rounds) {
+            h = Sha256.hex(h);
+            i += 1;
+        }
+        return h;
+    }
+
+    // true when 'password' is right for 'name'. An empty hash means no password (anything fits); '*' or no line
+    // at all means locked (nothing does).
+    static def verify(name, password) {
+        entries = Users.shadow();
+        i = 0;
+        while (i < len(entries)) {
+            if (entries[i][0] == name) {
+                if (entries[i][2] == '') { return true; }
+                if (entries[i][2] == '*') { return false; }      // locked: no password fits
+                return Users.hashOf(entries[i][1], password) == entries[i][2];
+            }
+            i += 1;
+        }
+        return false;                                            // no entry: locked too
+    }
+
+    // does the shell ask who is there? Only when root has a password
+    static def hasPasswordForLogin() {
+        return Users.hasPassword('root');
+    }
+
+    static def hasPassword(name) {
+        entries = Users.shadow();
+        i = 0;
+        while (i < len(entries)) {
+            if (entries[i][0] == name) { return entries[i][2] != ''; }
+            i += 1;
+        }
+        return false;
+    }
+
+    static def writeShadow(entries) {
+        lines = [];
+        i = 0;
+        while (i < len(entries)) {
+            push(lines, entries[i][0] + ':' + entries[i][1] + ':' + entries[i][2]);
+            i += 1;
+        }
+        Fs.write('etc/shadow', len(lines) == 0 ? '' : strJoin(lines, strChar(10)) + strChar(10));
+        Fs.chmod('etc/shadow', 0x180);          // 0600
+    }
+
+    static def writePasswd(users) {
+        lines = [];
+        i = 0;
+        while (i < len(users)) {
+            push(lines, users[i][0] + ':' + users[i][1] + ':' + users[i][2] + ':' + users[i][3]);
+            i += 1;
+        }
+        Fs.write('etc/passwd', len(lines) == 0 ? '' : strJoin(lines, strChar(10)) + strChar(10));
+    }
+
+    // a salt no other user has: a hash of the name and the clock
+    static def newSalt(name) {
+        return strSub(Sha256.hex(name + ':' + ticks() + ':' + Users.counter), 0, 16);
+    }
+
+    // sets the password of 'name' ('' removes it)
+    static def setPassword(name, password) {
+        Users.counter += 1;
+        entries = Users.shadow();
+        salt = Users.newSalt(name);
+        hash = password == '' ? '' : Users.hashOf(salt, password);
+        found = false;
+        i = 0;
+        while (i < len(entries)) {
+            if (entries[i][0] == name) { entries[i] = [name, salt, hash]; found = true; }
+            i += 1;
+        }
+        if (!found) { push(entries, [name, salt, hash]); }
+        Users.writeShadow(entries);
+    }
+
+    static def removeShadow(name) {
+        kept = [];
+        entries = Users.shadow();
+        i = 0;
+        while (i < len(entries)) {
+            if (entries[i][0] != name) { push(kept, entries[i]); }
+            i += 1;
+        }
+        Users.writeShadow(kept);
+    }
+
+    static def validName(name) {
+        if (len(name) == 0 || len(name) > 32) { return false; }
+        i = 0;
+        while (i < len(name)) {
+            c = strSub(name, i, i + 1);
+            if (strFind('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-', c, 0) < 0) { return false; }
+            i += 1;
+        }
+        return true;
+    }
+}
+Users.rounds = 200;
+Users.counter = 0;

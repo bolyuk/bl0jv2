@@ -1,0 +1,28 @@
+// aeon-os program: files whose name contains a text; find <text> [folder]
+// Looks in the folder and everything below it (the current folder when none is given).
+// Loaded from the virtual disk by the shell (bin/find.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) < 2 || len(words) > 3) { sayErr('usage: find <text> [folder]'); return nil; }
+    dir = progCwd();
+    if (len(words) == 3) { dir = inCwd(words[2]); }
+    if (!Dirs.isDir(dir)) { sayErr(words[2] + ': no such folder'); return nil; }
+    prefix = FsPath.prefix(dir);
+    all = Fs.list(prefix);
+    found = 0;
+    i = 0;
+    while (i < len(all)) {
+        name = all[i][0];
+        base = strSub(name, len(prefix), len(name));
+        if (base != '' && strFind(base, words[1], 0) >= 0) {
+            say('/' + name);
+            found += 1;
+        }
+        i += 1;
+    }
+    if (found == 0) { sayErr('(nothing found)'); }
+}
+
+programMain(main);

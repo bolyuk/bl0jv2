@@ -50,7 +50,9 @@ public final class DiskImport {
             if (Files.isDirectory(spec.host())) {
                 String prefix = spec.name() != null ? spec.name() : spec.host().getFileName().toString();
                 try (var walk = Files.walk(spec.host())) {
-                    for (Path file : (Iterable<Path>) walk.filter(Files::isRegularFile).sorted()::iterator) {
+                    for (Path file : (Iterable<Path>) walk.filter(Files::isRegularFile)
+                            // a compiled copy 'x.bl0.bl0c' lying next to its source 'x.bl0' is not a file of its own
+                            .filter(f -> !f.getFileName().toString().endsWith(".bl0.bl0c")).sorted()::iterator) {
                         String relative = spec.host().relativize(file).toString().replace('\\', '/');
                         items.add(new Item(file, prefix + "/" + (relative.endsWith(".bl0") ? relative + "c" : relative)));
                     }

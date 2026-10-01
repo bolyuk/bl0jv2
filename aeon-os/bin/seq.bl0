@@ -1,0 +1,19 @@
+// aeon-os program: print numbers; seq <last> | seq <first> <last>
+// Loaded from the virtual disk by the shell (bin/seq.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    first = 1;
+    last = nil;
+    if (len(words) == 2) { last = portNumber(words[1]); }
+    if (len(words) == 3) { first = portNumber(words[1]); last = portNumber(words[2]); }
+    if (last == nil || first == nil || len(words) < 2 || len(words) > 3) { sayErr('usage: seq <last> | seq <first> <last>'); return nil; }
+    n = first;
+    while (n <= last) {
+        say('' + n);
+        n += 1;
+    }
+}
+
+programMain(main);

@@ -1,0 +1,29 @@
+// aeon-os program: remove a group; groupdel <name>
+// A group that is some user's primary group cannot be removed. Files that belonged to it keep the number.
+// Only root. Loaded from the virtual disk by the shell (bin/groupdel.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/users.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: groupdel <name>'); return nil; }
+    g = Users.findGroup(words[1]);
+    if (g == nil) { sayErr(words[1] + ': no such group'); return nil; }
+    users = Users.all();
+    i = 0;
+    while (i < len(users)) {
+        if (users[i][2] == g[1]) { sayErr('groupdel: ' + words[1] + ' is the primary group of ' + users[i][0]); return nil; }
+        i += 1;
+    }
+    kept = [];
+    all = Users.groups();
+    i = 0;
+    while (i < len(all)) {
+        if (all[i][0] != g[0]) { push(kept, all[i]); }
+        i += 1;
+    }
+    Users.writeGroups(kept);
+    say('removed group ' + g[0]);
+}
+
+programMain(main);

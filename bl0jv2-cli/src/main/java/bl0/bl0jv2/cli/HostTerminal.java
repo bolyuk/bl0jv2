@@ -98,7 +98,11 @@ final class HostTerminal implements AutoCloseable {
     private static HostTerminal enterWindows() {
         String printed = powershell(WINDOWS_ENTER);
         int[] v = parseWindowsState(printed);
-        if (v == null) return new HostTerminal(null);
+        if (v == null) {
+            System.err.println("warning: could not switch the console to raw mode (is PowerShell available?); "
+                    + "typing will be echoed twice and lines will arrive whole");
+            return new HostTerminal(null);
+        }
         if (v[4] > 0 && v[5] > 0) windowsSize = new int[]{v[4], v[5]};
         HostTerminal t = new HostTerminal("win:" + v[0] + " " + v[1] + " " + v[2] + " " + v[3]);
         Runtime.getRuntime().addShutdownHook(new Thread(t::close));

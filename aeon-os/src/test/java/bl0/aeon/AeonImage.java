@@ -36,6 +36,7 @@ final class AeonImage {
             try (var disk = new FileDisk(file, SECTORS)) {
                 DiskImport.put(disk, List.of(
                         DiskImport.Spec.parse(os.resolve("bin") + ":bin"),
+                        DiskImport.Spec.parse(os.resolve("etc") + ":etc"),
                         DiskImport.Spec.parse(os.resolve("shell.bl0") + ":sbin/shell.bl0c"),
                         DiskImport.Spec.parse(os.resolve("child_hello.bl0") + ":sbin/child_hello.bl0c"),
                         DiskImport.Spec.parse(os.resolve("child_crash.bl0") + ":sbin/child_crash.bl0c")),

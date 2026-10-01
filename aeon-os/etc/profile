@@ -1,0 +1,7 @@
+# aeon-os: run by the shell before the first prompt (one command per line, # for comments)
+# Programs are looked for in the folders of PATH, separated by ':'
+PATH=bin
+alias ll='ls'
+alias h='history'
+alias halt='shutdown'
+alias poweroff='shutdown'

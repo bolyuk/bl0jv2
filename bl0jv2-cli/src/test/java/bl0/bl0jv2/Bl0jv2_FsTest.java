@@ -189,4 +189,111 @@ class Bl0jv2_FsTest {
                 "s.feed(0xF0) + s.feed(0x9F) + s.feed(0x98) + s.feed(0x80) + '|' + " +
                 "s.feed(0xE2) + s.feed(98) + '|' + s.feed(0xFF);"));
     }
+
+    @Test
+    void aNewFileBelongsToWhoMadeItWithTheUmaskApplied(@TempDir Path dir) throws IOException {
+        // [owner, group, mode, size, kind]; 420 = 0644, 493 = 0755
+        assertEquals("1000,100,420,2,0|1000,100,493,0,1|0,0,493,0,1", run(dir, 64,
+                "Fs.format(); Fs.runAs(1000, 100, 1, 'a.txt', 'hi'); Fs.runAs(1000, 100, 1, 'd/', ''); Fs.write('d/x', 'y'); " +
+                "s1 = Fs.stat('a.txt'); s2 = Fs.stat('d'); s3 = Fs.stat('');" +
+                "print str(s1[0]) + ',' + str(s1[1]) + ',' + str(s1[2]) + ',' + str(s1[3]) + ',' + str(s1[4]) + '|' + " +
+                "str(s2[0]) + ',' + str(s2[1]) + ',' + str(s2[2]) + ',' + str(s2[3]) + ',' + str(s2[4]) + '|' + " +
+                "str(s3[0]) + ',' + str(s3[1]) + ',' + str(s3[2]) + ',' + str(s3[3]) + ',' + str(s3[4]);"));
+    }
+
+    @Test
+    void chmodAndChownChangeTheEntryAndSurviveRewritesAndRenames(@TempDir Path dir) throws IOException {
+        assertEquals("384|7|8|8|true|false|nil", run(dir, 64,
+                "Fs.format(); Fs.write('a', 'one'); Fs.chmod('a', 384); Fs.chown('a', 7, 8); " +
+                "s = Fs.stat('a'); print str(s[2]) + '|' + str(s[0]) + '|' + str(s[1]); " +
+                "Fs.write('a', 'longer text'); Fs.append('a', '!'); Fs.rename('a', 'b'); " +
+                "t = Fs.stat('b'); print '|' + str(t[1]) + '|' + str(Fs.chmod('b', 0)) + '|' + str(Fs.chmod('nosuch', 1)) + '|' + str(Fs.stat('a'));"));
+    }
+
+    @Test
+    void aFolderWithoutAMarkerCanStillBeGivenAnOwner(@TempDir Path dir) throws IOException {
+        assertEquals("493,0|448,5|true", run(dir, 64,
+                "Fs.format(); Fs.write('docs/a.txt', 'x'); s = Fs.stat('docs'); print str(s[2]) + ',' + str(s[0]); " +
+                "Fs.chown('docs', 5, 5); Fs.chmod('docs', 448); t = Fs.stat('docs'); print '|' + str(t[2]) + ',' + str(t[0]) + '|' + str(Fs.exists('docs/a.txt'));"));
+    }
+
+    @Test
+    void anEntryFromBeforeModesExistedCountsAsRootOwned(@TempDir Path dir) throws IOException {
+        // entries written by the old code have zeros where the owner and mode now live: 0644 file, 0755 folder
+        assertEquals("420,0|493,0", run(dir, 64,
+                "Fs.format(); Fs.write('old', 'x'); Fs.write('d/', ''); " +
+                "e = Fs.lookup(Fs.encodeName('old')); m = Fs.entryMeta(e); Fs.writeMeta(e, [0, 0, 0]); " +
+                "f = Fs.lookup(Fs.encodeName('d/')); Fs.writeMeta(f, [0, 0, 0]); " +
+                "a = Fs.stat('old'); b = Fs.stat('d'); print str(a[2]) + ',' + str(a[0]) + '|' + str(b[2]) + ',' + str(b[0]);"));
+    }
+
+    @Test
+    void theStickyBitIsPartOfTheMode(@TempDir Path dir) throws IOException {
+        // 1777 = 0x3FF; a mask of 0777 would lose it; the umask only takes rwx bits away
+        assertEquals("1023|493|1023", run(dir, 64,
+                "Fs.format(); Fs.write('t/', ''); Fs.chmod('t', 1023); print str(Fs.stat('t')[2]) + '|'; " +
+                "Fs.write('d/', ''); print str(Fs.stat('d')[2]) + '|'; Fs.chmod('d', 0x3FF + 0x400); print str(Fs.stat('d')[2]);"));
+    }
+
+    private static String twoDisks(Path dir, MemoryDisk first, MemoryDisk second, String body) throws IOException {
+        Path entry = dir.resolve("entry.bl0");
+        Files.writeString(entry, "import 'stdlib/fs/fs.bl0'; Disk.init(8192); " + body);
+        return Bl0jv2_TestRunner.runFile(entry, vm -> { vm.attach_disk(first); vm.attach_disk(second); });
+    }
+
+    @Test
+    void aSecondDriveIsMountedAsAFolder(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        assertEquals("on usb|6|true|mnt/usb/,mnt/usb/a.txt|root only|false", twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.formatUnit(1); Fs.write('mnt/usb/', ''); Fs.mountDrive(1, 'mnt/usb'); " +
+                "Fs.write('mnt/usb/a.txt', 'on usb'); Fs.write('b.txt', 'root only'); " +
+                "print Fs.read('mnt/usb/a.txt') + '|' + str(Fs.size('mnt/usb/a.txt')) + '|' + str(Fs.exists('mnt/usb/a.txt')) + '|'; " +
+                "names = []; e = Fs.list('mnt/usb/'); i = 0; while (i < len(e)) { push(names, e[i][0]); i += 1; } " +
+                "print strJoin(names, ',') + '|' + Fs.read('b.txt') + '|' + str(Fs.exists('a.txt'));"));
+    }
+
+    @Test
+    void whatWasWrittenToTheDriveStaysOnItAndComesBackWhenItIsMountedAgain(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        assertEquals("false|true|usb data", twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.formatUnit(1); Fs.write('m/', ''); Fs.mountDrive(1, 'm'); Fs.write('m/x', 'usb data'); " +
+                "Fs.unmountDrive('m'); print str(Fs.exists('m/x')) + '|'; " +
+                "Fs.mountDrive(1, 'm'); print str(Fs.exists('m/x')) + '|' + Fs.read('m/x');"));
+    }
+
+    @Test
+    void theRootListingShowsTheDriveAndEachDriveHasItsOwnSpace(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        // total sectors of the second drive, and the root's listing holding the mounted file too
+        assertEquals("48|64|true|2", twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.formatUnit(1); Fs.write('m/', ''); Fs.mountDrive(1, 'm'); Fs.write('m/x', 'data'); " +
+                "print str(Fs.infoOf('m/x')[0]) + '|' + str(Fs.info()[0]) + '|'; " +
+                "all = Fs.list(''); found = false; i = 0; while (i < len(all)) { if (all[i][0] == 'm/x') { found = true; } i += 1; } " +
+                "print str(found) + '|' + str(len(Fs.mountList()) + len(Fs.driveList()) - 1);"));
+    }
+
+    @Test
+    void filesMoveBetweenDrivesWithRename(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        assertEquals("moved|false|true|back|true", twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.formatUnit(1); Fs.write('m/', ''); Fs.mountDrive(1, 'm'); Fs.write('f', 'moved'); " +
+                "Fs.rename('f', 'm/f'); print Fs.read('m/f') + '|' + str(Fs.exists('f')) + '|'; " +
+                "Fs.write('m/g', 'back'); Fs.rename('m/g', 'g'); print str(Fs.exists('m/f')) + '|' + Fs.read('g') + '|' + str(Fs.exists('g'));"));
+    }
+
+    @Test
+    void mountMistakesAreErrors(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        String out = twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.write('m/', ''); Fs.write('file', 'x'); " +
+                "def tryIt(f) { try { f(); return 'ok'; } catch (e) { return str(e); } } " +
+                "print tryIt(() -> Fs.mountDrive(1, 'm')) + '|';" +                      // drive 1 has no file system yet
+                "Fs.formatUnit(1); " +
+                "print tryIt(() -> Fs.mountDrive(1, 'file')) + '|' + tryIt(() -> Fs.mountDrive(1, 'nosuch')) + '|' + tryIt(() -> Fs.mountDrive(0, 'm')) + '|' + " +
+                "tryIt(() -> Fs.mountDrive(5, 'm')) + '|'; " +
+                "Fs.mountDrive(1, 'm'); " +
+                "print tryIt(() -> Fs.mountDrive(1, 'm')) + '|' + tryIt(() -> Fs.formatUnit(1)) + '|' + tryIt(() -> Fs.rename('m', 'z')) + '|' + tryIt(() -> Fs.unmountDrive('nope'));");
+        for (String part : new String[]{"holds no file system", "no such folder", "no drive 0", "no drive 5", "already mounted", "in use", "is a mount point", "not a mount point"})
+            org.junit.jupiter.api.Assertions.assertTrue(out.contains(part), part + " in: " + out);
+    }
 }

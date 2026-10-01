@@ -63,4 +63,22 @@ class CmdlineTest {
         assertEquals("ERR syntax error: only the first command can read from a file", parse("ls | wc < x"));
         assertEquals("ERR syntax error: a redirected output cannot be piped on", parse("ls > x | wc"));
     }
+
+    private static String expand(String line) throws Exception {
+        String escaped = line.replace("\\", "\\\\").replace("'", "\\'");
+        return AeonSession.runSnippet("import 'lib/cmdline.bl0'; " +
+                "try { print Cmdline.expand('" + escaped + "', (n) -> n == 'a' ? 'one' : (n == 'b' ? 'two words' : nil)); } " +
+                "catch (e) { print 'ERR ' + str(e); }");
+    }
+
+    @Test
+    void variablesAreExpandedExceptInSingleQuotesAndAfterABackslash() throws Exception {
+        assertEquals("echo one two words", expand("echo $a ${b}"));
+        assertEquals("x-one-y", expand("x-${a}-y"));
+        assertEquals("echo \"one\"", expand("echo \"$a\""));              // double quotes expand
+        assertEquals("echo '$a'", expand("echo '$a'"));                  // single quotes do not
+        assertEquals("echo \\$a", expand("echo \\$a"));                  // a backslash keeps it literal
+        assertEquals("echo  and $", expand("echo $nosuch and $"));       // unknown is empty; a lone $ stays
+        assertEquals("ERR syntax error: unterminated ${", expand("echo ${a"));
+    }
 }

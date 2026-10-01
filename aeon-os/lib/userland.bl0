@@ -15,6 +15,7 @@
 
 import '../kernel.bl0';
 import 'pipe.bl0';
+import 'term.bl0';
 import '../../stdlib/fs/dirs.bl0';
 import '../../stdlib/str/split.bl0';
 import '../../stdlib/str/fmt.bl0';
@@ -40,6 +41,10 @@ def class Ctx {
     field size;
     field pid;
     field background;     // no terminal: reading standard input gives nothing
+    field uid;            // who the job runs for (see lib/perm.bl0); the kernel sets these
+    field gid;            // the primary group
+    field groups;         // every group (numbers), the primary first
+    field stack;          // the identities su has switched away from, newest last
 
     def init() {
         this.words = [];
@@ -52,6 +57,10 @@ def class Ctx {
         this.size = 0;
         this.pid = 0;
         this.background = false;
+        this.uid = 0;
+        this.gid = 0;
+        this.groups = [0];
+        this.stack = [];
     }
 
     // the context of the core running this code
@@ -96,7 +105,8 @@ def class Ctx {
         try {
             this.flush();
         } catch (e) {
-            // the file could not be written: the job is over anyway
+            // the file could not be written (no permission, no space): say so, the job is over anyway
+            sayErr(str(e));
         }
         if (this.pipeOut != nil) { this.pipeOut.closeWrite(); }
         if (this.pipeIn != nil) { this.pipeIn.closeRead(); }
@@ -118,6 +128,20 @@ def tokens(text) {
 // everything from word 'from' on, joined with single spaces
 def restOf(words, from) {
     return Arr.join(Arr.slice(words, from, len(words)), ' ');
+}
+
+// a non-negative whole number written in decimal (up to nine digits), or nil
+def unsignedNumber(text) {
+    n = 0;
+    i = 0;
+    if (len(text) == 0 || len(text) > 9) { return nil; }
+    while (i < len(text)) {
+        c = int(text[i]);
+        if (c < 48 || c > 57) { return nil; }
+        n = n * 10 + (c - 48);
+        i += 1;
+    }
+    return n;
 }
 
 def portNumber(text) {
@@ -181,7 +205,25 @@ def say(text) {
     sayRaw(text + '\n');
 }
 
+// is the output going to the terminal (so colours are for a person), not into a pipe or a file
+def toTerminal() {
+    c = Ctx.me();
+    return c.pipeOut == nil && c.outPath == '';
+}
+
+// 'text' in colour n (see Term.colour) - plain when the output is a pipe or a file, so data stays data
+def paint(n, text) {
+    if (!toTerminal()) { return text; }
+    return Term.paint(n, text);
+}
+
+def paintBold(n, text) {
+    if (!toTerminal()) { return text; }
+    return Term.paintBold(n, text);
+}
+
 def sayErr(text) {
+    text = Term.paint(1, text);
     if (Ctx.me().background) {
         consoleAsync(text + '\n');
     } else {
@@ -199,6 +241,70 @@ def destination(from, to) {
     target = inCwd(to);
     if (Dirs.isDir(target)) { target = FsPath.prefix(target) + FsPath.base(from); }
     return target;
+}
+
+// everything below a folder, however deep: array of [name, size] - names in full, a folder's own marker
+// ('docs/') included. 'dir' is a stored name ('' = the root).
+def allUnder(dir) {
+    return Fs.list(FsPath.prefix(dir));
+}
+
+// makes a folder (and the ones above it) unless it exists
+def ensureDir(path) {
+    if (path == '' || Dirs.isDir(path)) { return nil; }
+    ensureDir(FsPath.parent(path));
+    Dirs.mkdir(path);
+}
+
+// true when 'path' (a stored name) is the folder a drive is mounted on
+def isMountPoint(path) {
+    mounts = Fs.mountList();
+    i = 0;
+    while (i < len(mounts)) {
+        if (mounts[i][0] == path) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// removes a file, or a folder with everything in it; false when there is nothing of that name
+def removeTree(path) {
+    if (Fs.exists(path)) { return Fs.remove(path); }
+    if (!Dirs.isDir(path)) { return false; }
+    entries = allUnder(path);
+    i = 0;
+    while (i < len(entries)) {
+        Fs.remove(entries[i][0]);
+        i += 1;
+    }
+    return true;
+}
+
+// copies a folder's contents to 'to' (a stored name that does not exist yet as a file); returns how many
+// files were copied
+def copyTree(from, to) {
+    entries = allUnder(from);
+    prefix = FsPath.prefix(from);
+    target = FsPath.prefix(to);
+    copied = 0;
+    ensureDir(to);
+    i = 0;
+    while (i < len(entries)) {
+        name = entries[i][0];
+        rest = strSub(name, len(prefix), len(name));
+        if (rest == '') {
+            // the marker of 'from' itself
+        } else if (strSub(rest, len(rest) - 1, len(rest)) == '/') {
+            ensureDir(strSub(target + rest, 0, len(target + rest) - 1));
+        } else {
+            data = Fs.readData(name);
+            Fs.writeData(target + rest, data);
+            free(data);
+            copied += 1;
+        }
+        i += 1;
+    }
+    return copied;
 }
 
 // call first thing in a program; false (after saying why) when there is no filesystem to use.

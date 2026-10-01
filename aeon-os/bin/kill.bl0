@@ -8,6 +8,11 @@ def main(words) {
     if (len(words) != 2) { sayErr('usage: kill <pid>'); return nil; }
     pid = portNumber(words[1]);
     if (pid == nil) { sayErr(words[1] + ': not a process number'); return nil; }
+    p = Proc.find(pid);
+    if (p != nil && p.state == 'running' && Ctx.me().uid != 0 && p.uid != Ctx.me().uid) {
+        sayErr(words[1] + ': permission denied (it is not yours)');
+        return nil;
+    }
     if (!Proc.kill(pid)) { sayErr(words[1] + ': no such running process'); }
 }
 

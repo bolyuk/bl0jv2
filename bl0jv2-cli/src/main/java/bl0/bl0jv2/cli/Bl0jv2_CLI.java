@@ -56,10 +56,12 @@ public class Bl0jv2_CLI {
     // than just answering whoever already knows to connect to a chosen
     // local port, worth requiring explicitly.
     private boolean bridgeOutbound = false;
+    private boolean shake = true;
     // -I: extra directories an import is looked up in when it is not found next to the importing file
     private final java.util.List<Path> includeDirs = new java.util.ArrayList<>();
     // --disk: a host file presented to the program as a block device (see DiskController)
-    private Path diskImage = null;
+    private final java.util.List<Path> diskImages = new java.util.ArrayList<>();      // drive 0, 1, ...
+    private final java.util.List<Integer> diskSizes = new java.util.ArrayList<>();
     // --bridge-fs: one host folder shown to the program (see DirShare)
     private Path bridgeFsDir = null;
     // --uart-baud: how fast the serial port sends (0 = instantly)
@@ -126,6 +128,7 @@ public class Bl0jv2_CLI {
                     }
                 }
                 case "--bridge-outbound" -> bridgeOutbound = true;
+                case "--no-shake" -> shake = false;
                 case "-I", "--include" -> {
                     if (i + 1 >= args.length) {
                         System.err.println("--include requires a directory");
@@ -166,7 +169,8 @@ public class Bl0jv2_CLI {
                         System.err.println("--disk requires an image file");
                         System.exit(1);
                     }
-                    diskImage = Path.of(args[++i]);
+                    diskImages.add(Path.of(args[++i]));
+                    diskSizes.add(diskSectors);
                 }
                 case "--disk-put" -> {
                     if (i + 1 >= args.length) {
@@ -181,8 +185,10 @@ public class Bl0jv2_CLI {
                         System.exit(1);
                     }
                     try {
-                        diskSectors = Integer.parseInt(args[++i]);
-                        if (diskSectors < 16) throw new NumberFormatException();
+                        int n = Integer.parseInt(args[++i]);
+                        if (n < 16) throw new NumberFormatException();
+                        // the size of the drive just named, or of the ones named after when none was yet
+                        if (diskImages.isEmpty()) diskSectors = n; else diskSizes.set(diskSizes.size() - 1, n);
                     } catch (NumberFormatException e) {
                         System.err.println("--disk-sectors must be an integer of at least 16: " + args[i]);
                         System.exit(1);
@@ -244,10 +250,15 @@ public class Bl0jv2_CLI {
         System.out.println("                  names, and stdlib/net/dns.bl0's Dns.resolve() answers for");
         System.out.println("                  real too. The reverse of -b/--bridge-tcp above (a real");
         System.out.println("                  peer reaching IN); only meaningful together with -e");
+        System.out.println("      --no-shake  keep every imported function and class; by default what");
+        System.out.println("                  nothing uses is left out (an imported file with @library in a");
+        System.out.println("                  comment among its first lines is never thinned)");
         System.out.println("  -I, --include DIR  look an import up in DIR when it is not found next to");
         System.out.println("                  the file that names it (repeatable)");
         System.out.println("      --disk FILE  present FILE to the program as a block device (512-byte");
-        System.out.println("                  sectors, ports 0x0F00-0x0F0D); created when missing");
+        System.out.println("                  sectors, ports 0x0F00-0x0F0F); created when missing. Repeat it");
+        System.out.println("                  for more drives (0, 1, ...): --disk-put fills the first, and");
+        System.out.println("                  aeon-os mounts the others as folders with 'mount'");
         System.out.println("      --disk-put HOSTFILE[:NAME]  copy a host file onto the --disk image first");
         System.out.println("                  (formats a blank image); a .bl0 file is compiled and stored as");
         System.out.println("                  .bl0c, ready for the shell's exec (repeatable)");
@@ -388,7 +399,7 @@ public class Bl0jv2_CLI {
 
         if (compile) {
             if (dest == null)
-                dest = source.getParent().resolve(source.getFileName() + ".bl0c");
+                dest = source.resolveSibling(source.getFileName() + ".bl0c");
 
             var lexer = new Bl0jv2_Lexer();
             var parser = new Bl0jv2_Parser();
@@ -407,7 +418,7 @@ public class Bl0jv2_CLI {
 
             if (!(ast instanceof PROGRAM_N program))
                 throw new IllegalStateException("parser did not produce a program");
-            var linked = Bl0jv2_Linker.resolveImports(program, source, includeDirs);
+            var linked = Bl0jv2_Linker.resolveImports(program, source, includeDirs, java.util.Set.of(), shake);
 
             bytes = compiler.compile(linked);
             timer.mark("compiler");
@@ -448,18 +459,19 @@ public class Bl0jv2_CLI {
                         return 1;
                     }
                 }
-                if (diskImage == null && !diskPuts.isEmpty()) {
+                if (diskImages.isEmpty() && !diskPuts.isEmpty()) {
                     System.err.println("--disk-put needs --disk <image>");
                     return 1;
                 }
-                if (diskImage != null) {
+                for (int d = 0; d < diskImages.size(); d++) {
                     try {
-                        var disk = new FileDisk(diskImage, diskSectors);
+                        var disk = new FileDisk(diskImages.get(d), diskSizes.get(d));
+                        // what --disk-put and --shared put on a disk goes on the first one
                         SharedLibs shared = sharedManifest == null ? null : SharedLibs.read(sharedManifest);
-                        if (!diskPuts.isEmpty() || shared != null) DiskImport.put(disk, diskPuts, includeDirs, shared);
+                        if (d == 0 && (!diskPuts.isEmpty() || shared != null)) DiskImport.put(disk, diskPuts, includeDirs, shared);
                         vm.attach_disk(disk);
                     } catch (IOException e) {
-                        System.err.println("--disk " + diskImage + ": " + e.getMessage());
+                        System.err.println("--disk " + diskImages.get(d) + ": " + e.getMessage());
                         return 1;
                     }
                 }

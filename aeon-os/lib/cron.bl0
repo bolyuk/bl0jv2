@@ -1,0 +1,144 @@
+// aeon-os: the cron table - which command runs when.
+//
+// A line is five time fields and a command:   minute hour day-of-month month day-of-week   command
+// (in etc/crontab a user name comes between the fields and the command). Each field is * (every value), a number,
+// a range a-b, a list a,b,c, or any of those with a step (*/5, 10-30/10). Minutes 0-59, hours 0-23, days of the
+// month 1-31, months 1-12, days of the week 0-7 (0 and 7 are Sunday). When both the day of the month and the day
+// of the week are restricted, a day matching either counts; otherwise both must match, as usual. Shortcuts
+// instead of the five fields: @reboot (once, when crond starts), @hourly, @daily (@midnight), @weekly,
+// @monthly, @yearly (@annually). Empty lines and lines starting with # are ignored.
+//
+//   Cron.parse(text, withUser)    -> [entries, errors]; an entry is [fields, user, command, reboot]
+//   Cron.matches(entry, t)        t = Clock.now()
+
+import '../../stdlib/str/split.bl0';
+import 'userland.bl0';
+
+def class Cron {
+    // the values of one field as an array of booleans indexed by value, or nil when it does not parse
+    static def parseField(text, low, high) {
+        on = [];
+        i = 0;
+        while (i <= high) { push(on, false); i += 1; }
+        parts = Split.split(text, ',');
+        p = 0;
+        while (p < len(parts)) {
+            part = parts[p];
+            step = 1;
+            slash = strFind(part, '/', 0);
+            if (slash >= 0) {
+                step = unsignedNumber(strSub(part, slash + 1, len(part)));
+                if (step == nil || step < 1) { return nil; }
+                part = strSub(part, 0, slash);
+            }
+            first = low;
+            last = high;
+            if (part != '*') {
+                dash = strFind(part, '-', 0);
+                if (dash >= 0) {
+                    first = unsignedNumber(strSub(part, 0, dash));
+                    last = unsignedNumber(strSub(part, dash + 1, len(part)));
+                } else {
+                    first = unsignedNumber(part);
+                    last = slash >= 0 ? high : first;
+                }
+                if (first == nil || last == nil) { return nil; }
+            }
+            if (first < low || last > high || first > last) { return nil; }
+            v = first;
+            while (v <= last) {
+                on[v] = true;
+                v += step;
+            }
+            p += 1;
+        }
+        return on;
+    }
+
+    static def special(word) {
+        if (word == '@hourly') { return '0 * * * *'; }
+        if (word == '@daily' || word == '@midnight') { return '0 0 * * *'; }
+        if (word == '@weekly') { return '0 0 * * 0'; }
+        if (word == '@monthly') { return '0 0 1 * *'; }
+        if (word == '@yearly' || word == '@annually') { return '0 0 1 1 *'; }
+        return nil;
+    }
+
+    // one line: an entry, or an error text. 'user' is the owner when the line has no user field of its own.
+    static def line(text, withUser, user) {
+        words = tokens(text);
+        reboot = false;
+        times = nil;
+        rest = 0;
+        if (len(words) > 0 && words[0] == '@reboot') {
+            reboot = true;
+            rest = 1;
+        } else if (len(words) > 0 && strSub(words[0], 0, 1) == '@') {
+            expansion = Cron.special(words[0]);
+            if (expansion == nil) { return 'unknown ' + words[0]; }
+            times = tokens(expansion);
+            rest = 1;
+        } else {
+            if (len(words) < 6) { return 'five time fields and a command are needed'; }
+            times = Arr.slice(words, 0, 5);
+            rest = 5;
+        }
+        if (withUser) {
+            if (len(words) <= rest) { return 'a user name is needed'; }
+            user = words[rest];
+            rest += 1;
+        }
+        if (len(words) <= rest) { return 'there is no command'; }
+        command = restOf(words, rest);
+        fields = nil;
+        domStar = true;
+        dowStar = true;
+        if (!reboot) {
+            minute = Cron.parseField(times[0], 0, 59);
+            hour = Cron.parseField(times[1], 0, 23);
+            dom = Cron.parseField(times[2], 1, 31);
+            month = Cron.parseField(times[3], 1, 12);
+            dow = Cron.parseField(times[4], 0, 7);
+            if (minute == nil) { return 'bad minute field ' + times[0]; }
+            if (hour == nil) { return 'bad hour field ' + times[1]; }
+            if (dom == nil) { return 'bad day-of-month field ' + times[2]; }
+            if (month == nil) { return 'bad month field ' + times[3]; }
+            if (dow == nil) { return 'bad day-of-week field ' + times[4]; }
+            if (dow[7]) { dow[0] = true; }             // 7 is Sunday too
+            domStar = strSub(times[2], 0, 1) == '*';
+            dowStar = strSub(times[4], 0, 1) == '*';
+            fields = [minute, hour, dom, month, dow, domStar, dowStar];
+        }
+        return [fields, user, command, reboot];
+    }
+
+    // [entries, errors]; an error is 'line N: why'
+    static def parse(text, withUser, user) {
+        entries = [];
+        errors = [];
+        lines = Split.split(text, strChar(10));
+        n = 0;
+        while (n < len(lines)) {
+            trimmed = lines[n];
+            words = tokens(trimmed);
+            if (len(words) > 0 && strSub(words[0], 0, 1) != '#') {
+                result = Cron.line(trimmed, withUser, user);
+                if (isString(result)) { push(errors, 'line ' + (n + 1) + ': ' + result); }
+                else { push(entries, result); }
+            }
+            n += 1;
+        }
+        return [entries, errors];
+    }
+
+    // does the entry run at time t (t = [year, month, day, hour, minute, second, weekday])?
+    static def matches(entry, t) {
+        f = entry[0];
+        if (f == nil) { return false; }
+        if (!f[0][t[4]] || !f[1][t[3]] || !f[3][t[1]]) { return false; }
+        domOk = f[2][t[2]];
+        dowOk = f[4][t[6]];
+        if (!f[5] && !f[6]) { return domOk || dowOk; }
+        return domOk && dowOk;
+    }
+}

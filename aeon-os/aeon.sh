@@ -17,6 +17,7 @@ mkdir -p "${SHARE:-share}"
 exec java -jar "$JAR" -c -e -k -n "$CORES" --disk "$IMG" --disk-sectors 4096 \
   --shared aeon-os/libs.txt \
   --disk-put aeon-os/bin:bin \
+  --disk-put aeon-os/etc:etc \
   --disk-put aeon-os/shell.bl0:sbin/shell.bl0c \
   --disk-put aeon-os/child_hello.bl0:sbin/child_hello.bl0c \
   --disk-put aeon-os/child_crash.bl0:sbin/child_crash.bl0c \

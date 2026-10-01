@@ -91,8 +91,8 @@ def class Arr {
     }
 
     // removes index i by swapping with the last element and popping - the
-    // same pattern aeon-os/boot.bl0, aeon-os/smp_boot.bl0 and
-    // aeon-os/os-text.bl0 each hand-rolled their own copy of (Bl0jArray
+    // same pattern aeon-os/boot.bl0 and aeon-os/smp_boot.bl0
+    // each hand-rolled their own copy of (Bl0jArray
     // itself only exposes push/pop, no arbitrary-index removal - see its
     // own doc). O(1), but does NOT preserve order - fine for a run/ready
     // queue that gets rescanned by priority anyway, wrong for anything

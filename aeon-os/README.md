@@ -116,7 +116,9 @@ Terminal or a recent conhost. Ctrl-C reaches the guest as a key, so leave with
 Two paths lead to the same programs, which cannot tell them apart: the **serial line**
 (a UART; the default) and a **text-mode display** (`--display`). `lib/drivers.bl0` holds the
 drivers - the UART (initialised once; the receive interrupt drains the FIFO into the keyboard
-ring; transmit waits for room), and an **ANSI terminal emulator** that turns the text and escape
+ring; transmit goes through a ring in raw memory that the transmit-empty interrupt feeds into the
+chip 16 bytes at a time - a writer waits only when the ring is full, and `consoleFlush()` waits for
+the line to go idle before the shell exits), and an **ANSI terminal emulator** that turns the text and escape
 sequences programs write into cells in the display's frame buffer (text, wrapping with the
 xterm deferred wrap, scrolling by the display's command, cursor movement, erase, colours and
 attributes, cursor visibility, the alternate screen as a second frame buffer). Programs only
@@ -126,8 +128,8 @@ The console is a serial terminal, modelled as two devices (see the main README):
 guest writes UTF-8 bytes - with ANSI escape sequences for the cursor and the screen -
 to a port, and reads the bytes the terminal sends from a FIFO behind another. So the
 OS needs nothing from the host but a terminal: `-k` puts the host terminal in raw mode
-(Unix: via `stty`; elsewhere it stays in line mode and shows its own echo too) and
-passes size and keys through.
+(Unix: via `stty`; Windows: a PowerShell helper sets the console modes, see Running; if neither
+works it stays in line mode, warns, and shows its own echo too) and passes size and keys through.
 
 * **Line editor** (`lib/lineedit.bl0`): any Unicode, Backspace/Delete, arrows, Home/End,
   Ctrl-A/E/U/K/W, Ctrl-Left/Right and Alt-B/F by word, Ctrl-L, history (Up/Down, kept in
@@ -140,12 +142,106 @@ passes size and keys through.
   `head`, `tail`, `hexdump` are filters; with no file and no redirection they read the
   terminal until Ctrl-D) and report problems with `sayErr()`, which is always the
   terminal.
+* **Variables and scripts**: `name=value` sets a shell variable, `$name` / `${name}` use it (not inside
+  `'single quotes'`, nor after a backslash); `set` lists them, `unset name` removes one. Expansion happens
+  on the line before it is split, so a value is parsed like typed text. `sh file [args]` runs the lines of a
+  text file as commands (empty lines and `#` comments skipped); `$0`, `$1`... are the file's name and the
+  arguments while it runs.
+* **Users and permissions** (`lib/perm.bl0`, `lib/users.bl0`, the file-system gate in `stdlib/fs/fs.bl0`):
+  - Every file and folder has an owner, a group and nine permission bits (`ls -l`, `stat`; `chmod 644 f`, `chmod u+x f`,
+    `chown alice f` - only the owner may chmod, only root chown). The bits sit in the 8 spare bytes of the 64-byte
+    directory entry; entries from before count as root-owned 0644 files and 0755 folders. A new file belongs to whoever
+    makes it, with mode 0666/0777 less the umask 022.
+  - A program in user mode never touches the disk: `Fs.run` sends it through a system call, and the kernel checks
+    the caller's user against the file (`Perm.check`: read needs `r`, writing `w`, creating or removing needs `w` on the
+    folder, every folder above must be searchable, root may do anything) before doing it for them. The shell itself is
+    such a program. What it does not stop: the VM has no memory protection between programs, so one that overwrites the
+    kernel's own variables is not caught; on hardware those live where only the kernel can reach.
+  - `etc/passwd` (`name:uid:gid:home`) and `etc/shadow` (`name:salt:hash`, mode 0600, SHA-256 applied 200 times to
+    salt+password). `useradd name` (root) makes the user, a locked password and `home/name` (0700); `passwd [user]` sets one
+    (the old one is asked for unless you are root); `userdel`. `id`, `whoami`, `su [user]` (root needs no password, anybody
+    else does), and `exit` goes back to who you were before su.
+  - On a fresh disk the shell starts as root without asking. Once root has a password it asks `login:` and starts the
+    user in their home folder. The prompt shows the user's name when it is not root. History, `tmp/` for pipes and the
+    system log are per-user, world-writable and kernel-written respectively.
+* **Logs and shutdown** (`logs`, `shutdown`): every line of the system log (`var/log/aeon.log`, which becomes
+  `aeon.log.1` at 64 KiB) now starts with the date and time (UTC, from the real-time clock). `logs [-n N] [-a] [-f] [text]`
+  shows the last N lines (20), only those containing `text`; `-a` adds the rotated half, `-f` follows new lines until Ctrl-C;
+  failures are red. `shutdown` (aliases `halt`, `poweroff`; root only) stops the machine in order: every running service is
+  stopped, every other process is asked to stop (a few seconds' grace; what does not end is reported), the shell ends,
+  and the machine halts. Root leaving the shell with `exit` or Ctrl-D does the same; `exit` after `su` only goes back
+  to who you were. A shutdown that comes from cron or a background job ends a shell that is waiting at its prompt too.
+  Files need no flushing - every file operation is on the disk when it returns - and the last console bytes are sent
+  by the shell right before it ends.
+* **Start-up and services** (`etc/rc`, `service`): when the machine starts the shell runs `etc/rc` as root, a script like
+  `etc/profile`, before the login prompt. Its default line is `service boot`, which starts every service listed in
+  `etc/services.enabled`. A service is a definition `etc/services/<name>` (`description`, `command`, optionally `user`, default
+  root, and `log`, default `var/log/<name>.log`) and a process on a worker core, started like a cron job - no terminal, its
+  output appended to the log file, how it ended in the system log - with its number in `var/run/<name>.pid`. `service list`
+  shows them all; `service <name> start|stop|restart|status|enable|disable` manages one (enable = start at boot; the others
+  than `status` are root's). Nothing is enabled out of the box: a service takes a worker core, so `service crond enable`
+  is your choice. `stop` is a stop request, honoured at the program's next checkpoint, as for `kill`; a pid file left from
+  an earlier run is not a running service. `kill` now refuses a process that is not yours (root may).
+* **Cron** (`crond`, `crontab`, `date`; syntax in `lib/cron.bl0`): `crond &` is the scheduler - a process on a worker core that,
+  once a minute by the real-time clock (UTC, ports 0x0F70-0x0F77, read through `stdlib/time/clock.bl0`), starts the jobs whose
+  time has come. Lines are `minute hour day month weekday command` (stars, numbers, ranges, lists, steps; `@reboot`,
+  `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`), in `etc/crontab` with a user name before the command, and in each
+  user's own table, installed with `crontab file` (`-l` lists it, `-r` removes it; a table with a wrong line is refused whole)
+  and kept in `var/cron/<user>` (a sticky 1777 folder; crond only trusts a table owned by the user it is named for). A job
+  is a command line - pipes and redirections included, programs only, no built-ins (`echo` and `date` are programs too) - run
+  for its user, in their home, on a free worker core, with no terminal: what it prints is appended to `<home>/.cron.out`
+  unless the line redirects it, and how it ended goes to the log. Only a root crond runs other users' jobs. A job needs
+  free cores (a pipeline of three needs three), so start the machine with a high enough `-n`.
+* **Sticky bit and groups**: mode `1777` (or `chmod +t`) is the sticky bit: in such a folder - `tmp/` has it - only the
+  owner of a file, or of the folder, may remove or rename it, whatever the folder's `w` bits say (`ls -l` shows a `t` at the end
+  of the mode). `etc/group` (`name:gid:member,member`) lists the groups; a user's primary group is the gid in `etc/passwd`
+  (`useradd` makes one of the user's own name and number), and every other group that lists them counts too when files are
+  checked, from their next login or `su`. Root manages them: `groupadd name [gid]`, `groupdel name` (not a primary group),
+  `usermod -aG group user` (`-g` sets the primary one). `groups [user]` and `id` show them; `chgrp group path...` is for
+  the owner (to a group they are in) and root. A new file gets its maker's primary group.
+* **More than one drive** (`--disk` can be given several times): drive 0 is the root disk, the others are
+  mounted as folders. `mount` lists the drives; `mkfs <drive> yes` puts an empty file system on one (not drive 0 -
+  that is `format yes` - and not one that is mounted); `mount <drive> <folder>` makes the drive's files appear below
+  an existing folder (`mkdir mnt; mkdir mnt/usb; mount 1 mnt/usb`), `umount <folder>` takes it away again, the files
+  stay on the drive. Only root mounts. A line `1 mnt/usb` in `etc/fstab` does it at every start. `df` shows each
+  mounted drive. Paths cross drives freely: `cp`, `mv` (copy then delete), programs on a drive run, `tree`/`find`
+  look through it; the mount point itself cannot be moved or removed while mounted. The mechanism is in
+  `stdlib/fs/fs.bl0` (a record per volume, operations routed by the first name's mount point) on top of a disk driver
+  that selects the drive with a port.
+* **Aliases, PATH, history**:
+  - `alias name='text'` makes `name` stand for a simple command (`alias` lists them, `unalias name` removes one,
+    `which name` says what a word is). Only the first word of a command is replaced; an alias naming another
+    alias is followed, each once.
+  - Programs are looked for in the folders of the variable `PATH` (`bin` by default, folders separated by `:`,
+    `.` is the current folder). A name with a `/` is a path, with or without the `.bl0c`. Tab completes from all of
+    PATH and the aliases.
+  - `etc/profile` (put on the disk from `aeon-os/etc`) is run as a script before the first prompt: the place for
+    `PATH=...` and `alias ...`.
+  - `history` lists the remembered commands (the last 200, kept in `var/history`). `!!` repeats the last, `!N`
+    command N, `!-N` the Nth from the end, `!text` the latest starting with text; the expanded line is shown and
+    remembered. In the line editor **Ctrl-R** searches the history as you type (Ctrl-R again for older, Enter runs
+    the match, Esc puts the line back, any other key takes the match for editing).
+* **Folders as a whole**: `cp -r`, `mv` and `rm -r` work on a folder with everything in it (a folder is a name
+  prefix, so they act on every name below it); without `-r` they say it is a folder. `tree [folder]` shows the
+  folders and files below one with sizes. `cp`/`mv` refuse to put a folder into itself.
+* **`more [file]`** pages text a screenful at a time (Space/PgDn next screen, Enter/Down one line, `q`/Esc quit;
+  it just copies when its output is a pipe or a file). `diff old new` prints the lines that differ (`- N` old,
+  `+ N` new; common start and end skipped, the middle compared with an LCS table, refused when huge). `seq [first] last`
+  prints numbers.
+* **More filters and search**: `sort [-r] [-n]`, `uniq [-c]` (stable merge sort, neighbouring duplicates) read a
+  file or standard input like `grep`; `find <text> [folder]` lists files below a folder whose name contains the text.
+* **Colours**: the prompt, `ls` (folders, programs), `ps`, `df`, error messages and the banner use
+  ANSI colours (`Term.paint`, `lib/term.bl0`). A program's `paint()` colours only when its output goes to the
+  terminal - never into a pipe or a file. The line editor measures the prompt without its escape sequences.
+  `clear` clears the screen.
+* **`top`**: a live full-screen view (alternate screen, refreshed every second): uptime, what each core runs,
+  disk use and the process table. `q`, Esc or Ctrl-C leaves. The shell itself is process 1 in `ps`/`top`.
 * **`edit <file>`**: a full-screen editor on the alternate screen: arrows, PgUp/PgDn,
   Home/End, typing, Enter, Backspace/Delete, Ctrl-S save, Ctrl-X exit (twice to discard),
   Ctrl-K/Ctrl-Y cut and paste a line, Ctrl-F find. Works on `host/` paths too.
 
-Limits: one terminal cell per character (no double-width or combining marks), no job
-control, stages of a pipeline do not run concurrently.
+Limits: one terminal cell per character (no double-width or combining marks); there is no
+preemption (see Several programs at once), and a background job cannot read the terminal.
 
 ## Moving files in and out
 
