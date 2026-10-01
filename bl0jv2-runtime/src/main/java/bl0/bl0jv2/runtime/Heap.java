@@ -43,9 +43,20 @@ final class Heap {
     // bytes handed out since the last collection (entry count alone would
     // let a loop that builds ever-longer strings retain gigabytes first)
     private long bytesSinceCollect;
-    private long collectThresholdBytes = DEFAULT_THRESHOLD_BYTES;
+    private long minThresholdBytes = 64L << 20;
+    private long collectThresholdBytes = minThresholdBytes;
     private volatile boolean collectWanted;
-    private static final long DEFAULT_THRESHOLD_BYTES = 64L << 20;
+
+    /** how much allocation (estimated bytes) triggers a collection request; the floor of the adaptive threshold */
+    void setCollectThresholdBytes(long bytes) {
+        lock.lock();
+        try {
+            minThresholdBytes = bytes;
+            collectThresholdBytes = bytes;
+        } finally {
+            lock.unlock();
+        }
+    }
 
     void setMaxEntries(long maxEntries) {
         this.maxEntries = maxEntries;
@@ -166,9 +177,10 @@ final class Heap {
             }
             bytesSinceCollect = 0;
             collectWanted = false;
-            // next time: wait until about as much again as survived has been
-            // allocated, but never collect more often than every 64 MB
-            collectThresholdBytes = Math.max(DEFAULT_THRESHOLD_BYTES, (long) live * 64);
+            // next time: wait until a multiple of what survived (each live
+            // entry counted at ~64 bytes) has been allocated, but never
+            // collect more often than the configured minimum
+            collectThresholdBytes = Math.max(minThresholdBytes, (long) live * 64);
             return freed;
         } finally {
             lock.unlock();

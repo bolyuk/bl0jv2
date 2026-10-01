@@ -88,6 +88,10 @@ public final class Bl0jClass {
         staticFields[index] = value;
     }
 
+    public int staticFieldCount() {
+        return staticFields.length;
+    }
+
     public int fieldCount() {
         return fieldNames.length;
     }

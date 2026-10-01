@@ -828,6 +828,51 @@ public final class Bl0jv2_jVM {
 
     // takes effect on the next boxRef() call - no need to call this before
     // feed_compiled_file() the way set_max_raw_bytes() does
+    // ---- garbage collection ----
+    //
+    // Heap slots used to be reclaimed only by an explicit free(), so a plain
+    // loop building strings ('s = s + x') kept every intermediate string
+    // forever - quadratic memory for a linear job. The VM now also collects
+    // on its own: mark-and-sweep from the constant pool, the call stack's
+    // registers and the registered interrupt handlers (see Collector).
+    //
+    // It runs ONLY here, at an instruction boundary of the program's own
+    // top-level run, and ONLY on a single-core machine. Both limits are what
+    // make it exact: at that point every live value sits in a register, the
+    // heap or the constant pool - no native method is half-way through
+    // holding a reference in a Java local - and no other core can be using a
+    // value the collector doesn't see. With more than one core (or while a
+    // nested handler/toString runs) it simply doesn't run: explicit free()
+    // and set_max_heap_entries() remain the tools there.
+    private volatile boolean gcEnabled = true;
+    private long collections;
+
+    private void collectGarbage(CoreContext ctx) {
+        Collector collector = new Collector(heap);
+        collector.markValues(consts);
+        for (Frame frame : ctx.callStack)
+            collector.markValues(frame.regs());
+        interrupts.forEachHandlerFn(collector::markObject);
+        collector.drain();
+        collector.sweep();
+        collections++;
+    }
+
+    /** turns automatic collection off/on (default on); explicit free() is unaffected */
+    public void set_gc_enabled(boolean enabled) {
+        this.gcEnabled = enabled;
+    }
+
+    /** how much allocation (estimated bytes) makes the VM collect; default 64 MB */
+    public void set_gc_threshold_bytes(long bytes) {
+        heap.setCollectThresholdBytes(bytes);
+    }
+
+    /** number of automatic collections performed so far */
+    public long gc_collections() {
+        return collections;
+    }
+
     public void set_max_heap_entries(long maxHeapEntries){
         heap.setMaxEntries(maxHeapEntries);
     }
@@ -1117,6 +1162,8 @@ public final class Bl0jv2_jVM {
                     // exactly) - only the actual delivery attempt is
                     // skipped while this core is masked, so a pending
                     // interrupt stays queued rather than being dropped
+                    if (heap.collectWanted() && gcEnabled && coreCount == 1)
+                        collectGarbage(ctx);
                     if (ctx.disableDepth == 0) {
                         InterruptController.Fired fired = interrupts.pollNext(ctx.coreId);
                         if (fired != null)

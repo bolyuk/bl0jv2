@@ -107,6 +107,12 @@ public final class InterruptController {
         wakeWaiters();
     }
 
+    /** every registered handler function (a FunDef or a Bl0jClosure) - the collector's roots */
+    public void forEachHandlerFn(java.util.function.Consumer<Object> action) {
+        for (HandlerEntry entry : handlers.values())
+            action.accept(entry.fn());
+    }
+
     // synchronous lookup for syscall(): the same vector table raiseInterrupt/
     // pollNext use for async hardware IRQs, just read without touching the
     // pending queue at all - a syscall is delivered immediately, not queued
