@@ -53,6 +53,8 @@ public final class ArithmeticOperators {
         add.add(nilObject.getClass(), String.class,  (a, b) -> concat(a, b));
         add.add(String.class,  Character.class, (a, b) -> concat(a, b));
         add.add(Character.class, String.class,  (a, b) -> concat(a, b));
+        // two characters concatenate into a two-character string ('a' + 'b' is "ab")
+        add.add(Character.class, Character.class, (a, b) -> concat(a, b));
         // integer arithmetic stays integer (10/3 truncates); any operand
         // that is already a double promotes the whole operation to double
         add.add(Double.class,  Double.class,  (a, b) -> toDouble(a) + toDouble(b));

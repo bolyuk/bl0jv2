@@ -430,6 +430,12 @@ public final class Bl0jv2_jVM {
     public static boolean valuesEqual(Object left, Object right) {
         if (isNumeric(left) && isNumeric(right))
             return toDouble(left) == toDouble(right);
+        // s[i] is a char and 'a' is a string, but a one-character string and
+        // that character are the same thing to a program: s[0] == 'a'
+        if (left instanceof Character lc && right instanceof String rs)
+            return rs.length() == 1 && rs.charAt(0) == lc;
+        if (left instanceof String ls && right instanceof Character rc)
+            return ls.length() == 1 && ls.charAt(0) == rc;
         if (left instanceof Bl0jInstance li && li.cls.equalsMethod() != null) {
             Object result = li.owner.invoke(li.cls.equalsMethod(), li.owner.box(li), li.owner.box(right));
             return result instanceof Boolean b && b;
