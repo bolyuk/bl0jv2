@@ -136,7 +136,7 @@ class ShellFilesTest {
                 throw new IllegalStateException(e);
             }
         });
-        assertTrue(s.waitFor("aeon-shell ready", 20_000), s.output());
+        assertTrue(s.waitFor("aeon-shell ready", 20_000), s.output() + " failure=" + s.failure);
         return s;
     }
 

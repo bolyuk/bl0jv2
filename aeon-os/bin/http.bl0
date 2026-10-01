@@ -1,0 +1,30 @@
+// aeon-os program: fetch a page: http <host[:port]> [path]
+// Loaded from the virtual disk by the shell (bin/http.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    if (len(words) < 2 || len(words) > 3) { sayErr('usage: http <host[:port]> [path]'); return nil; }
+    target = words[1];
+    port = 80;
+    colon = strFind(target, ':', 0);
+    if (colon >= 0) {
+        port = portNumber(strSub(target, colon + 1, len(target)));
+        target = strSub(target, 0, colon);
+        if (port == nil) { sayErr('bad port'); return nil; }
+    }
+    path = '/';
+    if (len(words) == 3) { path = words[2]; }
+    addr = hostAddress(target);
+    if (addr == nil) { return nil; }
+    response = Http.get(Net.localIp, freePort(), addr, port, path);
+    if (response == nil) {
+        sayErr('connection to ' + Ip.formatAddr(addr) + ':' + port + ' timed out');
+        return nil;
+    }
+    parsed = HttpResponse.parse(response);
+    say(parsed.statusLine);
+    say(parsed.body);
+}
+
+programMain(main);

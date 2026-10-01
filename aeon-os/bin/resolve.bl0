@@ -1,0 +1,16 @@
+// aeon-os program: look a name up with DNS
+// Loaded from the virtual disk by the shell (bin/resolve.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: resolve <host>'); return nil; }
+    addr = Dns.resolve(words[1]);
+    if (addr == 0) {
+        sayErr(words[1] + ': no answer from DNS server ' + Ip.formatAddr(Dns.serverIp));
+    } else {
+        say(words[1] + ' is ' + Ip.formatAddr(addr));
+    }
+}
+
+programMain(main);

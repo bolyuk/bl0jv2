@@ -1,0 +1,26 @@
+// aeon-os program: four ICMP echoes
+// Loaded from the virtual disk by the shell (bin/ping.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: ping <host>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    say('PING ' + Ip.formatAddr(addr) + ' with 32 bytes of data');
+    received = 0;
+    seq = 1;
+    while (seq <= 4) {
+        rtt = Icmp.ping(Net.localIp, addr, seq, 1000);
+        if (rtt < 0) {
+            sayErr(Fmt.format('seq={}: request timed out', [seq]));
+        } else {
+            say(Fmt.format('reply from {}: seq={} time={}ms', [Ip.formatAddr(addr), seq, rtt]));
+            received += 1;
+        }
+        seq += 1;
+    }
+    say(Fmt.format('4 sent, {} received', [received]));
+}
+
+programMain(main);

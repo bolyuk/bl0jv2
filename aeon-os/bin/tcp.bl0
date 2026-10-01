@@ -1,0 +1,28 @@
+// aeon-os program: send text over TCP and show the reply
+// Loaded from the virtual disk by the shell (bin/tcp.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    if (len(words) < 4) { sayErr('usage: tcp <host> <port> <text>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    port = portNumber(words[2]);
+    if (port == nil) { sayErr('bad port'); return nil; }
+    conn = TcpConn.connect(Net.localIp, freePort(), addr, port);
+    if (conn == nil) {
+        sayErr('connection to ' + Ip.formatAddr(addr) + ':' + port + ' timed out');
+        return nil;
+    }
+    conn.send(restOf(words, 3));
+    reply = '';
+    while (conn.waitData(2000)) { reply = reply + conn.receive(); }
+    conn.close();
+    if (reply == '') {
+        say('(no reply)');
+    } else {
+        say(reply);
+    }
+}
+
+programMain(main);

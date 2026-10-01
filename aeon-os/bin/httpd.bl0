@@ -1,0 +1,19 @@
+// aeon-os program: serve ONE http request on a port
+// Loaded from the virtual disk by the shell (bin/httpd.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def httpdPage(path) {
+    return 'hello from aeon-os, you asked for ' + path;
+}
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: httpd <port>'); return nil; }
+    port = portNumber(words[1]);
+    if (port == nil) { sayErr('bad port'); return nil; }
+    say('listening on ' + Ip.formatAddr(Net.localIp) + ':' + port + ' for one request...');
+    Http.serve(Net.localIp, port, httpdPage);
+    say('served one request');
+}
+
+programMain(main);

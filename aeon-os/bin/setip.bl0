@@ -1,0 +1,15 @@
+// aeon-os program: set this machine's address
+// Loaded from the virtual disk by the shell (bin/setip.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: setip <a.b.c.d>'); return nil; }
+    addr = Ip.parseAddr(words[1]);
+    if (addr == nil) { sayErr(words[1] + ': not an address'); return nil; }
+    Net.localIp = addr;
+    Dns.myIp = addr;
+    say('address is now ' + Ip.formatAddr(addr));
+}
+
+programMain(main);

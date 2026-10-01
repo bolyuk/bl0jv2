@@ -39,11 +39,7 @@
 import '../stdlib/mathlib.bl0';
 import 'kernel.bl0';
 import 'lib/drivers.bl0';
-import '../stdlib/net/icmp.bl0';
-import '../stdlib/net/tcp.bl0';
-import '../stdlib/net/udp.bl0';
-import '../stdlib/net/dns.bl0';
-import '../stdlib/net/http.bl0';
+import 'lib/netutil.bl0';
 import '../stdlib/str/split.bl0';
 import '../stdlib/str/fmt.bl0';
 import 'lib/loader.bl0';
@@ -87,10 +83,9 @@ def cmdHelp() {
     say('built in: help, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump df mkdir rmdir - and any program you put there, run by its name');
+    say('          hexdump df mkdir rmdir edit - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
-    say('network: net, netstat, setip <ip>, setdns <ip>, ping <host>, resolve <host>,');
-    say('         http <host[:port]> [path], tcp <host> <port> <text>, udp <host> <port> <text>, httpd <port>');
+    say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
 }
 
 def cmdUptime() {
@@ -114,191 +109,6 @@ def cmdReboot() {
     } catch (e) {
         sayErr('reboot: permission denied');
     }
-}
-
-// --- network commands ---
-//
-// <host> is a dotted address (10.0.0.2) or a name, looked up with 'resolve'.
-// Reaching anything beyond this machine's own loopback needs the host to attach a
-// bridge (bl0jv2 --bridge-outbound ...): without one, frames only ever come back
-// to this same VM, so a ping to another address times out, which is the true answer.
-
-def class ShellNet {
-    static field nextPort;
-}
-ShellNet.nextPort = 49152;
-
-def freePort() {
-    p = ShellNet.nextPort;
-    ShellNet.nextPort += 1;
-    if (ShellNet.nextPort > 65000) { ShellNet.nextPort = 49152; }
-    return p;
-}
-
-// an address: dotted quad as is, otherwise a DNS lookup; nil (after saying why) if neither works
-def hostAddress(name) {
-    addr = Ip.parseAddr(name);
-    if (addr != nil) { return addr; }
-    say('resolving ' + name + '...');
-    addr = Dns.resolve(name);
-    if (addr == 0) {
-        sayErr(name + ': name not found (no answer from DNS server ' + Ip.formatAddr(Dns.serverIp) + ')');
-        return nil;
-    }
-    return addr;
-}
-
-def cmdNet() {
-    bridge = Nic.hostBridgeEnabled ? 'attached' : 'none (loopback only)';
-    say(Fmt.format('address  {}', [Ip.formatAddr(Net.localIp)]));
-    say(Fmt.format('dns      {}', [Ip.formatAddr(Dns.serverIp)]));
-    say(Fmt.format('bridge   {}', [bridge]));
-    say(Fmt.format('frames   {} sent, {} received, {} waiting, {} dropped by the IP layer', [Nic.txCount, Nic.rxCount, Nic.pending(), Net.dropped]));
-}
-
-def cmdNetstat() {
-    say('proto  local                  remote                 state');
-    n = 0;
-    i = 0;
-    while (i < len(TcpRegistry.conns)) {
-        c = TcpRegistry.conns[i];
-        remote = '*';
-        if (c.remoteIp != nil) { remote = Ip.formatAddr(c.remoteIp) + ':' + c.remotePort; }
-        say(Fmt.format('tcp    {:<22} {:<22} {}', [Ip.formatAddr(c.localIp) + ':' + c.localPort, remote, c.state]));
-        n += 1;
-        i += 1;
-    }
-    if (n == 0) { say('(no connections)'); }
-}
-
-def cmdSetIp(words) {
-    if (len(words) != 2) { sayErr('usage: setip <a.b.c.d>'); return nil; }
-    addr = Ip.parseAddr(words[1]);
-    if (addr == nil) { sayErr(words[1] + ': not an address'); return nil; }
-    Net.localIp = addr;
-    Dns.myIp = addr;
-    say('address is now ' + Ip.formatAddr(addr));
-}
-
-def cmdSetDns(words) {
-    if (len(words) != 2) { sayErr('usage: setdns <a.b.c.d>'); return nil; }
-    addr = Ip.parseAddr(words[1]);
-    if (addr == nil) { sayErr(words[1] + ': not an address'); return nil; }
-    Dns.serverIp = addr;
-    say('dns server is now ' + Ip.formatAddr(addr));
-}
-
-def cmdPing(words) {
-    if (len(words) != 2) { sayErr('usage: ping <host>'); return nil; }
-    addr = hostAddress(words[1]);
-    if (addr == nil) { return nil; }
-    say('PING ' + Ip.formatAddr(addr) + ' with 32 bytes of data');
-    received = 0;
-    seq = 1;
-    while (seq <= 4) {
-        rtt = Icmp.ping(Net.localIp, addr, seq, 1000);
-        if (rtt < 0) {
-            sayErr(Fmt.format('seq={}: request timed out', [seq]));
-        } else {
-            say(Fmt.format('reply from {}: seq={} time={}ms', [Ip.formatAddr(addr), seq, rtt]));
-            received += 1;
-        }
-        seq += 1;
-    }
-    say(Fmt.format('4 sent, {} received', [received]));
-}
-
-def cmdResolve(words) {
-    if (len(words) != 2) { sayErr('usage: resolve <host>'); return nil; }
-    addr = Dns.resolve(words[1]);
-    if (addr == 0) {
-        sayErr(words[1] + ': no answer from DNS server ' + Ip.formatAddr(Dns.serverIp));
-    } else {
-        say(words[1] + ' is ' + Ip.formatAddr(addr));
-    }
-}
-
-def cmdHttp(words) {
-    if (len(words) < 2 || len(words) > 3) { sayErr('usage: http <host[:port]> [path]'); return nil; }
-    target = words[1];
-    port = 80;
-    colon = strFind(target, ':', 0);
-    if (colon >= 0) {
-        port = portNumber(strSub(target, colon + 1, len(target)));
-        target = strSub(target, 0, colon);
-        if (port == nil) { sayErr('bad port'); return nil; }
-    }
-    path = '/';
-    if (len(words) == 3) { path = words[2]; }
-    addr = hostAddress(target);
-    if (addr == nil) { return nil; }
-    response = Http.get(Net.localIp, freePort(), addr, port, path);
-    if (response == nil) {
-        sayErr('connection to ' + Ip.formatAddr(addr) + ':' + port + ' timed out');
-        return nil;
-    }
-    parsed = HttpResponse.parse(response);
-    say(parsed.statusLine);
-    say(parsed.body);
-}
-
-def cmdTcp(words) {
-    if (len(words) < 4) { sayErr('usage: tcp <host> <port> <text>'); return nil; }
-    addr = hostAddress(words[1]);
-    if (addr == nil) { return nil; }
-    port = portNumber(words[2]);
-    if (port == nil) { sayErr('bad port'); return nil; }
-    conn = TcpConn.connect(Net.localIp, freePort(), addr, port);
-    if (conn == nil) {
-        sayErr('connection to ' + Ip.formatAddr(addr) + ':' + port + ' timed out');
-        return nil;
-    }
-    conn.send(restOf(words, 3));
-    reply = '';
-    while (conn.waitData(2000)) { reply = reply + conn.receive(); }
-    conn.close();
-    if (reply == '') {
-        say('(no reply)');
-    } else {
-        say(reply);
-    }
-}
-
-def cmdUdp(words) {
-    if (len(words) < 4) { sayErr('usage: udp <host> <port> <text>'); return nil; }
-    addr = hostAddress(words[1]);
-    if (addr == nil) { return nil; }
-    port = portNumber(words[2]);
-    if (port == nil) { sayErr('bad port'); return nil; }
-    local = freePort();
-    Udp.send(Net.localIp, local, addr, port, restOf(words, 3));
-    // the datagram we just sent also comes back to us through the loopback NIC:
-    // skip it, wait for something that is not from ourselves
-    deadline = ticks() + 2000;
-    while (true) {
-        remaining = deadline - ticks();
-        if (remaining <= 0) { say('(no reply)'); return nil; }
-        pkt = Udp.recvWait(local, remaining);
-        if (pkt == nil) { say('(no reply)'); return nil; }
-        if (pkt.srcIp == Net.localIp && pkt.srcPort == local) { continue; }
-        say(Fmt.format('reply from {}:{}: {}', [Ip.formatAddr(pkt.srcIp), pkt.srcPort, pkt.message]));
-        return nil;
-    }
-}
-
-def httpdPage(path) {
-    return 'hello from aeon-os, you asked for ' + path;
-}
-
-// serves exactly ONE request, then returns to the prompt (TcpConn.listen()
-// accepts one connection per call - see its own doc); run it again for the next
-def cmdHttpd(words) {
-    if (len(words) != 2) { sayErr('usage: httpd <port>'); return nil; }
-    port = portNumber(words[1]);
-    if (port == nil) { sayErr('bad port'); return nil; }
-    say('listening on ' + Ip.formatAddr(Net.localIp) + ':' + port + ' for one request...');
-    Http.serve(Net.localIp, port, httpdPage);
-    say('served one request');
 }
 
 // --- files and programs ---
@@ -449,16 +259,6 @@ def runStage(words) {
     if (cmd == 'cd') { guarded(cmdCd, words); return nil; }
     if (cmd == 'exec') { guarded(cmdExec, words); return nil; }
     if (cmd == 'format') { guarded(cmdFormat, words); return nil; }
-    if (cmd == 'net') { cmdNet(); return nil; }
-    if (cmd == 'netstat') { cmdNetstat(); return nil; }
-    if (cmd == 'setip') { cmdSetIp(words); return nil; }
-    if (cmd == 'setdns') { cmdSetDns(words); return nil; }
-    if (cmd == 'ping') { cmdPing(words); return nil; }
-    if (cmd == 'resolve') { cmdResolve(words); return nil; }
-    if (cmd == 'http') { cmdHttp(words); return nil; }
-    if (cmd == 'tcp') { cmdTcp(words); return nil; }
-    if (cmd == 'udp') { cmdUdp(words); return nil; }
-    if (cmd == 'httpd') { cmdHttpd(words); return nil; }
     // anything else: a program on the disk
     runProgram('bin/' + cmd + '.bl0c', words, cmd);
 }
@@ -563,8 +363,7 @@ def histSave(line) {
 }
 
 def shellBuiltins() {
-    return ['help', 'echo', 'uptime', 'whoami', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec',
-            'net', 'netstat', 'setip', 'setdns', 'ping', 'resolve', 'http', 'tcp', 'udp', 'httpd'];
+    return ['help', 'echo', 'uptime', 'whoami', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec'];
 }
 
 // Tab: what could replace the word under the cursor. The first word is a command

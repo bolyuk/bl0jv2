@@ -96,11 +96,9 @@ class AeonOsTest {
 
     // ---- the shell's network commands, loopback only (no bridge attached) ----
 
+    // the network commands are programs on the disk: a shell on a copy of the OS image
     private static AeonSession shell() throws Exception {
-        var s = new AeonSession();
-        s.start(AeonSession.compile("shell.bl0"), 1);
-        assertTrue(s.waitFor("aeon-shell ready", 10_000), s.output());
-        return s;
+        return AeonSession.shellOnOsDisk(java.nio.file.Files.createTempDirectory("aeon-net"));
     }
 
     private static void command(AeonSession s, String line, String expectedOutput) throws Exception {
@@ -176,7 +174,7 @@ class AeonOsTest {
     @Test
     void helpListsTheNetworkCommands() throws Exception {
         var s = shell();
-        command(s, "help", "httpd <port>");
-        assertTrue(s.output().contains("ping <host>"), s.output());
+        command(s, "help", "udp httpd");
+        assertTrue(s.output().contains("ping"), s.output());
     }
 }
