@@ -64,6 +64,8 @@ public class Bl0jv2_CLI {
     private Path bridgeFsDir = null;
     // --uart-baud: how fast the serial port sends (0 = instantly)
     private int uartBaud = 0;
+    // --display: the guest's text-mode display, drawn on the host terminal (see HostScreen)
+    private boolean display = false;
     private final java.util.List<DiskImport.Spec> diskPuts = new java.util.ArrayList<>();
     private int diskSectors = 2048; // 1 MiB, used only when the image does not exist yet
 
@@ -129,6 +131,7 @@ public class Bl0jv2_CLI {
                     }
                     includeDirs.add(Path.of(args[++i]));
                 }
+                case "--display" -> display = true;
                 case "--uart-baud" -> {
                     if (i + 1 >= args.length) {
                         System.err.println("--uart-baud requires a number");
@@ -239,6 +242,9 @@ public class Bl0jv2_CLI {
         System.out.println("      --disk-put HOSTFILE[:NAME]  copy a host file onto the --disk image first");
         System.out.println("                  (formats a blank image); a .bl0 file is compiled and stored as");
         System.out.println("                  .bl0c, ready for the shell's exec (repeatable)");
+        System.out.println("      --display  give the program a text-mode display (80x24 or the terminal's size)");
+        System.out.println("                  and draw it on this terminal; the console then goes to the screen,");
+        System.out.println("                  not to the serial line. Use together with -k for the keyboard");
         System.out.println("      --uart-baud N  send on the serial port at N bits per second (default 0:");
         System.out.println("                  instantly); a driver that ignores the line status loses text");
         System.out.println("      --bridge-fs DIR  show the host folder DIR to the program (read, write,");
@@ -451,7 +457,14 @@ public class Bl0jv2_CLI {
                 // flush after every write
                 Writer outWriter = (keyboard || bridgeUdpPort >= 0 || bridgeTcpPort >= 0 || bridgeOutbound)
                         ? consoleAutoFlushWriter() : writer;
-                vm.set_out_writer(outWriter);
+                // with a display the screen is the console: whatever the program print()s would only
+                // scribble over it, so that output is dropped
+                vm.set_out_writer(display ? Writer.nullWriter() : outWriter);
+                if (display) {
+                    int[] size = HostTerminal.size();
+                    vm.set_console_size(size[0], size[1]);
+                    vm.attach_display();
+                }
                 if (keyboard) {
                     vm.set_interrupt_poll_interval(1);
                     startKeyboardBridge(vm);
@@ -485,12 +498,14 @@ public class Bl0jv2_CLI {
                     new IcmpOutboundBridge(vm).start();
                     new UdpOutboundBridge(vm, udpBridge == null ? f -> false : udpBridge::claims).start();
                 }
-                System.out.println();
+                HostScreen screen = display ? new HostScreen(vm, UTF8_OUT) : null;
+                if (!display) System.out.println();
                 // flush in finally: a crash mid-program must not discard
                 // whatever it already printed before the exception
                 try {
                     vm.run_instructions();
                 } finally {
+                    if (screen != null) screen.close();
                     outWriter.flush();
                 }
             }

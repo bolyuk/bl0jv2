@@ -38,6 +38,7 @@
 
 import '../stdlib/mathlib.bl0';
 import 'kernel.bl0';
+import 'lib/drivers.bl0';
 import '../stdlib/net/icmp.bl0';
 import '../stdlib/net/tcp.bl0';
 import '../stdlib/net/udp.bl0';

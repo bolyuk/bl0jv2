@@ -309,6 +309,23 @@ ports, `in16(0x0F50)` columns and `in16(0x0F52)` rows. `-k` connects the host te
 guest's job: see aeon-os/README.md. `Utf8Stream` (stdlib/str/utf8.bl0) decodes a byte
 stream one byte at a time.
 
+### The display
+
+`--display` attaches a **text-mode display**, in the manner of VGA text mode, and the
+host draws it on its terminal. The screen is a grid of cells that live in the guest's
+own memory - a frame buffer whose address the guest chooses (`out32(0x0F58, addr)`, so it
+can switch between buffers) - and the display shows whatever is there. A cell is 32 bits:
+bits 0-20 the Unicode code point, 24-27 the foreground and 28-31 the background colour
+(the 16 ANSI colours: 0 black, 1 red, 2 green, 3 brown, 4 blue, 5 magenta, 6 cyan,
+7 light grey, +8 bright). Ports: `0x0F50`/`0x0F52` columns and rows (`in16`), `0x0F54`
+`in8` 1 when a display is attached, `0x0F5C` cursor position as a cell index, `0x0F60`
+cursor visible; and what a 2-D engine offers, because moving a screenful word by word
+would make every line feed expensive: `0x0F64` command (1 scroll the frame up by the
+rows in `0x0F68`, filling the opened rows with the cell in `0x0F6C`; 2 fill the frame).
+The VM never interprets text: the escape-sequence terminal emulator is a driver in the
+guest (aeon-os `lib/drivers.bl0`). `Bl0jv2_jVM.display_frame()` is what a test or the CLI
+renderer reads. Without `--display` the console is the serial line.
+
 ### Network stack
 
 `Nic.init()` (or `Nic.initWithHostBridge()`), then `Udp.send/receive`,

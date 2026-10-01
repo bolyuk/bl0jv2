@@ -27,7 +27,6 @@
 import '../stdlib/str/char.bl0';
 import '../stdlib/str/affix.bl0';
 import '../stdlib/str/substr.bl0';
-import '../stdlib/str/utf8.bl0';
 
 // --- kernel heap: a minimal bump allocator, backed by one 32-bit counter
 // at raw address 0. No free-list, no reuse - kfree() is a deliberate
@@ -58,102 +57,25 @@ def kfree(addr) {
     // no-op - see this section's own header comment
 }
 
-// --- the serial port: a 16550-style UART at ports 0x0F40-0x0F47 is how this machine
-// talks to its terminal, both ways. Its registers (offsets from the base):
-//   0 data      1 interrupt enable      2 interrupt cause (read) / FIFO control (write)
-//   3 line control      4 modem control      5 line status      6 modem status      7 scratch
-// initUart() sets it up once (privileged): 8 data bits, no parity, 1 stop bit at the
-// full divisor, 16-byte FIFOs on, and the receive and line-status interrupts enabled.
-//
-// Receive: the interrupt handler reads the cause register until it reports nothing
-// pending; for data it drains the receive FIFO (line status: data ready) into a ring
-// buffer, and an overrun (the FIFO was full when a byte arrived) is counted. Readers take
-// bytes from the ring. What arrives are the bytes the terminal sends - UTF-8 text and
-// ANSI sequences for the arrow keys and so on; turning those into characters and keys
-// is the job of whoever reads (see lib/keys.bl0), the driver only moves bytes.
-//
-// The ring lives in RAW MEMORY, head and tail included, not in static fields: a program
-// started from the disk has its own copy of this file (and so its own statics), but all
-// copies must see one ring, and raw memory is what they share.
-//   +0 head (next slot the handler writes)   +4 tail (next slot a reader takes)
+// --- keyboard input: bytes the terminal sent, in a ring buffer in RAW MEMORY that the
+// drivers (lib/drivers.bl0) fill from the serial port's interrupt and anyone reads. Head
+// and tail are words of that memory, not static fields: a program started from the disk
+// has its own copy of this file (and so its own statics), but all copies must see one
+// ring, and raw memory is what they share.
+//   +0 head (next slot the driver writes)   +4 tail (next slot a reader takes)
 //   +8 the bytes (Keyboard.size of them)
 // One slot is always left empty so head==tail means "empty"; when the ring is full the
-// newest byte is dropped rather than overwriting unread input.
-//
-// Transmit: writing the data register sends a byte. The chip's transmit FIFO holds 16;
-// "transmit FIFO empty" in the line status says 16 more fit, and a driver that does not
-// look loses bytes - uartPut() looks, and spins until there is room ---
-def class Uart {
-    static field base;
-    static field ready;
-    static field room;       // bytes that may still be written before looking at the line status again
-    static field overruns;
-}
-Uart.base = 0x0F40;
-Uart.ready = false;
-Uart.room = 0;
-Uart.overruns = 0;
-
-def initUart() {
-    if (Uart.ready) { return nil; }
-    base = Uart.base;
-    out8(base + 3, 0x80);   // line control: divisor latch access
-    out8(base, 1);          // divisor 1 = the full 115200 baud
-    out8(base + 1, 0);
-    out8(base + 3, 0x03);   // 8 data bits, no parity, 1 stop bit
-    out8(base + 2, 0x07);   // FIFOs on, both cleared, interrupt at 1 received byte
-    out8(base + 4, 0x0B);   // modem control: terminal ready, request to send, interrupt output on
-    Uart.ready = true;
-}
-
+// newest byte is dropped rather than overwriting unread input. What arrives are the
+// bytes the terminal sends - UTF-8 text and ANSI sequences for the arrow keys and so
+// on; turning those into characters and keys is the job of whoever reads (lib/keys.bl0).
 def class Keyboard {
     static field vector;
-    static field base;     // raw address of the ring (see above)
+    static field base;     // raw address of the ring
     static field size;
-    static field event;    // signalled by the handler; only the copy that registered it has it
+    static field event;    // signalled by the driver; only the copy that registered the handler has it
 }
 Keyboard.vector = 2;
 Keyboard.size = 8192;
-
-// takes what the receive FIFO holds into the ring; the cause register says what to do
-def onUartIRQ(vector) {
-    base = Uart.base;
-    while ((in8(base + 2) & 1) == 0) {
-        cause = in8(base + 2) & 0x0E;
-        if (cause == 0x06) {
-            // line status: reading the status register clears it
-            if ((in8(base + 5) & 2) != 0) { Uart.overruns += 1; }
-        } else if (cause == 0x04 || cause == 0x0C) {
-            while ((in8(base + 5) & 1) == 1) {
-                b = in8(base);
-                head = peek32(Keyboard.base);
-                next = (head + 1) % Keyboard.size;
-                if (next != peek32(Keyboard.base + 4)) {
-                    poke8(Keyboard.base + 8 + head, b);
-                    poke32(Keyboard.base, next);
-                }
-            }
-        } else {
-            return nil;
-        }
-    }
-    signalEvent(Keyboard.event);
-}
-
-// call once, privileged, after the importer has reserved whatever fixed regions it
-// needs (it allocates the ring from the kernel heap - NOT at import time, see initHeap)
-def initKeyboard() {
-    initUart();
-    Keyboard.base = kalloc(8 + Keyboard.size);
-    poke32(Keyboard.base, 0);
-    poke32(Keyboard.base + 4, 0);
-    Keyboard.event = newEvent();
-    registerHandler(onUartIRQ, Keyboard.vector, 50);
-    out8(Uart.base + 1, 0x05);   // interrupts: received data, line status
-    // bytes that arrived before the handler existed are in the FIFO but their interrupt was
-    // dropped: take them now
-    onUartIRQ(Keyboard.vector);
-}
 
 // for a program started from the disk: use the ring the kernel already set up
 def attachKeyboard(base) {
@@ -193,76 +115,19 @@ def kbReadByte() {
     return b;
 }
 
-// --- console: writing to the UART. Only kernel code may out8() to it (see
-// requirePrivileged's own doc); everything else writes through the syscall, which takes
-// a whole string: one trap per write, not per byte ---
+// --- console output: unprivileged code writes through a syscall that takes a whole
+// string (one trap per write, not per byte); the driver behind it (lib/drivers.bl0)
+// runs elevated and puts the text on the screen or the serial line ---
 def class Console {
     static field port;
     static field sysWriteVector;
     static field columns;
     static field rows;
 }
-Console.port = 0x0F40;
+Console.port = 0x0F40;       // the UART's data register: what 'reboot' in the shell tries to poke
 Console.sysWriteVector = 1;
 Console.columns = 80;
 Console.rows = 24;
-
-// one byte to the terminal, waiting for room in the transmit FIFO when it is full
-def uartPut(b) {
-    if (Uart.room == 0) {
-        while ((in8(Uart.base + 5) & 0x20) == 0) { }
-        Uart.room = 16;
-    }
-    out8(Uart.base, b);
-    Uart.room -= 1;
-}
-
-// runs ELEVATED (syscall()'s trap gate - see invokeAsTrap), regardless of which
-// ring the caller was in
-def sysConsoleWrite(text) {
-    n = len(text);
-    i = 0;
-    while (i < n) {
-        c = int(text[i]);
-        i += 1;
-        if (c < 0x80) {
-            uartPut(c);
-        } else {
-            // UTF-8 for a code point, a UTF-16 surrogate pair counting as one; a lone surrogate is U+FFFD
-            if (c >= 0xD800 && c <= 0xDBFF) {
-                if (i < n && int(text[i]) >= 0xDC00 && int(text[i]) <= 0xDFFF) {
-                    c = 0x10000 + ((c - 0xD800) << 10) + (int(text[i]) - 0xDC00);
-                    i += 1;
-                } else {
-                    c = 0xFFFD;
-                }
-            } else if (c >= 0xDC00 && c <= 0xDFFF) {
-                c = 0xFFFD;
-            }
-            if (c < 0x800) {
-                uartPut(0xC0 | (c >> 6));
-                uartPut(0x80 | (c & 0x3F));
-            } else if (c < 0x10000) {
-                uartPut(0xE0 | (c >> 12));
-                uartPut(0x80 | ((c >> 6) & 0x3F));
-                uartPut(0x80 | (c & 0x3F));
-            } else {
-                uartPut(0xF0 | (c >> 18));
-                uartPut(0x80 | ((c >> 12) & 0x3F));
-                uartPut(0x80 | ((c >> 6) & 0x3F));
-                uartPut(0x80 | (c & 0x3F));
-            }
-        }
-    }
-}
-
-// call once, privileged: the serial port, the write syscall, and the screen size the display reports
-def initConsole() {
-    initUart();
-    registerHandler(sysConsoleWrite, Console.sysWriteVector, 1);
-    Console.columns = in16(0x0F50);
-    Console.rows = in16(0x0F52);
-}
 
 def consoleWrite(s) {
     if (len(s) > 0) { syscall(Console.sysWriteVector, s); }

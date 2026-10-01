@@ -28,6 +28,15 @@ final class VirtualTerminal {
         for (int i = 0; i < rows; i++) screen.add(new StringBuilder());
     }
 
+    /** the screen of a text-mode display, as the same kind of object the escape-sequence renderer gives */
+    static VirtualTerminal fromFrame(bl0.bl0jv2.runtime.device.DisplayController.Frame frame) {
+        VirtualTerminal t = new VirtualTerminal(frame.columns(), frame.rows());
+        for (int r = 0; r < frame.rows(); r++) t.screen.get(r).append(frame.line(r));
+        t.row = frame.cursorRow();
+        t.col = frame.cursorColumn();
+        return t;
+    }
+
     static VirtualTerminal render(String output) {
         return render(output, 80, 24);
     }

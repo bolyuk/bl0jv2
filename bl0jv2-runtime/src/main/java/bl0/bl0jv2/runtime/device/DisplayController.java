@@ -46,7 +46,9 @@ public final class DisplayController implements PortDevice {
     public record Frame(int columns, int rows, int[] cells, int cursorRow, int cursorColumn, boolean cursorVisible) {
         public int codePoint(int row, int col) {
             int cp = cells[row * columns + col] & 0x1FFFFF;
-            return cp == 0 ? ' ' : cp;
+            if (cp == 0) return ' ';
+            // a cell the guest filled with something that is not a character shows as the replacement
+            return cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) ? 0xFFFD : cp;
         }
 
         public int foreground(int row, int col) {

@@ -32,6 +32,8 @@ public final class AeonSession {
     private final StringWriter out = new StringWriter();
     public volatile Throwable failure;
     public volatile boolean finished;
+    /** the console is a text-mode display (output then goes to the screen, not to output()) */
+    public boolean display;
     public Thread thread;
 
     public void start(byte[] bytecode, int cores) {
@@ -41,6 +43,7 @@ public final class AeonSession {
     /** afterFeed runs once the program is loaded and before it runs - where host bridges attach (loading resets the port space) */
     public void start(byte[] bytecode, int cores, Consumer<Bl0jv2_jVM> afterFeed) {
         vm.set_core_count(cores);
+        if (display) vm.attach_display();
         vm.set_out_writer(new PrintWriter(out));
         // feed and run on the SAME thread: that thread becomes core 0
         thread = new Thread(() -> {
@@ -107,7 +110,43 @@ public final class AeonSession {
 
     /** the screen as an 80x24 terminal would show it now */
     VirtualTerminal screen() {
+        if (display) {
+            var frame = vm.display_frame();
+            return frame == null ? new VirtualTerminal(80, 24) : VirtualTerminal.fromFrame(frame);   // null until the guest has set one up
+        }
         return VirtualTerminal.render(output());
+    }
+
+    /** a shell whose console is a text-mode display */
+    static AeonSession shellOnDisplay(java.nio.file.Path dir) throws Exception {
+        var s = new AeonSession();
+        s.display = true;
+        s.start(compile("shell.bl0"), 1, vm -> {
+            try {
+                vm.attach_disk(AeonImage.os(dir.resolve("d.img")));
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        long deadline = System.currentTimeMillis() + 30_000;
+        while (System.currentTimeMillis() < deadline && !s.screen().screenText().contains("aeon-shell ready")) Thread.sleep(20);
+        if (!s.screen().screenText().contains("aeon-shell ready")) throw new AssertionError(s.screen().screenText() + " failure=" + s.failure);
+        return s;
+    }
+
+    /** runs kernel-level code that may import aeon-os files, on a machine with a display; returns the screen afterwards */
+    static bl0.bl0jv2.runtime.device.DisplayController.Frame runOnDisplay(String source, int columns, int rows) throws Exception {
+        var parser = new Bl0jv2_Parser();
+        parser.setSourceCode(source);
+        var ast = (PROGRAM_N) parser.getAST(new Bl0jv2_Lexer().getTokens(source));
+        byte[] bytecode = new Bl0jv2_Compiler().compile(Bl0jv2_Linker.resolveImports(ast, AEON.resolve("snippet.bl0")));
+        var vm = new Bl0jv2_jVM();
+        vm.set_out_writer(new PrintWriter(new StringWriter()));
+        vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
+        vm.set_console_size(columns, rows);
+        vm.attach_display();
+        vm.run_instructions();
+        return vm.display_frame();
     }
 
     /** compiles and runs a snippet that may import aeon-os files (relative to aeon-os/); returns what it printed */

@@ -50,6 +50,15 @@ names.
 
 ## The terminal
 
+Two paths lead to the same programs, which cannot tell them apart: the **serial line**
+(a UART; the default) and a **text-mode display** (`--display`). `lib/drivers.bl0` holds the
+drivers - the UART (initialised once; the receive interrupt drains the FIFO into the keyboard
+ring; transmit waits for room), and an **ANSI terminal emulator** that turns the text and escape
+sequences programs write into cells in the display's frame buffer (text, wrapping with the
+xterm deferred wrap, scrolling by the display's command, cursor movement, erase, colours and
+attributes, cursor visibility, the alternate screen as a second frame buffer). Programs only
+see `kernel.bl0`: `consoleWrite()` (a syscall) and the keyboard ring.
+
 The console is a serial terminal, modelled as two devices (see the main README): the
 guest writes UTF-8 bytes - with ANSI escape sequences for the cursor and the screen -
 to a port, and reads the bytes the terminal sends from a FIFO behind another. So the
