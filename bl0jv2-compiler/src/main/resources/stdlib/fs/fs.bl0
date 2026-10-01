@@ -380,24 +380,83 @@ def class Fs {
         free(nb);
     }
 
+    // adds to the end of a file: fills the last sector, then chains new ones, so
+    // the cost does not grow with the file (a log can be appended to forever)
     static def doAppend(name, text) {
         Fs.need();
         nb = Fs.encodeName(name);
+        extra = Utf8.encode(text);
+        n = len(extra);
         e = Fs.lookup(nb);
-        data = [];
+        if (n == 0) {
+            if (e < 0) { Fs.store(nb, extra); }
+            free(extra);
+            free(nb);
+            return nil;
+        }
+        first = 0;
+        size = 0;
         if (e >= 0) {
             first = Fs.entryFirst(e);
-            data = Fs.readBytes(first, Fs.entrySize(e));
+            size = Fs.entrySize(e);
         }
-        extra = Utf8.encode(text);
-        i = 0;
-        while (i < len(extra)) {
-            push(data, extra[i]);
-            i += 1;
+        if (e < 0 || first == 0) {
+            Fs.store(nb, extra);
+            free(extra);
+            free(nb);
+            return nil;
         }
-        Fs.store(nb, data);
+        // last sector of the chain
+        last = first - 1;
+        steps = 0;
+        while (steps <= Fs.dataSectors) {
+            next = Fs.fatGet(last);
+            if (next <= 0) { break; }
+            last = next - 1;
+            steps += 1;
+        }
+        off = size & 511;
+        pos = 0;
+        if (off != 0) {
+            Fs.readSector(Fs.dataStart + last);
+            k = 512 - off;
+            if (k > n) { k = n; }
+            i = 0;
+            while (i < k) {
+                poke8(Disk.bufAddr + off + i, extra[i]);
+                i += 1;
+            }
+            Fs.writeSector(Fs.dataStart + last);
+            pos = k;
+        }
+        rest = n - pos;
+        count = (rest + 511) >> 9;
+        if (count > 0) {
+            if (Fs.freeCount() < count) { throw('fs: no space left on device'); }
+            sectors = [];
+            i = 0;
+            while (i < count) {
+                d = Fs.allocate();
+                if (d < 0) { throw('fs: no space left on device'); }
+                push(sectors, d);
+                i += 1;
+            }
+            i = 0;
+            while (i + 1 < count) {
+                Fs.fatSet(sectors[i], sectors[i + 1] + 1);
+                i += 1;
+            }
+            i = 0;
+            while (i < count) {
+                Fs.fillBuffer(extra, pos + (i << 9));
+                Fs.writeSector(Fs.dataStart + sectors[i]);
+                i += 1;
+            }
+            Fs.fatSet(last, sectors[0] + 1);
+            free(sectors);
+        }
+        Fs.setEntry(e, nb, first, size + n);
         free(extra);
-        free(data);
         free(nb);
     }
 

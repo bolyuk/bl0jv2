@@ -28,6 +28,14 @@ def class Disk {
         registerHandler(onDiskSyscall, Disk.vector, 1);
     }
 
+    // for a program the kernel started: the driver state the kernel already set up
+    // (a program carries its own copy of this class, so it has to be told)
+    static def attach(buffer, sectors, vector) {
+        Disk.bufAddr = buffer;
+        Disk.sectors = sectors;
+        Disk.vector = vector;
+    }
+
     static def present() {
         return Disk.sectors > 0;
     }

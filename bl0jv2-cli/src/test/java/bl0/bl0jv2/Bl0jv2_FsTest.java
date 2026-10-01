@@ -157,4 +157,27 @@ class Bl0jv2_FsTest {
                 "l = Dirs.list(''); s = ''; i = 0; while (i < len(l)) { if (i > 0) { s = s + ','; } s = s + l[i][0] + ':' + str(l[i][2]); i += 1; } " +
                 "print s + '|' + str(Dirs.rmdir('e')) + '|'; try { Dirs.rmdir('docs'); } catch (x) { print x; } print '|' + str(Dirs.isDir('e'));"));
     }
+
+    @Test
+    void appendingManyLinesStaysCorrectAcrossSectorBoundaries(@TempDir Path dir) throws IOException {
+        assertEquals("true|2890", run(dir, 64,
+                "Fs.format(); expect = ''; i = 0; " +
+                "while (i < 300) { line = 'entry ' + str(i) + ';'; Fs.append('log', line); expect = expect + line; i += 1; } " +
+                "print str(Fs.read('log') == expect) + '|' + str(Fs.size('log'));"));
+    }
+
+    @Test
+    void anAppendBiggerThanASectorFillsTheTailThenChains(@TempDir Path dir) throws IOException {
+        assertEquals("true|1500", run(dir, 64,
+                "Fs.format(); a = ''; i = 0; while (i < 300) { a = a + 'a'; i += 1; } " +
+                "b = ''; i = 0; while (i < 1200) { b = b + 'b'; i += 1; } " +
+                "Fs.append('f', a); Fs.append('f', b); print str(Fs.read('f') == a + b) + '|' + str(Fs.size('f'));"));
+    }
+
+    @Test
+    void appendingToAFullDiskFailsAndKeepsTheFile(@TempDir Path dir) throws IOException {
+        assertEquals("fs: no space left on device|10", run(dir, 16,
+                "Fs.format(); Fs.write('f', 'xxxxxxxxxx'); big = ''; i = 0; while (i < 9000) { big = big + 'y'; i += 1; } " +
+                "try { Fs.append('f', big); } catch (e) { print e; } print '|' + str(Fs.size('f'));"));
+    }
 }
