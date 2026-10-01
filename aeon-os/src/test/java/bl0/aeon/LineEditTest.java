@@ -177,4 +177,29 @@ class LineEditTest {
         s.type("ls bin | wc" + ENTER);
         assertTrue(s.waitFor("lines,", 20_000), s.output());
     }
+
+    @Test
+    void ctrlRSearchesTheHistory(@TempDir Path dir) throws Exception {
+        var s = shell(dir);
+        run(s, "echo alpha one", "alpha one");
+        run(s, "echo beta", "beta");
+        run(s, "echo alpha two", "alpha two");
+        s.type(ctrl('R') + "alpha");
+        expectLine(s, "(search 'alpha') echo alpha two");
+        s.type(ctrl('R'));                                          // an older match
+        expectLine(s, "(search 'alpha') echo alpha one");
+        s.type(ctrl('R'));                                          // no older one: stays
+        expectLine(s, "(search 'alpha') echo alpha one");
+        s.type("\u007f\u007f");                                     // narrower query, newest first again
+        expectLine(s, "(search 'alp') echo alpha two");
+        s.type(RIGHT);                                              // any other key: take it for editing
+        expectLine(s, "$ echo alpha two");
+        s.type(" more" + ENTER);
+        assertTrue(s.waitFor("alpha two more\n", 10_000), s.output());
+        // Esc puts back what was typed
+        s.type("echo draft" + ctrl('R') + "beta");
+        expectLine(s, "(search 'beta') echo beta");
+        s.type("\u001b");
+        expectLine(s, "$ echo draft");
+    }
 }

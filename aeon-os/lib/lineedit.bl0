@@ -6,7 +6,7 @@
 // Keys: characters (any Unicode), Backspace, Delete, Left/Right, Home/End (Ctrl-A,
 // Ctrl-E), Ctrl-Left/Right and Alt-B/F by word, Ctrl-U (cut to the start), Ctrl-K
 // (cut to the end), Ctrl-W (cut a word), Ctrl-L (clear the screen), Up/Down and
-// Ctrl-P/N (history), Tab (completion), Ctrl-C (abandon the line), Ctrl-D.
+// Ctrl-P/N (history), Ctrl-R (search the history), Tab (completion), Ctrl-C (abandon the line), Ctrl-D.
 //
 // How it draws: it keeps the position the terminal's cursor is at, counted in
 // cells from the start of the prompt, and moves it with relative cursor
@@ -154,6 +154,73 @@ def class LineEditor {
         if (len(h) > LineEditor.maxHistory) { LineEditor.history = Arr.slice(h, len(h) - LineEditor.maxHistory, len(h)); }
     }
 
+    // ---- reverse search (Ctrl-R) ----
+
+    // the newest history entry at or before 'from' that contains 'query', or -1
+    static def searchBack(query, from) {
+        h = LineEditor.history;
+        i = from;
+        while (i >= 0) {
+            if (i < len(h) && strFind(h[i], query, 0) >= 0) { return i; }
+            i -= 1;
+        }
+        return -1;
+    }
+
+    // shows the prompt 'text' and the current line afresh
+    static def redrawWithPrompt(text) {
+        LineEditor.goTo(0);
+        consoleWrite(Term.clearToEndOfScreen());
+        LineEditor.prompt = text;
+        LineEditor.promptWidth = Term.visibleLen(text);
+        LineEditor.redrawAll();
+    }
+
+    // Ctrl-R: type to narrow the search through the history, Ctrl-R again for an older match.
+    // Enter takes the match and says 'run'; Esc/Ctrl-G/Ctrl-C put the line back and say 'cancel';
+    // any other key takes the match for editing ('edit').
+    static def reverseSearch() {
+        savedLine = LineEditor.line;
+        savedPrompt = LineEditor.prompt;
+        query = '';
+        found = -1;
+        result = 'edit';
+        while (true) {
+            LineEditor.line = found >= 0 ? LineEditor.history[found] : (query == '' ? savedLine : '');
+            LineEditor.pos = len(LineEditor.line);
+            LineEditor.redrawWithPrompt("(search '" + query + "') ");
+            key = Keys.read(250);
+            LineEditor.flushAsync();
+            if (key == nil) { continue; }
+            name = key.name;
+            if (name == nil) {
+                query = query + key.text;
+                n = LineEditor.searchBack(query, found >= 0 ? found : len(LineEditor.history) - 1);
+                if (n >= 0) { found = n; }          // no match: the last one stays shown
+            } else if (name == 'BACKSPACE') {
+                if (len(query) > 0) { query = strSub(query, 0, len(query) - 1); }
+                found = query == '' ? -1 : LineEditor.searchBack(query, len(LineEditor.history) - 1);
+            } else if (name == 'CTRL-R') {
+                if (query != '') {
+                    n = LineEditor.searchBack(query, (found >= 0 ? found : len(LineEditor.history)) - 1);
+                    if (n >= 0) { found = n; }
+                }
+            } else if (name == 'ENTER') {
+                result = 'run';
+                break;
+            } else if (name == 'ESC' || name == 'CTRL-G' || name == 'CTRL-C') {
+                LineEditor.line = savedLine;
+                LineEditor.pos = len(savedLine);
+                result = 'cancel';
+                break;
+            } else {
+                break;
+            }
+        }
+        LineEditor.redrawWithPrompt(savedPrompt);
+        return result;
+    }
+
     // ---- completion ----
 
     static def commonPrefix(items) {
@@ -291,6 +358,16 @@ def class LineEditor {
                     index += 1;
                     LineEditor.replaceLine(index == len(h) ? draft : h[index]);
                 }
+            } else if (name == 'CTRL-R') {
+                searched = LineEditor.reverseSearch();
+                if (searched == 'run') {
+                    LineEditor.goTo(LineEditor.promptWidth + len(LineEditor.line));
+                    consoleWrite('\n');
+                    LineEditor.remember(LineEditor.line);
+                    consoleSetEditing(false);
+                    return LineEditor.line;
+                }
+                index = len(LineEditor.history);
             } else if (name == 'TAB') {
                 LineEditor.complete(lastWasTab);
                 wasTab = true;
