@@ -202,6 +202,12 @@ public final class Bl0jv2_jVM {
                 throw new Bl0j_VM_Exception("strFind: start " + from + " is outside the string (length " + s.length() + ")");
             return s.indexOf(sub, from);
         });
+        nativeMethods.put(NativeMethods.STR_CHAR, (arg) -> {
+            int cp = requireInt(arg, "strChar");
+            if (!Character.isValidCodePoint(cp))
+                throw new Bl0j_VM_Exception("strChar: " + cp + " is not a Unicode code point");
+            return new String(Character.toChars(cp));
+        });
         nativeMethods.put(NativeMethods.STR_UPPER, (arg) -> asciiCase(requireString(arg, "strUpper"), true));
         nativeMethods.put(NativeMethods.STR_LOWER, (arg) -> asciiCase(requireString(arg, "strLower"), false));
         nativeMethods.put(NativeMethods.STR_JOIN, (arg) -> {

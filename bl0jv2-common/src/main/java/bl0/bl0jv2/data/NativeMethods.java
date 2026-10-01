@@ -51,4 +51,6 @@ public final class NativeMethods {
     public static final byte STR_JOIN = 0x1D;
     // throw(message): raise an error a surrounding try/catch receives
     public static final byte THROW = 0x1E;
+    // strChar(codePoint): the one-character string for a Unicode code point
+    public static final byte STR_CHAR = 0x1F;
 }

@@ -193,7 +193,7 @@ copy bundled in the jar).
 | Area | Builtins |
 |---|---|
 | Values | `len(x)` `push(a, v)` `pop(a)` `int(x)` `float(x)` `str(x)` `typeOf(x)` `err(msg)` `isInt` `isFloat` `isString` `isBool` `isArray` `isNil` `isChar` `isTuple` `isErr` |
-| Strings | `strSub(s, from, to)` `strFind(s, sub, from)` `strUpper(s)` `strLower(s)` `strJoin(array, sep)` (used by the stdlib wrappers below) |
+| Strings | `strSub(s, from, to)` `strFind(s, sub, from)` `strUpper(s)` `strLower(s)` `strJoin(array, sep)` `strChar(codePoint)` (used by the stdlib wrappers below) |
 | Errors | `throw(message)` `panic(message)` (halts every core, cannot be caught) |
 | Time | `ticks()` (ms since start) `wait(ms)` `setTimer(ms, vector)` `setInterval(ms, vector)` `cancelTimer(id)` |
 | Memory | `free(x)` `reserve(addr, size)` `peek8/16/32(addr)` `poke8/16/32(addr, v)` `in8/16/32(port)` `out8/16/32(port, v)` |

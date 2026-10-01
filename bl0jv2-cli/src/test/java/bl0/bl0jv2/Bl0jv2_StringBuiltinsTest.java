@@ -44,6 +44,13 @@ class Bl0jv2_StringBuiltinsTest {
     }
 
     @Test
+    void strCharMakesACharacterFromACodePoint(@TempDir Path dir) throws IOException {
+        assertEquals("A|я|1", run(dir, "print strChar(65) + '|' + strChar(1103) + '|' + str(len(strChar(65))); "));
+        assertEquals("strChar: -5 is not a Unicode code point", run(dir,
+                "try { x = strChar(-5); } catch (e) { print e; }"));
+    }
+
+    @Test
     void find(@TempDir Path dir) throws IOException {
         assertEquals("2|-1|0|3|0", run(dir,
                 "print str(strFind('abcabc', 'ca', 0)) + '|' + str(strFind('abc', 'x', 0)) + '|' + str(strFind('abc', '', 0)) + " +
