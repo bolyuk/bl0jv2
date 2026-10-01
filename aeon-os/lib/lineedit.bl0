@@ -206,7 +206,26 @@ def class LineEditor {
 
     // ---- the loop ----
 
+    // text that jobs in the background queued while this editor waited: print it above the line
+    static def flushAsync() {
+        text = consoleTakeAsync();
+        if (text == '') { return nil; }
+        LineEditor.goTo(0);
+        consoleWrite(Term.clearToEndOfScreen() + text);
+        LineEditor.redrawAll();
+    }
+
     static def read(prompt) {
+        consoleSetEditing(true);
+        try {
+            return LineEditor.readLine(prompt);
+        } catch (e) {
+            consoleSetEditing(false);
+            throw(e);
+        }
+    }
+
+    static def readLine(prompt) {
         LineEditor.line = '';
         LineEditor.pos = 0;
         LineEditor.prompt = prompt;
@@ -219,7 +238,8 @@ def class LineEditor {
         lastWasTab = false;
 
         while (true) {
-            key = Keys.read(1000);
+            key = Keys.read(250);
+            LineEditor.flushAsync();
             if (key == nil) { continue; }
             name = key.name;
             wasTab = false;
@@ -230,6 +250,7 @@ def class LineEditor {
                 LineEditor.goTo(LineEditor.promptWidth + len(LineEditor.line));
                 consoleWrite('\n');
                 LineEditor.remember(LineEditor.line);
+                consoleSetEditing(false);
                 return LineEditor.line;
             } else if (name == 'BACKSPACE') {
                 if (LineEditor.pos > 0) { LineEditor.remove(LineEditor.pos - 1, LineEditor.pos); }
@@ -275,10 +296,12 @@ def class LineEditor {
             } else if (name == 'CTRL-C') {
                 LineEditor.goTo(LineEditor.promptWidth + len(LineEditor.line));
                 consoleWrite('^C\n');
+                consoleSetEditing(false);
                 return '';
             } else if (name == 'CTRL-D') {
                 if (LineEditor.line == '') {
                     consoleWrite('\n');
+                    consoleSetEditing(false);
                     return nil;
                 }
                 LineEditor.remove(LineEditor.pos, LineEditor.pos + 1);

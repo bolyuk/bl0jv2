@@ -151,7 +151,7 @@ class ShellFilesTest {
 
     @Test
     void aProgramSeesItsArgumentsAndTheCurrentFolder(@TempDir Path dir) throws Exception {
-        var s = shellWith(dir, "where", "import '../lib/userland.bl0'; startProgram(); say('args=' + str(Prog.words) + ' cwd=[' + Prog.cwd + ']');");
+        var s = shellWith(dir, "where", "import '../lib/userland.bl0'; startProgram(); say('args=' + str(progWords()) + ' cwd=[' + progCwd() + ']');");
         command(s, "mkdir work", "$ ");
         command(s, "cd work", "/work $ ");
         command(s, "where one  \"two  words\"", "args=[where, one, two  words] cwd=[work]");

@@ -1,0 +1,18 @@
+// aeon-os program: wait until a background process ends (or all of them); wait [pid]
+// Loaded from the virtual disk by the shell (bin/wait.bl0c); see lib/proc.bl0.
+
+import '../lib/proc.bl0';
+
+def main(words) {
+    pid = 0;
+    if (len(words) == 2) {
+        pid = portNumber(words[1]);
+        if (pid == nil) { sayErr(words[1] + ': not a process number'); return nil; }
+    } else if (len(words) > 2) {
+        sayErr('usage: wait [pid]');
+        return nil;
+    }
+    Proc.waitFor(pid);
+}
+
+programMain(main);

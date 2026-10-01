@@ -46,6 +46,7 @@ import 'lib/loader.bl0';
 import 'lib/userland.bl0';
 import 'lib/lineedit.bl0';
 import 'lib/cmdline.bl0';
+import 'lib/proc.bl0';
 
 // when boot.bl0 exec()s this file, it already called kernel.bl0's
 // initHeap() with ITS OWN reserved regions accounted for (see its own
@@ -64,6 +65,11 @@ if (peek32(0) == 0) {
 }
 initKeyboard();
 initConsole();
+// what interrupting a program and running several at once need: the abort words, one Ctx per core, the
+// process table
+initAbort(coreCount());
+Ctx.setup(coreCount());
+Proc.init();
 // the network device: init() or initWithHostBridge(), whichever the host attached
 // (privileged - reads a port and registers handlers - so it happens here, before
 // dropToUserMode(); afterwards the shell sends through the kernel's syscall)
@@ -83,7 +89,7 @@ def cmdHelp() {
     say('built in: help, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump df mkdir rmdir edit - and any program you put there, run by its name');
+    say('          hexdump df mkdir rmdir edit sleep yes ps kill wait - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
 }
@@ -188,8 +194,10 @@ def cmdFormat(words) {
 
 def class Exec {
     static field vector;
+    static field spawnVector;
 }
 Exec.vector = 7;
+Exec.spawnVector = 9;
 
 // the kernel half of running a program (a syscall handler, so privileged): '' or the error
 def sysExec(path) {
@@ -202,18 +210,50 @@ def sysExec(path) {
 }
 registerHandler(sysExec, Exec.vector, 1);
 
-// runs the program at 'path' with 'words' as its command line (words[0] is its name); label names it in messages
+// the kernel half of starting a process on another core: [true, the Process] or [false, the error]
+def sysSpawn(request) {
+    try {
+        return [true, Proc.spawn(request[0], request[1], request[2], request[3])];
+    } catch (e) {
+        return [false, str(e)];
+    }
+}
+registerHandler(sysSpawn, Exec.spawnVector, 1);
+
+def isBuiltin(cmd) {
+    return Arr.contains(shellBuiltins(), cmd);
+}
+
+def programPath(cmd) {
+    return 'bin/' + cmd + '.bl0c';
+}
+
+// Runs the program at 'path' here, on the shell's own core, with 'words' as its command line (words[0]
+// is its name). Whatever redirection or pipe this core's Ctx holds applies; the ends of the pipes
+// close when it is over. Ctrl-C meanwhile is a request to stop it, not text for it.
 def runProgram(path, words, label) {
+    c = Ctx.me();
     if (!Disk.present() || !Fs.mounted || Fs.size(path) < 0) {
         sayErr(label + ': command not found');
+        c.finish();
         return nil;
     }
-    Prog.words = words;
-    Prog.cwd = ShellState.cwd;
+    c.words = words;
+    c.cwd = ShellState.cwd;
+    poke32(Abort.base, 0);
+    poke32(abortForegroundWord(), 1);
     problem = syscall(Exec.vector, path);
+    poke32(abortForegroundWord(), 0);
+    poke32(Abort.base, 0);
+    c.finish();
     if (problem != '') {
-        say(label + ': ' + problem);
-        Log.write('shell: ' + label + ' failed: ' + problem);
+        problem = programError(problem);
+        if (problem == 'interrupted') {
+            sayErr('^C');
+        } else {
+            say(label + ': ' + problem);
+            Log.write('shell: ' + label + ' failed: ' + problem);
+        }
     }
 }
 
@@ -242,7 +282,7 @@ def guarded(command, words) {
     }
 }
 
-// one command of a pipeline: a built-in or a program on the disk
+// one command of a pipeline, here on the shell's core: a built-in or a program on the disk
 def runStage(words) {
     cmd = words[0];
     if (cmd == 'help') { cmdHelp(); return nil; }
@@ -260,16 +300,17 @@ def runStage(words) {
     if (cmd == 'exec') { guarded(cmdExec, words); return nil; }
     if (cmd == 'format') { guarded(cmdFormat, words); return nil; }
     // anything else: a program on the disk
-    runProgram('bin/' + cmd + '.bl0c', words, cmd);
+    runProgram(programPath(cmd), words, cmd);
 }
 
-// Runs the stages of a command line one after another. Each stage's standard
-// input and output are files: what a stage prints is written to a temporary file
-// (var/tmp/pipe<N>) that the next stage reads - the pipe is a file, and the stages
-// do not run at the same time. '< file' and '> file' / '>> file' name the first
-// stage's input and the last stage's output. The temporary files are removed
-// afterwards, whatever happened.
-def runPipeline(stages) {
+// Runs the stages one after another, on this core. Each stage's standard input and output are files:
+// what a stage prints is written to a temporary file (var/tmp/pipe<N>) that the next stage reads.
+// This is how a pipeline runs when the machine has too few cores to run its stages at the same time, or
+// a stage is a built-in (which only the shell can run). '< file' and '> file' / '>> file' name the
+// first stage's input and the last stage's output. The temporary files are removed afterwards,
+// whatever happened.
+def runSequential(stages) {
+    c = Ctx.me();
     temps = [];
     last = len(stages) - 1;
     i = 0;
@@ -298,19 +339,136 @@ def runPipeline(stages) {
             sayErr('redirection needs a disk with a filesystem');
             break;
         }
-        Io.inPath = inPath;
-        Io.outPath = outPath;
+        c.reset();
+        c.inPath = inPath;
+        c.outPath = outPath;
         guarded(runStage, stage.words);
-        Io.flush();
+        c.finish();
         i += 1;
     }
-    Io.inPath = '';
-    Io.outPath = '';
+    c.reset();
     i = 0;
     while (i < len(temps)) {
         Fs.remove(temps[i]);
         i += 1;
     }
+}
+
+// Runs the stages at the same time, each on a core of its own, joined by pipes: the output of one
+// is read by the next while it is still being written. The last stage runs on the shell's core (and
+// the shell waits for it, then for the rest); in the background every stage goes to a worker and the
+// shell carries on at once. Needs a free worker core per stage that is not on the shell's own core.
+def runConcurrent(stages, background) {
+    n = len(stages);
+    pipes = [];
+    i = 0;
+    while (i < n - 1) {
+        push(pipes, new Pipe());
+        i += 1;
+    }
+    started = background ? n : n - 1;
+    spawned = [];
+    failed = false;
+    i = 0;
+    while (i < started && !failed) {
+        stage = stages[i];
+        cmd = stage.words[0];
+        inPath = '';
+        outPath = '';
+        pipeIn = nil;
+        pipeOut = nil;
+        if (i > 0) { pipeIn = pipes[i - 1]; }
+        if (stage.inFile != nil) {
+            inPath = here(stage.inFile);
+            if (!Fs.exists(inPath)) {
+                sayErr(stage.inFile + ': no such file');
+                failed = true;
+            }
+        }
+        if (i < n - 1) {
+            pipeOut = pipes[i];
+        } else if (stage.outFile != nil) {
+            outPath = here(stage.outFile);
+            if (!stage.append) { Fs.write(outPath, ''); }
+        }
+        if (!failed && Fs.size(programPath(cmd)) < 0) {
+            sayErr(cmd + ': command not found');
+            failed = true;
+        }
+        if (!failed) {
+            result = syscall(Exec.spawnVector, [programPath(cmd), stage.words, ShellState.cwd, [inPath, outPath, pipeIn, pipeOut, background]]);
+            if (result[0]) {
+                push(spawned, result[1]);
+                if (background) { say('[' + result[1].pid + '] ' + cmd); }
+            } else {
+                sayErr(result[1]);
+                failed = true;
+            }
+        }
+        i += 1;
+    }
+    if (failed) {
+        // what was started cannot finish without the rest: stop it and let its pipes close
+        i = 0;
+        while (i < len(spawned)) {
+            Proc.kill(spawned[i].pid);
+            i += 1;
+        }
+        i = 0;
+        while (i < len(pipes)) {
+            pipes[i].closeWrite();
+            pipes[i].closeRead();
+            i += 1;
+        }
+        return nil;
+    }
+    if (background) { return nil; }
+
+    // the last stage, here
+    stage = stages[n - 1];
+    c = Ctx.me();
+    c.reset();
+    c.pipeIn = pipes[n - 2];
+    if (stage.outFile != nil) {
+        c.outPath = here(stage.outFile);
+        if (!stage.append) { Fs.write(c.outPath, ''); }
+    }
+    runStage(stage.words);
+    // it is over, or it ended early (head, ...): its input pipe is closed, so a producer still writing
+    // gets 'broken pipe' and stops; now wait for the others
+    i = 0;
+    while (i < len(spawned)) {
+        Proc.waitFor(spawned[i].pid);
+        i += 1;
+    }
+}
+
+// how a pipeline is run: the stages at the same time when there are cores for it
+def runPipeline(stages) {
+    n = len(stages);
+    background = stages[n - 1].background;
+    programsOnly = true;
+    i = 0;
+    while (i < n) {
+        if (isBuiltin(stages[i].words[0])) { programsOnly = false; }
+        i += 1;
+    }
+    needed = background ? n : n - 1;
+    if (background) {
+        if (!programsOnly) { sayErr('a built-in cannot run in the background'); return nil; }
+        if (Proc.freeCores() < needed) {
+            sayErr('no free core to run it in the background (' + Proc.workers() + ' worker cores; start the machine with a higher -n)');
+            return nil;
+        }
+        runConcurrent(stages, true);
+        return nil;
+    }
+    if (n > 1 && programsOnly && Proc.freeCores() >= needed) {
+        runConcurrent(stages, false);
+    } else {
+        runSequential(stages);
+    }
+    Ctx.me().reset();
 }
 
 def runCommand(line) {

@@ -17,20 +17,126 @@ def terminalText() {
     return strJoin(lines, strChar(10)) + strChar(10);
 }
 
-// the text of the named file, or of standard input when 'file' is nil: the file the
-// command line redirected or piped in, else what is typed at the terminal. nil if
-// the named file does not exist.
-def inputText(file) {
-    if (file != nil) { return Fs.read(inCwd(file)); }
-    if (Io.inPath != '') {
-        text = Fs.read(Io.inPath);
-        return text == nil ? '' : text;
+// A reader of text, a piece at a time: chunk() gives the next piece or nil at the end. The programs that
+// can start work before their input is complete (cat, head, grep, wc) read this way, so that
+//   yes | head -n 3
+// ends - head stops asking once it has enough - and so that a pipeline streams. 'file' is a name relative to
+// the working folder, or nil for standard input: a pipe (pieces as the writer produced them), a file the
+// command line redirected in, or what is typed at the terminal until Ctrl-D (one line a piece). A background
+// job has no terminal: its input is empty. A named file that does not exist gives nil from open().
+def class Reader {
+    field kind;      // 'text' (one piece, already known), 'pipe', 'terminal'
+    field text;
+    field pipe;
+    field done;
+
+    def init(kind) {
+        this.kind = kind;
+        this.text = nil;
+        this.pipe = nil;
+        this.done = false;
     }
-    return terminalText();
+
+    def chunk() {
+        if (this.done) { return nil; }
+        if (this.kind == 'text') {
+            this.done = true;
+            return this.text;
+        }
+        if (this.kind == 'pipe') {
+            piece = this.pipe.take();
+            if (piece == nil) { this.done = true; }
+            return piece;
+        }
+        line = LineEditor.read('');
+        if (line == nil) {
+            this.done = true;
+            return nil;
+        }
+        return line + strChar(10);
+    }
+}
+
+def openInput(file) {
+    r = nil;
+    if (file != nil) {
+        text = Fs.read(inCwd(file));
+        if (text == nil) { return nil; }
+        r = new Reader('text');
+        r.text = text;
+        return r;
+    }
+    c = Ctx.me();
+    if (c.pipeIn != nil) {
+        r = new Reader('pipe');
+        r.pipe = c.pipeIn;
+        return r;
+    }
+    if (c.inPath != '') {
+        text = Fs.read(c.inPath);
+        r = new Reader('text');
+        r.text = text == nil ? '' : text;
+        return r;
+    }
+    if (c.background) {
+        r = new Reader('text');
+        r.text = '';
+        return r;
+    }
+    return new Reader('terminal');
+}
+
+// the lines of an input, one at a time (without the line break); next() gives nil at the end
+def class Lines {
+    field reader;
+    field rest;
+    field atEnd;
+
+    def init(reader) {
+        this.reader = reader;
+        this.rest = '';
+        this.atEnd = false;
+    }
+
+    def next() {
+        while (true) {
+            cut = strFind(this.rest, strChar(10), 0);
+            if (cut >= 0) {
+                line = strSub(this.rest, 0, cut);
+                this.rest = strSub(this.rest, cut + 1, len(this.rest));
+                return Lines.noCr(line);
+            }
+            if (this.atEnd) {
+                if (this.rest == '') { return nil; }
+                line = this.rest;
+                this.rest = '';
+                return Lines.noCr(line);
+            }
+            piece = this.reader.chunk();
+            if (piece == nil) { this.atEnd = true; } else { this.rest = this.rest + piece; }
+        }
+    }
+
+    static def noCr(line) {
+        if (len(line) > 0 && strSub(line, len(line) - 1, len(line)) == strChar(13)) { return strSub(line, 0, len(line) - 1); }
+        return line;
+    }
+}
+
+// the whole of an input as text, or nil if the named file does not exist
+def inputText(file) {
+    r = openInput(file);
+    if (r == nil) { return nil; }
+    pieces = [];
+    while (true) {
+        piece = r.chunk();
+        if (piece == nil) { break; }
+        push(pieces, piece);
+    }
+    return strJoin(pieces, '');
 }
 
 def inputBytes(file) {
     if (file != nil) { return Fs.readData(inCwd(file)); }
-    text = inputText(nil);
-    return Utf8.encode(text);
+    return Utf8.encode(inputText(nil));
 }

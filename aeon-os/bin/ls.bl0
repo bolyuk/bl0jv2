@@ -5,7 +5,7 @@ import '../lib/userland.bl0';
 
 def main(words) {
     if (len(words) > 2) { sayErr('usage: ls [folder]'); return nil; }
-    dir = Prog.cwd;
+    dir = progCwd();
     if (len(words) == 2) { dir = inCwd(words[1]); }
     if (!Dirs.isDir(dir)) { sayErr(words[1] + ': no such folder'); return nil; }
     entries = Dirs.list(dir);

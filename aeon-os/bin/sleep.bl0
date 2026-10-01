@@ -1,0 +1,17 @@
+// aeon-os program: do nothing for a while; sleep <seconds>
+// Loaded from the virtual disk by the shell (bin/sleep.bl0c). It looks for a stop request every tenth of a second.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: sleep <seconds>'); return nil; }
+    seconds = portNumber(words[1]);
+    if (seconds == nil) { sayErr(words[1] + ': not a number of seconds'); return nil; }
+    until = ticks() + seconds * 1000;
+    while (ticks() < until) {
+        checkAbort();
+        wait(100);
+    }
+}
+
+programMain(main);

@@ -12,9 +12,8 @@ cd "$(dirname "$0")/.."
 JAR=${JAR:-bl0jv2-cli/target/bl0jv2-vm-lib.jar}
 IMG=${1:-aeon.img}
 BOOT=${2:-init}
-CORES=1
+CORES=${CORES:-4}
 mkdir -p "${SHARE:-share}"
-[ "$BOOT" = smp_boot ] && CORES=4
 exec java -jar "$JAR" -c -e -k -n "$CORES" --disk "$IMG" --disk-sectors 4096 \
   --shared aeon-os/libs.txt \
   --disk-put aeon-os/bin:bin \

@@ -1,0 +1,101 @@
+// aeon-os: a pipe between two programs running at the same time (on two cores). The writer's
+// text goes into a queue; the reader takes it out a piece at a time, sleeping when there is
+// none and until the writer closes its end. The queue is bounded: a writer that gets ahead of
+// its reader sleeps. If the reader goes away first, the writer's next write fails with
+// 'broken pipe' (what a SIGPIPE would be), which stops a producer nobody listens to. Every
+// wait is a checkpoint, so a pipeline can be interrupted.
+//
+// put() and take() are for one writer and one reader each; the queue itself is guarded by a
+// mutex and the sleeping is on events, which is why a pipe can be used from two cores.
+
+import '../kernel.bl0';
+import '../../stdlib/arrlib.bl0';
+
+def class Pipe {
+    static field limit;      // bytes a writer may get ahead
+
+    field chunks;
+    field head;              // index of the next chunk to take
+    field queued;            // characters waiting
+    field closed;            // the writer is done
+    field readerGone;
+    field mutex;
+    field readable;
+    field writable;
+
+    def init() {
+        this.chunks = [];
+        this.head = 0;
+        this.queued = 0;
+        this.closed = false;
+        this.readerGone = false;
+        this.mutex = newMutex();
+        this.readable = newEvent();
+        this.writable = newEvent();
+    }
+
+    def put(text) {
+        if (len(text) == 0) { return nil; }
+        while (true) {
+            lock(this.mutex);
+            if (this.readerGone) {
+                unlock(this.mutex);
+                throw('broken pipe');
+            }
+            if (this.queued < Pipe.limit || this.queued == 0) {
+                push(this.chunks, text);
+                this.queued += len(text);
+                unlock(this.mutex);
+                signalEvent(this.readable);
+                return nil;
+            }
+            gen = eventGen(this.writable);
+            unlock(this.mutex);
+            checkAbort();
+            waitEvent(this.writable, gen, 200);
+        }
+    }
+
+    // the next piece of text, or nil once the writer has closed and everything was taken
+    def take() {
+        while (true) {
+            lock(this.mutex);
+            if (this.head < len(this.chunks)) {
+                piece = this.chunks[this.head];
+                this.chunks[this.head] = '';
+                this.head += 1;
+                this.queued -= len(piece);
+                if (this.head >= 64 && this.head * 2 >= len(this.chunks)) {
+                    this.chunks = Arr.slice(this.chunks, this.head, len(this.chunks));
+                    this.head = 0;
+                }
+                unlock(this.mutex);
+                signalEvent(this.writable);
+                return piece;
+            }
+            if (this.closed) {
+                unlock(this.mutex);
+                return nil;
+            }
+            gen = eventGen(this.readable);
+            unlock(this.mutex);
+            checkAbort();
+            waitEvent(this.readable, gen, 200);
+        }
+    }
+
+    def closeWrite() {
+        lock(this.mutex);
+        this.closed = true;
+        unlock(this.mutex);
+        signalEvent(this.readable);
+    }
+
+    def closeRead() {
+        lock(this.mutex);
+        this.readerGone = true;
+        unlock(this.mutex);
+        signalEvent(this.writable);
+    }
+}
+Pipe.limit = 16384;
