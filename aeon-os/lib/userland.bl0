@@ -57,12 +57,7 @@ def portNumber(text) {
     return n;
 }
 
-// what was typed may hold \n for a line break (the keyboard cannot type one)
-def unescape(text) {
-    return strJoin(Split.split(text, '\\n'), strChar(10));
-}
-
-// text to the console, one line at a time (the console shows control characters as '?')
+// text to standard output, one line at a time
 def printText(text) {
     lines = Split.split(text, strChar(10));
     i = 0;
@@ -71,13 +66,59 @@ def printText(text) {
     while (i < last) {
         line = lines[i];
         if (len(line) > 0 && strSub(line, len(line) - 1, len(line)) == strChar(13)) { line = strSub(line, 0, len(line) - 1); }
-        consoleWriteLine(line);
+        say(line);
         i += 1;
     }
 }
 
 def isSpace(c) {
     return c == ' ' || c == strChar(10) || c == strChar(13) || c == strChar(9);
+}
+
+// --- standard input and output ---
+//
+// A program writes with say() and reads with inputText(); where that goes is the
+// shell's business: the terminal, or a file when the command line redirected or
+// piped it (the shell puts the paths on the system page). Output to a file is
+// collected and appended in blocks. Messages that are about the command itself -
+// usage, "no such file" - go to sayErr(), which is always the terminal, so that a
+// pipe carries only data.
+
+def class Io {
+    static field outPath;
+    static field inPath;
+    static field buffer;
+    static field size;
+
+    static def flush() {
+        if (len(Io.buffer) == 0) { return nil; }
+        text = strJoin(Io.buffer, '');
+        Io.buffer = [];
+        Io.size = 0;
+        Fs.append(Io.outPath, text);
+    }
+}
+Io.outPath = '';
+Io.inPath = '';
+Io.buffer = [];
+Io.size = 0;
+
+def sayRaw(text) {
+    if (Io.outPath == '') {
+        consoleWrite(text);
+        return nil;
+    }
+    push(Io.buffer, text);
+    Io.size += len(text);
+    if (Io.size > 2048) { Io.flush(); }
+}
+
+def say(text) {
+    sayRaw(text + '\n');
+}
+
+def sayErr(text) {
+    consoleWriteLine(text);
 }
 
 // a path as typed -> the stored name, relative to the folder the shell was in
@@ -100,10 +141,25 @@ def startProgram() {
     Console.columns = peek32(Sys.base + 3092);
     Console.rows = peek32(Sys.base + 3096);
     Prog.cwd = sysCwd();
-    Prog.words = tokens(sysArgs());
+    Prog.words = sysArgs();
+    Io.outPath = sysStdout();
+    Io.inPath = sysStdin();
     if (!Fs.mount()) {
-        consoleWriteLine('the disk has no filesystem');
+        sayErr('the disk has no filesystem');
         return false;
     }
     return true;
+}
+
+// runs the program: Prog.words[0] is the command name, the rest its arguments; whatever
+// it printed to a file is written out even if it fails
+def programMain(main) {
+    if (!startProgram()) { return nil; }
+    try {
+        main(Prog.words);
+    } catch (e) {
+        Io.flush();
+        throw(e);
+    }
+    Io.flush();
 }

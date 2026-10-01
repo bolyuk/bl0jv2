@@ -1,0 +1,36 @@
+// aeon-os: reading standard input, for the programs that are filters (cat, grep, wc,
+// head, tail, hexdump). Separate from userland.bl0 because reading the terminal
+// brings in the line editor, which a program that only lists files does not need.
+
+import 'userland.bl0';
+import 'lineedit.bl0';
+
+// the lines typed at the terminal until Ctrl-D, as text
+def terminalText() {
+    lines = [];
+    while (true) {
+        line = LineEditor.read('');
+        if (line == nil) { break; }
+        push(lines, line);
+    }
+    if (len(lines) == 0) { return ''; }
+    return strJoin(lines, strChar(10)) + strChar(10);
+}
+
+// the text of the named file, or of standard input when 'file' is nil: the file the
+// command line redirected or piped in, else what is typed at the terminal. nil if
+// the named file does not exist.
+def inputText(file) {
+    if (file != nil) { return Fs.read(inCwd(file)); }
+    if (Io.inPath != '') {
+        text = Fs.read(Io.inPath);
+        return text == nil ? '' : text;
+    }
+    return terminalText();
+}
+
+def inputBytes(file) {
+    if (file != nil) { return Fs.readData(inCwd(file)); }
+    text = inputText(nil);
+    return Utf8.encode(text);
+}

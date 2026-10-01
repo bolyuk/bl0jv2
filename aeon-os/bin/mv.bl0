@@ -4,9 +4,9 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 3) { consoleWriteLine('usage: mv <from> <to>'); return nil; }
+    if (len(words) != 3) { sayErr('usage: mv <from> <to>'); return nil; }
     from = inCwd(words[1]);
-    if (!Fs.rename(from, destination(from, words[2]))) { consoleWriteLine(words[1] + ': no such file'); }
+    if (!Fs.rename(from, destination(from, words[2]))) { sayErr(words[1] + ': no such file'); }
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

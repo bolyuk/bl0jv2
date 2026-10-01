@@ -4,16 +4,16 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 2) { consoleWriteLine('usage: stat <path>'); return nil; }
+    if (len(words) != 2) { sayErr('usage: stat <path>'); return nil; }
     name = inCwd(words[1]);
     size = Fs.size(name);
     if (size >= 0) {
-        consoleWriteLine(Fmt.format('{}: file, {} bytes, {} sectors', [name, size, (size + 511) >> 9]));
+        say(Fmt.format('{}: file, {} bytes, {} sectors', [name, size, (size + 511) >> 9]));
     } else if (Dirs.isDir(name)) {
-        consoleWriteLine(Fmt.format('{}: folder, {} entries', [name == '' ? '/' : name, len(Dirs.list(name))]));
+        say(Fmt.format('{}: folder, {} entries', [name == '' ? '/' : name, len(Dirs.list(name))]));
     } else {
-        consoleWriteLine(words[1] + ': no such file or folder');
+        sayErr(words[1] + ': no such file or folder');
     }
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

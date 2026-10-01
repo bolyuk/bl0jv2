@@ -14,7 +14,7 @@ BOOT=${2:-boot}
 CORES=1
 mkdir -p "${SHARE:-share}"
 [ "$BOOT" = smp_boot ] && CORES=4
-exec java -jar "$JAR" -c -e -k -n "$CORES" --disk "$IMG" --disk-sectors 2048 \
+exec java -jar "$JAR" -c -e -k -n "$CORES" --disk "$IMG" --disk-sectors 4096 \
   --disk-put aeon-os/bin:bin \
   --disk-put aeon-os/shell.bl0:sbin/shell.bl0c \
   --disk-put aeon-os/child_hello.bl0:sbin/child_hello.bl0c \

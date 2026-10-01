@@ -79,7 +79,7 @@ public final class AeonSession {
                 throw new IllegalStateException(e);
             }
         });
-        if (!s.waitFor("aeon-shell ready", 20_000)) throw new AssertionError(s.output());
+        if (!s.waitFor("aeon-shell ready", 20_000)) throw new AssertionError(s.output() + " failure=" + s.failure);
         return s;
     }
 
@@ -108,5 +108,19 @@ public final class AeonSession {
     /** the screen as an 80x24 terminal would show it now */
     VirtualTerminal screen() {
         return VirtualTerminal.render(output());
+    }
+
+    /** compiles and runs a snippet that may import aeon-os files (relative to aeon-os/); returns what it printed */
+    static String runSnippet(String source) throws Exception {
+        var parser = new Bl0jv2_Parser();
+        parser.setSourceCode(source);
+        var ast = (PROGRAM_N) parser.getAST(new Bl0jv2_Lexer().getTokens(source));
+        byte[] bytecode = new Bl0jv2_Compiler().compile(Bl0jv2_Linker.resolveImports(ast, AEON.resolve("snippet.bl0")));
+        var vm = new Bl0jv2_jVM();
+        StringWriter out = new StringWriter();
+        vm.set_out_writer(new PrintWriter(out));
+        vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
+        vm.run_instructions();
+        return out.toString();
     }
 }

@@ -4,8 +4,8 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 2) { consoleWriteLine('usage: mkdir <folder>'); return nil; }
+    if (len(words) != 2) { sayErr('usage: mkdir <folder>'); return nil; }
     Dirs.mkdir(inCwd(words[1]));
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

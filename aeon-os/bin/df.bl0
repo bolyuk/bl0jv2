@@ -5,7 +5,7 @@ import '../lib/userland.bl0';
 
 def main(words) {
     info = Fs.info();
-    consoleWriteLine(Fmt.format('{} files, {} of {} data sectors free ({} bytes free)', [info[3], info[2], info[1], info[2] * 512]));
+    say(Fmt.format('{} files, {} of {} data sectors free ({} bytes free)', [info[3], info[2], info[1], info[2] * 512]));
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

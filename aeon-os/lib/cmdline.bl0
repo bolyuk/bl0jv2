@@ -1,0 +1,124 @@
+// aeon-os: parsing a command line - words with quoting, pipes and redirections.
+//
+//   ls "my folder" | grep txt > found.txt        a pipeline of stages
+//   Cmdline.parse(line)  ->  array of Stage, one per command (empty for an empty line)
+//
+// Quoting: 'single' is literal; "double" understands \" \\ \n (newline) \t (tab);
+// outside quotes a backslash makes the next character literal, so \| or \  are
+// ordinary characters. Operators (| > >> <) need no spaces around them; inside
+// quotes they are text. A Stage has words (the command is words[0]) and
+// optionally inFile (< file), outFile (> file or >> file) and append (true for >>).
+// Syntax errors are thrown as "syntax error: ...".
+
+def class Stage {
+    field words;
+    field inFile;
+    field outFile;
+    field append;
+
+    def init() {
+        this.words = [];
+        this.inFile = nil;
+        this.outFile = nil;
+        this.append = false;
+    }
+}
+
+def class Cmdline {
+    // [[isOperator, text], ...]
+    static def tokenize(line) {
+        tokens = [];
+        n = len(line);
+        word = '';
+        inWord = false;
+        i = 0;
+        while (i < n) {
+            c = strSub(line, i, i + 1);
+            if (c == ' ' || c == '\t') {
+                if (inWord) { push(tokens, [false, word]); word = ''; inWord = false; }
+                i += 1;
+            } else if (c == '|' || c == '<' || c == '>') {
+                if (inWord) { push(tokens, [false, word]); word = ''; inWord = false; }
+                op = c;
+                if (c == '>' && i + 1 < n && strSub(line, i + 1, i + 2) == '>') { op = '>>'; i += 1; }
+                push(tokens, [true, op]);
+                i += 1;
+            } else if (c == "'") {
+                inWord = true;
+                close = strFind(line, "'", i + 1);
+                if (close < 0) { throw('syntax error: unterminated quote'); }
+                word = word + strSub(line, i + 1, close);
+                i = close + 1;
+            } else if (c == '"') {
+                inWord = true;
+                i += 1;
+                closed = false;
+                while (i < n && !closed) {
+                    d = strSub(line, i, i + 1);
+                    if (d == '"') {
+                        closed = true;
+                    } else if (d == '\\' && i + 1 < n) {
+                        e = strSub(line, i + 1, i + 2);
+                        if (e == 'n') { word = word + strChar(10); }
+                        else if (e == 't') { word = word + strChar(9); }
+                        else if (e == '"' || e == '\\') { word = word + e; }
+                        else { word = word + d + e; }
+                        i += 1;
+                    } else {
+                        word = word + d;
+                    }
+                    i += 1;
+                }
+                if (!closed) { throw('syntax error: unterminated quote'); }
+            } else if (c == '\\') {
+                if (i + 1 >= n) { throw('syntax error: a line cannot end with a backslash'); }
+                inWord = true;
+                word = word + strSub(line, i + 1, i + 2);
+                i += 2;
+            } else {
+                inWord = true;
+                word = word + c;
+                i += 1;
+            }
+        }
+        if (inWord) { push(tokens, [false, word]); }
+        return tokens;
+    }
+
+    static def parse(line) {
+        tokens = Cmdline.tokenize(line);
+        stages = [];
+        cur = new Stage();
+        i = 0;
+        while (i < len(tokens)) {
+            t = tokens[i];
+            if (!t[0]) {
+                push(cur.words, t[1]);
+            } else if (t[1] == '|') {
+                if (len(cur.words) == 0) { throw('syntax error: nothing before |'); }
+                if (cur.outFile != nil) { throw('syntax error: a redirected output cannot be piped on'); }
+                push(stages, cur);
+                cur = new Stage();
+            } else {
+                if (i + 1 >= len(tokens) || tokens[i + 1][0]) { throw('syntax error: ' + t[1] + ' needs a file name'); }
+                target = tokens[i + 1][1];
+                if (t[1] == '<') {
+                    if (len(stages) > 0) { throw('syntax error: only the first command can read from a file'); }
+                    cur.inFile = target;
+                } else {
+                    cur.outFile = target;
+                    cur.append = t[1] == '>>';
+                }
+                i += 1;
+            }
+            i += 1;
+        }
+        if (len(cur.words) == 0) {
+            if (len(stages) > 0) { throw('syntax error: nothing after |'); }
+            if (cur.inFile != nil || cur.outFile != nil) { throw('syntax error: a redirection needs a command'); }
+            return stages;
+        }
+        push(stages, cur);
+        return stages;
+    }
+}

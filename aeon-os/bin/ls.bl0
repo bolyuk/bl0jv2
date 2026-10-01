@@ -4,21 +4,21 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) > 2) { consoleWriteLine('usage: ls [folder]'); return nil; }
+    if (len(words) > 2) { sayErr('usage: ls [folder]'); return nil; }
     dir = Prog.cwd;
     if (len(words) == 2) { dir = inCwd(words[1]); }
-    if (!Dirs.isDir(dir)) { consoleWriteLine(words[1] + ': no such folder'); return nil; }
+    if (!Dirs.isDir(dir)) { sayErr(words[1] + ': no such folder'); return nil; }
     entries = Dirs.list(dir);
     i = 0;
     while (i < len(entries)) {
         if (entries[i][2]) {
-            consoleWriteLine(Fmt.format('   <dir>  {}/', [entries[i][0]]));
+            say(Fmt.format('   <dir>  {}/', [entries[i][0]]));
         } else {
-            consoleWriteLine(Fmt.format('{:>8}  {}', [entries[i][1], entries[i][0]]));
+            say(Fmt.format('{:>8}  {}', [entries[i][1], entries[i][0]]));
         }
         i += 1;
     }
-    if (len(entries) == 0) { consoleWriteLine('(empty)'); }
+    if (len(entries) == 0) { say('(empty)'); }
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

@@ -4,8 +4,8 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 2) { consoleWriteLine('usage: rmdir <folder>'); return nil; }
-    if (!Dirs.rmdir(inCwd(words[1]))) { consoleWriteLine(words[1] + ': no such folder'); }
+    if (len(words) != 2) { sayErr('usage: rmdir <folder>'); return nil; }
+    if (!Dirs.rmdir(inCwd(words[1]))) { sayErr(words[1] + ': no such folder'); }
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

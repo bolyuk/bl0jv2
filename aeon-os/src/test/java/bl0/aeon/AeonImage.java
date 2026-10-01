@@ -16,7 +16,7 @@ import java.util.List;
  * so it happens once per test run and every test gets a copy.
  */
 final class AeonImage {
-    static final int SECTORS = 2048;
+    static final int SECTORS = 4096;
     private static Path template;
 
     private AeonImage() {}

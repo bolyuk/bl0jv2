@@ -8,8 +8,10 @@
 //   +4    disk sectors
 //   +8    address of the disk's sector buffer
 //   +12   syscall vector the disk driver uses from user mode
-//   +16   command line: 32-bit byte count, then UTF-8 bytes (at most 1000)
+//   +16   the command's words, each ended by a NUL: 32-bit byte count, then UTF-8 bytes (at most 1000)
 //   +1024 working folder: the same shape
+//   +4096 standard input: a file path ('' = the terminal); +5120 standard output: a file path
+//         to append to ('' = the terminal); the same text shape
 //   +3088 keyboard ring (raw address); +3092 screen columns; +3096 screen rows
 //   +3072 host folder share (--bridge-fs): present, path buffer, data buffer, syscall vector
 //
@@ -17,6 +19,7 @@
 // in; reading and writing it is peek/poke, which any ring may do.
 
 import '../../stdlib/str/utf8.bl0';
+import '../../stdlib/str/split.bl0';
 
 def class Sys {
     static field base;
@@ -27,7 +30,7 @@ Sys.textMax = 1000;
 
 // privileged
 def sysReserve() {
-    reserve(Sys.base, 4096);
+    reserve(Sys.base, 8192);
 }
 
 def sysPublish(buffer, sectors, vector) {
@@ -37,6 +40,8 @@ def sysPublish(buffer, sectors, vector) {
     poke32(Sys.base + 12, vector);
     sysPutText(Sys.base + 16, '');
     sysPutText(Sys.base + 1024, '');
+    sysPutText(Sys.base + 4096, '');
+    sysPutText(Sys.base + 5120, '');
 }
 
 def sysPutText(addr, text) {
@@ -69,8 +74,32 @@ def sysGetText(addr) {
     return text;
 }
 
-def sysSetArgs(text) { sysPutText(Sys.base + 16, text); }
-def sysArgs() { return sysGetText(Sys.base + 16); }
+// the command's words travel NUL-terminated (a word may be empty or hold spaces)
+def sysSetArgs(words) {
+    text = '';
+    i = 0;
+    while (i < len(words)) {
+        text = text + words[i] + strChar(0);
+        i += 1;
+    }
+    sysPutText(Sys.base + 16, text);
+}
+
+def sysArgs() {
+    text = sysGetText(Sys.base + 16);
+    if (text == '') { return []; }
+    parts = Split.split(text, strChar(0));
+    pop(parts);
+    return parts;
+}
+
+def sysSetStdio(inPath, outPath) {
+    sysPutText(Sys.base + 4096, inPath);
+    sysPutText(Sys.base + 5120, outPath);
+}
+
+def sysStdin() { return sysGetText(Sys.base + 4096); }
+def sysStdout() { return sysGetText(Sys.base + 5120); }
 def sysSetCwd(text) { sysPutText(Sys.base + 1024, text); }
 def sysCwd() { return sysGetText(Sys.base + 1024); }
 

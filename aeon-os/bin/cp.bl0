@@ -4,12 +4,12 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 3) { consoleWriteLine('usage: cp <from> <to>'); return nil; }
+    if (len(words) != 3) { sayErr('usage: cp <from> <to>'); return nil; }
     from = inCwd(words[1]);
     data = Fs.readData(from);
-    if (data == nil) { consoleWriteLine(words[1] + ': no such file'); return nil; }
+    if (data == nil) { sayErr(words[1] + ': no such file'); return nil; }
     Fs.writeData(destination(from, words[2]), data);
     free(data);
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

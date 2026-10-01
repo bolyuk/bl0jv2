@@ -1,12 +1,13 @@
-// aeon-os program: count lines, words and bytes
+// aeon-os program: count lines, words and bytes; wc [file] (standard input when no file)
 // Loaded from the virtual disk by the shell (bin/wc.bl0c); see lib/userland.bl0.
 
 import '../lib/userland.bl0';
+import '../lib/input.bl0';
 
 def main(words) {
-    if (len(words) != 2) { consoleWriteLine('usage: wc <file>'); return nil; }
-    text = Fs.read(inCwd(words[1]));
-    if (text == nil) { consoleWriteLine(words[1] + ': no such file'); return nil; }
+    if (len(words) > 2) { sayErr('usage: wc [file]'); return nil; }
+    text = inputText(len(words) == 2 ? words[1] : nil);
+    if (text == nil) { sayErr(words[1] + ': no such file'); return nil; }
     lines = 0;
     wordCount = 0;
     inWord = false;
@@ -23,7 +24,9 @@ def main(words) {
         i += 1;
     }
     if (len(text) > 0 && text[len(text) - 1] != strChar(10)) { lines += 1; }
-    consoleWriteLine(Fmt.format('{} lines, {} words, {} bytes', [lines, wordCount, Fs.size(inCwd(words[1]))]));
+    bytes = Utf8.encode(text);
+    say(Fmt.format('{} lines, {} words, {} bytes', [lines, wordCount, len(bytes)]));
+    free(bytes);
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

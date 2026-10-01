@@ -4,8 +4,8 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 2) { consoleWriteLine('usage: rm <file>'); return nil; }
-    if (!Fs.remove(inCwd(words[1]))) { consoleWriteLine(words[1] + ': no such file'); }
+    if (len(words) != 2) { sayErr('usage: rm <file>'); return nil; }
+    if (!Fs.remove(inCwd(words[1]))) { sayErr(words[1] + ': no such file'); }
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

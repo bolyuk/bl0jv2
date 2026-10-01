@@ -4,9 +4,9 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) != 2) { consoleWriteLine('usage: touch <file>'); return nil; }
+    if (len(words) != 2) { sayErr('usage: touch <file>'); return nil; }
     name = inCwd(words[1]);
     if (!Fs.exists(name)) { Fs.write(name, ''); }
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

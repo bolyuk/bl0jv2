@@ -16,7 +16,7 @@ def class Loader {
     static field buffer;
     static field limit;
 }
-Loader.limit = 131072;
+Loader.limit = 262144;
 
 // reads 'path' from the disk and runs it. mode 0 = user program, 1 = kernel
 // program. Errors (no such file, too big, a failing program) are thrown.

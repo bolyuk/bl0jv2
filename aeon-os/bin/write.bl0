@@ -4,10 +4,10 @@
 import '../lib/userland.bl0';
 
 def main(words) {
-    if (len(words) < 2) { consoleWriteLine('usage: write <file> <text>'); return nil; }
+    if (len(words) < 2) { sayErr('usage: write <file> <text>'); return nil; }
     name = inCwd(words[1]);
-    Fs.write(name, unescape(restOf(words, 2)));
-    consoleWriteLine(Fmt.format('wrote {} bytes to {}', [Fs.size(name), words[1]]));
+    Fs.write(name, restOf(words, 2));
+    say(Fmt.format('wrote {} bytes to {}', [Fs.size(name), words[1]]));
 }
 
-if (startProgram()) { main(Prog.words); }
+programMain(main);

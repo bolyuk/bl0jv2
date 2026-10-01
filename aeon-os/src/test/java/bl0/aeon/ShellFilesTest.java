@@ -107,7 +107,7 @@ class ShellFilesTest {
     @Test
     void dataCommandsWorkOnLinesAndBytes(@TempDir Path dir) throws Exception {
         var s = shell(dir.resolve("d.img"));
-        command(s, "write t.txt one\\ntwo apple\\nthree", "wrote 19 bytes");
+        command(s, "write t.txt \"one\\ntwo apple\\nthree\"", "wrote 19 bytes");
         command(s, "cat t.txt", "three");
         command(s, "wc t.txt", "3 lines, 4 words, 19 bytes");
         command(s, "head -n 1 t.txt", "one");
@@ -151,10 +151,10 @@ class ShellFilesTest {
 
     @Test
     void aProgramSeesItsArgumentsAndTheCurrentFolder(@TempDir Path dir) throws Exception {
-        var s = shellWith(dir, "where", "import '../lib/sys.bl0'; println 'args=[' + sysArgs() + '] cwd=[' + sysCwd() + ']';");
+        var s = shellWith(dir, "where", "import '../lib/sys.bl0'; import '../lib/userland.bl0'; startProgram(); say('args=' + str(Prog.words) + ' cwd=[' + sysCwd() + ']');");
         command(s, "mkdir work", "$ ");
         command(s, "cd work", "/work $ ");
-        command(s, "where one  two", "args=[where one  two] cwd=[work]");
+        command(s, "where one  \"two  words\"", "args=[where, one, two  words] cwd=[work]");
     }
 
     @Test
@@ -191,7 +191,7 @@ class ShellFilesTest {
         var s = shell(dir.resolve("d.img"));
         command(s, "write 0123456789012345678901234567890123456789012345678 x", "fs: a file name must be 1 to 47 bytes");
         command(s, "mv a b", "a: no such file");
-        command(s, "cat", "usage: cat <file>");
+        command(s, "mv one", "usage: mv <from> <to>");
         command(s, "whoami", "user");
     }
 
