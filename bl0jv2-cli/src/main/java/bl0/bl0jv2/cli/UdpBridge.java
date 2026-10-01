@@ -39,6 +39,8 @@ final class UdpBridge {
     private final DatagramSocket socket;
     private final int localFakeIp;
     private volatile SocketAddress lastRealSender;
+    private volatile int lastSenderAddr;
+    private volatile int lastSenderPort;
 
     // localFakeIp: the 32-bit address this bridge tells the VM every real
     // packet came FROM originally being the real sender's own address
@@ -64,6 +66,18 @@ final class UdpBridge {
         this.socket.setSoTimeout(50); // lets the RX loop re-check for shutdown without blocking forever
     }
 
+    /**
+     * true for a frame the VM addressed to the real peer this bridge last heard
+     * from, i.e. a reply this bridge relays itself. When an outbound bridge
+     * runs in the same process it must leave those alone, or the real client
+     * would get every reply twice (once from here, once from a socket the
+     * outbound bridge opens to the same address).
+     */
+    boolean claims(byte[] frame) {
+        return lastRealSender != null && frame.length >= 28
+                && ipDstAddr(frame) == lastSenderAddr && udpDstPort(frame) == lastSenderPort;
+    }
+
     void start() {
         Thread rx = new Thread(this::runRx, "udp-bridge-rx");
         rx.setDaemon(true);
@@ -87,6 +101,8 @@ final class UdpBridge {
             }
 
             lastRealSender = packet.getSocketAddress();
+            lastSenderAddr = addressToInt(packet.getAddress());
+            lastSenderPort = packet.getPort();
             int srcPort = packet.getPort();
             int payloadLen = packet.getLength();
 
@@ -97,22 +113,11 @@ final class UdpBridge {
     }
 
     private void runTx() {
-        long lastSeq = -1;
+        var udp = TxDispatcher.of(vm).subscribe(frame -> frame.length >= 28 && ipProto(frame) == IP_PROTO_UDP);
         while (!socket.isClosed()) {
-            try {
-                Thread.sleep(1);
-            } catch (InterruptedException e) {
-                return;
-            }
-
-            NicFrame.TxPoll result = pollTx(vm, lastSeq);
-            if (result == null)
+            byte[] frame = udp.poll(50);
+            if (frame == null)
                 continue;
-            lastSeq = result.seq;
-            byte[] frame = result.frame;
-
-            if (frame.length < 28 || ipProto(frame) != IP_PROTO_UDP)
-                continue; // not a UDP frame (or a TCP bridge's own traffic sharing this wire - see NicFrame's own doc) - not ours
 
             SocketAddress dest = lastRealSender;
             if (dest == null)
@@ -129,5 +134,6 @@ final class UdpBridge {
                 // dropped packet on a real, unreliable network
             }
         }
+        udp.close();
     }
 }

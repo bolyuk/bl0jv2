@@ -378,10 +378,12 @@ public class Bl0jv2_CLI {
                     vm.set_interrupt_poll_interval(1);
                     startKeyboardBridge(vm);
                 }
+                UdpBridge udpBridge = null;
                 if (bridgeUdpPort >= 0) {
                     vm.set_interrupt_poll_interval(1);
                     try {
-                        new UdpBridge(vm, bridgeUdpPort, 0x0A000001).start();
+                        udpBridge = new UdpBridge(vm, bridgeUdpPort, 0x0A000001);
+                        udpBridge.start();
                     } catch (java.net.SocketException e) {
                         System.err.println("--bridge-udp: cannot bind host port " + bridgeUdpPort + ": " + e.getMessage());
                         return 1;
@@ -402,7 +404,7 @@ public class Bl0jv2_CLI {
                 if (bridgeOutbound) {
                     vm.set_interrupt_poll_interval(1);
                     new TcpOutboundBridge(vm).start();
-                    new UdpOutboundBridge(vm).start();
+                    new UdpOutboundBridge(vm, udpBridge == null ? f -> false : udpBridge::claims).start();
                 }
                 System.out.println();
                 // flush in finally: a crash mid-program must not discard

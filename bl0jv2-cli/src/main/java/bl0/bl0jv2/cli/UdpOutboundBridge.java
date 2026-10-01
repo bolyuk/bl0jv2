@@ -34,31 +34,39 @@ import static bl0.bl0jv2.cli.NicFrame.*;
  */
 final class UdpOutboundBridge {
 
+    static final int MAX_IN_FLIGHT = 64;
+
     private final Bl0jv2_jVM vm;
-    private volatile long lastSeqSeen = -1;
+    private final java.util.concurrent.Semaphore slots = new java.util.concurrent.Semaphore(MAX_IN_FLIGHT);
+
+    // frames this predicate accepts belong to something else in the same
+    // process (UdpBridge's replies) and are not relayed outward
+    private final java.util.function.Predicate<byte[]> skip;
 
     UdpOutboundBridge(Bl0jv2_jVM vm) {
+        this(vm, frame -> false);
+    }
+
+    UdpOutboundBridge(Bl0jv2_jVM vm, java.util.function.Predicate<byte[]> skip) {
         this.vm = vm;
+        this.skip = skip;
     }
 
     void start() {
-        Thread t = new Thread(this::watchLoop, "udp-outbound-watch");
+        var udp = TxDispatcher.of(vm).subscribe(frame -> frame.length >= 28 && ipProto(frame) == IP_PROTO_UDP);
+        Thread t = new Thread(() -> watchLoop(udp), "udp-outbound-watch");
         t.setDaemon(true);
         t.start();
     }
 
-    private void watchLoop() {
+    private void watchLoop(TxDispatcher.Subscription udp) {
         while (true) {
-            NicFrame.TxPoll result = NicFrame.pollTx(vm, lastSeqSeen);
-            if (result == null) {
-                TcpRelay.sleep(1);
+            byte[] frame = udp.poll(100);
+            if (frame == null)
                 continue;
-            }
-            lastSeqSeen = result.seq;
-            byte[] frame = result.frame;
 
-            if (frame.length < 28 || ipProto(frame) != IP_PROTO_UDP)
-                continue; // not UDP (or a TCP bridge's own traffic sharing this wire - see NicFrame's own doc) - not ours
+            if (skip.test(frame))
+                continue;
 
             byte[] payload = parseUdpPayload(frame);
             if (payload == null)
@@ -69,8 +77,16 @@ final class UdpOutboundBridge {
             int destAddr = ipDstAddr(frame);
             int destPort = udpDstPort(frame);
 
-            Thread h = new Thread(() -> handleOutbound(vmAddr, vmPort, destAddr, destPort, payload),
-                    "udp-outbound-send");
+            if (!slots.tryAcquire())
+                continue; // too many requests waiting on replies - dropped, like an overloaded network would
+
+            Thread h = new Thread(() -> {
+                try {
+                    handleOutbound(vmAddr, vmPort, destAddr, destPort, payload);
+                } finally {
+                    slots.release();
+                }
+            }, "udp-outbound-send");
             h.setDaemon(true);
             h.start();
         }
@@ -80,6 +96,8 @@ final class UdpOutboundBridge {
         try (DatagramSocket socket = new DatagramSocket()) {
             socket.setSoTimeout(5000);
             InetAddress destination = InetAddress.getByAddress(addrBytes(destAddr));
+            if (!TcpOutboundBridge.isAllowedDestination(destination))
+                return;
             socket.send(new DatagramPacket(payload, payload.length, destination, destPort));
 
             byte[] buf = new byte[MAX_FRAME_BYTES];

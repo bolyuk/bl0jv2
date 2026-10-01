@@ -33,55 +33,83 @@ import static bl0.bl0jv2.cli.TcpRelay.*;
  * bl0jv2-side inherently limits how many tcpConnect()s a program can have
  * open together (see tcp.bl0's own TcpRegistry).
  *
- * <p>Known gap: stdlib/net/tcp.bl0's own tcpConnect() has no timeout - if
- * the real destination refuses the connection, is unreachable, or this
- * watcher never sees the SYN at all, the bl0jv2 program hangs in
- * tcpConnect() forever. Fixing that belongs in tcp.bl0 itself (a bounded
- * wait there would benefit the loopback case too), not patched around
- * here.
+ * <p>The VM's tcp.bl0 retransmits an unanswered SYN, so the same SYN can
+ * show up several times while the real connect is still in progress (it can
+ * take seconds). Only the FIRST starts a connection; repeats of a connection
+ * already being set up or running are ignored.
+ *
+ * <p>Because this lets the VM program reach any host it can name, it is
+ * opt-in (--bridge-outbound), limited to {@link #MAX_CONNECTIONS} at a time
+ * (further SYNs are dropped and the VM retransmits them later), and never
+ * connects to an address that is meaningless or dangerous to reach from
+ * here: the wildcard address, multicast, and link-local (169.254.0.0/16 -
+ * where cloud instances serve their credentials-bearing metadata endpoint).
+ * Loopback and private ranges are allowed: reaching a service on this
+ * machine or LAN is the point of the bridge.
  */
 final class TcpOutboundBridge {
+
+    static final int MAX_CONNECTIONS = 64;
 
     private final Bl0jv2_jVM vm;
     private final TcpRelay relay;
     private int isnCounter = 9000;
-    private volatile long lastSeqSeen = -1;
+    private final java.util.concurrent.Semaphore slots = new java.util.concurrent.Semaphore(MAX_CONNECTIONS);
+    // 4-tuples of connections being set up or running - see the class doc
+    private final java.util.Set<String> active = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     TcpOutboundBridge(Bl0jv2_jVM vm) {
         this.vm = vm;
         this.relay = new TcpRelay(vm);
     }
 
+    /** false for an address this bridge refuses to connect to - see the class doc */
+    static boolean isAllowedDestination(InetAddress address) {
+        return !(address.isAnyLocalAddress() || address.isMulticastAddress() || address.isLinkLocalAddress());
+    }
+
     void start() {
-        Thread t = new Thread(this::watchLoop, "tcp-outbound-watch");
+        // a bare SYN (no ACK) is the one frame shape that can only mean "the
+        // VM is opening a new connection"
+        var syns = TxDispatcher.of(vm).subscribe(frame ->
+                frame.length >= 40 && ipProto(frame) == IP_PROTO_TCP
+                        && hasFlag(tcpFlags(frame), SYN) && !hasFlag(tcpFlags(frame), ACK));
+        Thread t = new Thread(() -> watchLoop(syns), "tcp-outbound-watch");
         t.setDaemon(true);
         t.start();
     }
 
-    private void watchLoop() {
+    private void watchLoop(TxDispatcher.Subscription syns) {
         while (true) {
-            NicFrame.TxPoll result = NicFrame.pollTx(vm, lastSeqSeen);
-            if (result == null) {
-                sleep(1);
+            byte[] frame = syns.poll(100);
+            if (frame == null)
                 continue;
-            }
-            lastSeqSeen = result.seq;
-            byte[] frame = result.frame;
 
-            if (frame.length >= 40 && ipProto(frame) == IP_PROTO_TCP) {
-                int flags = tcpFlags(frame);
-                if (hasFlag(flags, SYN) && !hasFlag(flags, ACK)) {
-                    int vmAddr = ipSrcAddr(frame);
-                    int vmPort = tcpSrcPort(frame);
-                    int destAddr = ipDstAddr(frame);
-                    int destPort = tcpDstPort(frame);
-                    int vmSeq = tcpSeq(frame);
-                    Thread h = new Thread(() -> handleOutbound(vmAddr, vmPort, destAddr, destPort, vmSeq),
-                            "tcp-outbound-connect");
-                    h.setDaemon(true);
-                    h.start();
-                }
+            int vmAddr = ipSrcAddr(frame);
+            int vmPort = tcpSrcPort(frame);
+            int destAddr = ipDstAddr(frame);
+            int destPort = tcpDstPort(frame);
+            int vmSeq = tcpSeq(frame);
+
+            String key = vmAddr + ":" + vmPort + ">" + destAddr + ":" + destPort;
+            if (!active.add(key))
+                continue; // a retransmitted SYN for a connection already in progress
+
+            if (!slots.tryAcquire()) {
+                active.remove(key);
+                continue; // at the limit - dropped, the VM resends it
             }
+
+            Thread h = new Thread(() -> {
+                try {
+                    handleOutbound(vmAddr, vmPort, destAddr, destPort, vmSeq);
+                } finally {
+                    active.remove(key);
+                    slots.release();
+                }
+            }, "tcp-outbound-connect");
+            h.setDaemon(true);
+            h.start();
         }
     }
 
@@ -89,14 +117,14 @@ final class TcpOutboundBridge {
         Socket real;
         try {
             InetAddress destination = InetAddress.getByAddress(addrBytes(destAddr));
+            if (!isAllowedDestination(destination))
+                return; // refused: nothing sent back, the VM's connect() times out
             real = new Socket();
             real.connect(new InetSocketAddress(destination, destPort), 5000);
         } catch (IOException e) {
             // the real destination refused/timed out/etc - nothing sent
-            // back to the VM (tcp.bl0 has no RST handling - see this
-            // class's own doc on the resulting hang), this connection
-            // attempt just silently goes nowhere, matching a SYN lost on
-            // a real unreliable network with no response ever arriving
+            // back to the VM (tcp.bl0 has no RST handling), so its
+            // connect() gives up after its own timeout
             return;
         }
 
@@ -105,13 +133,8 @@ final class TcpOutboundBridge {
         // this bridge is talking FOR" - here, that's the real destination
         // service (destAddr/destPort), since we're the one impersonating
         // it when injecting our SYN-ACK/data as if it arrived from there;
-        // localIp/localPort is the VM's OWN address (vmAddr/vmPort) -
-        // sendToVm() addresses every injected frame's destination there,
-        // and pollTx() expects the VM's own outgoing frames to carry it as
-        // their source, for tcp.bl0's own address matching
-        // (ipParseHeader/tcpFindMatch) to ever recognize either side of
-        // this exchange as belonging to the same connection
-        FakeConn conn = new FakeConn(destAddr, destPort, vmAddr, vmPort);
+        // localIp/localPort is the VM's OWN address (vmAddr/vmPort)
+        FakeConn conn = relay.newConn(destAddr, destPort, vmAddr, vmPort);
         conn.ack = vmSeq + 1;
         conn.seq = isn();
 
@@ -121,15 +144,15 @@ final class TcpOutboundBridge {
         boolean established = false;
         long deadline = System.currentTimeMillis() + 5000;
         while (System.currentTimeMillis() < deadline) {
-            byte[] frame = relay.pollTx(conn);
+            byte[] frame = conn.tx.poll(5);
             if (frame != null && hasFlag(tcpFlags(frame), ACK)) {
                 established = true;
                 break;
             }
-            sleep(5);
         }
 
         if (!established) {
+            conn.close();
             try {
                 real.close();
             } catch (IOException ignored) {

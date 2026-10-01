@@ -75,9 +75,10 @@ final class TcpBridge {
     }
 
     private void handleClient(Socket client) {
-        FakeConn conn = new FakeConn(remoteFakeIp, nextEphemeralPort++, localFakeIp, localFakePort);
+        FakeConn conn = relay.newConn(remoteFakeIp, nextEphemeralPort++, localFakeIp, localFakePort);
 
         if (!handshake(conn)) {
+            conn.close();
             try {
                 client.close();
             } catch (IOException ignored) {
