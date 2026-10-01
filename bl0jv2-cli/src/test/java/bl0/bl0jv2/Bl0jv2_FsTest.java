@@ -180,4 +180,13 @@ class Bl0jv2_FsTest {
                 "Fs.format(); Fs.write('f', 'xxxxxxxxxx'); big = ''; i = 0; while (i < 9000) { big = big + 'y'; i += 1; } " +
                 "try { Fs.append('f', big); } catch (e) { print e; } print '|' + str(Fs.size('f'));"));
     }
+
+    @Test
+    void utf8StreamDecodesBytesOneAtATime(@TempDir Path dir) throws IOException {
+        assertEquals("a|й|€|\uD83D\uDE00|\uFFFDb|\uFFFD", run(dir, 64,
+                "s = new Utf8Stream(); " +
+                "print s.feed(97) + '|' + s.feed(0xD0) + s.feed(0xB9) + '|' + s.feed(0xE2) + s.feed(0x82) + s.feed(0xAC) + '|' + " +
+                "s.feed(0xF0) + s.feed(0x9F) + s.feed(0x98) + s.feed(0x80) + '|' + " +
+                "s.feed(0xE2) + s.feed(98) + '|' + s.feed(0xFF);"));
+    }
 }

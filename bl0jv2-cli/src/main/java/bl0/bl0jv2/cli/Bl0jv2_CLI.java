@@ -235,67 +235,42 @@ public class Bl0jv2_CLI {
         System.out.println("bl0jv2 " + C.VERSION);
     }
 
+    // the guest's output is Unicode text; write it as UTF-8 whatever the host's default charset is
+    private static final java.io.PrintStream UTF8_OUT =
+            new java.io.PrintStream(new java.io.FileOutputStream(java.io.FileDescriptor.out), true, java.nio.charset.StandardCharsets.UTF_8);
+
     private static Writer consoleAutoFlushWriter() {
         return new Writer() {
             @Override public void write(char[] cbuf, int off, int len) {
-                System.out.print(new String(cbuf, off, len));
-                System.out.flush();
+                UTF8_OUT.print(new String(cbuf, off, len));
+                UTF8_OUT.flush();
             }
-            @Override public void flush() { System.out.flush(); }
+            @Override public void flush() { UTF8_OUT.flush(); }
             @Override public void close() {}
         };
     }
 
-    // reads real lines from stdin on a background thread and feeds each
-    // character into the VM's simulated keyboard exactly the way a real
-    // keyboard controller would: hostPortWrite() places the byte on its
-    // data port, raiseInterrupt() asserts the IRQ line - see
-    // Bl0jv2_jVM.hostPortWrite()'s own doc. One VM instance, one bridge
-    // thread, for the whole run - exec() (see its own doc) runs loaded
-    // programs IN this same instance now, not a second one, so there is
-    // no "which process is currently running" redirection to do: whatever
-    // code registered a handler for vector 2, in this VM, sees it.
-    //
-    // A small pacing delay between characters avoids overwriting one byte
-    // with the next before the running program's own interrupt handler has
-    // read it (a real hardware hazard, not just a simulation quirk - see
-    // Bl0jv2_KeyboardTest's own doc on the same race). readLine() blocks
-    // on real terminal input, so this only ever makes sense against an
-    // interactive stdin, not a redirected/empty one.
+    // Feeds what the host terminal sends into the VM's keyboard device (a FIFO with an
+    // interrupt, see KeyboardController): bytes as they come, UTF-8 and escape
+    // sequences untouched. The guest turns them into keys. Only meaningful against an
+    // interactive stdin.
     private static void startKeyboardBridge(Bl0jv2_jVM vm) {
+        // the terminal's size is the screen's size; raw mode makes every key reach the guest as
+        // the terminal sent it (see HostTerminal) - the guest's line editor does the editing
+        int[] size = HostTerminal.size();
+        vm.set_console_size(size[0], size[1]);
+        HostTerminal.enterRawMode();
         Thread bridge = new Thread(() -> {
-            var reader = new BufferedReader(new InputStreamReader(System.in));
+            var in = System.in;
+            byte[] buffer = new byte[256];
             try {
-                // gives the program a head start to reach its own
-                // registerHandler() call before the first byte arrives -
-                // an interrupt raised before anything is registered for
-                // its vector is silently dropped (see InterruptController's
-                // own doc), losing the very first keystroke. A real human
-                // typing their first command takes far longer than this to
-                // even start, so this delay is never actually felt in
-                // interactive use - it only matters against piped input,
-                // where the very first character could otherwise arrive
-                // within microseconds of the program starting
-                Thread.sleep(150);
-                // a real human typing is always paced far looser than
-                // this anyway - these delays only matter when testing
-                // against piped/redirected input, where an entire line
-                // (or several) is available to readLine() instantly, with
-                // none of a real keyboard's natural inter-key delay
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    for (char c : line.toCharArray()) {
-                        vm.hostPortWrite(0, 1, c);
-                        vm.raiseInterrupt(2);
-                        Thread.sleep(20);
-                    }
-                    vm.hostPortWrite(0, 1, 13); // Enter
-                    vm.raiseInterrupt(2);
-                    Thread.sleep(60);
-                }
-            } catch (IOException | InterruptedException ignored) {
-                // stdin closed or the JVM is shutting down - nothing left
-                // for this bridge to do either way
+                int n;
+                // the bytes go into the keyboard device's FIFO as they arrive and an interrupt tells
+                // the guest; the FIFO is what makes pacing unnecessary. In the terminal's normal line
+                // mode the Enter key arrives as a line feed, which the guest also takes as Enter.
+                while ((n = in.read(buffer)) > 0) vm.key_input(java.util.Arrays.copyOf(buffer, n));
+            } catch (IOException ignored) {
+                // stdin closed or the JVM is shutting down - nothing left for this bridge to do
             }
         }, "keyboard-bridge");
         bridge.setDaemon(true);
