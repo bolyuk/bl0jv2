@@ -172,12 +172,19 @@ def class TcpConn {
         // Set TcpConn.connectTimeoutMs to 0 or below to wait indefinitely.
         deadline = ticks() + TcpConn.connectTimeoutMs;
         while (conn.state == 'SYN_SENT') {
-            if (TcpConn.connectTimeoutMs > 0 && ticks() >= deadline) {
-                conn.state = 'CLOSED';
-                return nil;
-            }
+            gen = eventGen(Nic.rxEvent);
             TcpRegistry.pump();
-            wait(1);
+            if (conn.state != 'SYN_SENT') { break; }
+            if (TcpConn.connectTimeoutMs > 0) {
+                remaining = deadline - ticks();
+                if (remaining <= 0) {
+                    conn.state = 'CLOSED';
+                    return nil;
+                }
+                TcpRegistry.idle(gen, remaining);
+            } else {
+                TcpRegistry.idle(gen, -1);
+            }
         }
 
         return conn;
@@ -247,10 +254,11 @@ def class TcpConn {
         }
 
         if (this.state == 'SYN_RCVD') {
-            if (TcpFlags.has(seg.flags, TcpFlags.ack)) {
-                this.state = 'ESTABLISHED';
-            }
-            return nil;
+            if (!TcpFlags.has(seg.flags, TcpFlags.ack)) { return nil; }
+            this.state = 'ESTABLISHED';
+            // no return: the handshake's final ACK can already carry data
+            // (or be followed by it before accept() even wakes) - fall
+            // through so that payload is processed instead of dropped
         }
 
         // ESTABLISHED, and FIN_WAIT (our own close already sent, but the
@@ -270,17 +278,37 @@ def class TcpConn {
         }
     }
 
-    // busy-polls TcpRegistry.pump() with a wait(1) between checks, the
-    // same throttling this project's other idle-poll loops (aeon-os/
-    // shell.bl0's REPL, aeon-os/smp_boot.bl0's completion wait) already
-    // use to avoid pegging a CPU core at 100% while genuinely idle - see
-    // wait()'s own doc
+    // pumps the registry, then sleeps on the NIC's RX event (see
+    // TcpRegistry.idle()) until another frame shows up - no polling
     def accept() {
         while (this.state == 'LISTEN' || this.state == 'SYN_RCVD') {
+            gen = eventGen(Nic.rxEvent);
             TcpRegistry.pump();
-            wait(1);
+            if (this.state == 'LISTEN' || this.state == 'SYN_RCVD') { TcpRegistry.idle(gen, -1); }
         }
         return this;
+    }
+
+    // blocks until receive() would return something (true), the peer has
+    // closed with nothing left to read (false), or timeoutMs elapsed
+    // (false; negative = no limit) - the event-driven replacement for the
+    // 'while (!conn.hasData()) wait(1)' poll loop. Sleeps on the NIC's RX
+    // event, so a segment arriving wakes it immediately.
+    def waitData(timeoutMs) {
+        deadline = ticks() + timeoutMs;
+        while (true) {
+            gen = eventGen(Nic.rxEvent);
+            TcpRegistry.pump();
+            if (len(this.recvBuffer) > 0) { return true; }
+            if (this.peerFinReceived) { return false; }
+            if (timeoutMs < 0) {
+                TcpRegistry.idle(gen, -1);
+            } else {
+                remaining = deadline - ticks();
+                if (remaining <= 0) { return false; }
+                TcpRegistry.idle(gen, remaining);
+            }
+        }
     }
 
     // no window/unacked-byte tracking to wait on - see this file's own
@@ -322,16 +350,16 @@ def class TcpConn {
     }
 
     // blocks until the peer's own FIN has been seen (see close()'s own
-    // doc for why that's a separate, optional step) - the same
-    // wait(1)-throttled busy-poll every other blocking call in this file
-    // uses. Real TCP also tracks a TIME_WAIT state after this point,
+    // doc for why that's a separate, optional step) - sleeps on the NIC's
+    // RX event like every other blocking call in this file. Real TCP also tracks a TIME_WAIT state after this point,
     // specifically to catch a duplicate late segment - collapsed away
     // here since a lossless loopback link has nothing left to ever
     // retransmit or duplicate.
     def waitClosed() {
         while (!this.peerFinReceived) {
+            gen = eventGen(Nic.rxEvent);
             TcpRegistry.pump();
-            wait(1);
+            if (!this.peerFinReceived) { TcpRegistry.idle(gen, -1); }
         }
         this.state = 'CLOSED';
     }
@@ -383,6 +411,7 @@ TcpConn.connectTimeoutMs = 10000;
 def class TcpRegistry {
     static field conns;
     static field lock;
+    static field pumpLock; // serializes pump() - see its own doc
 
     // which of THIS process's own connections a just-arrived segment
     // belongs to - an exact 4-tuple match (an already-connecting/connected
@@ -415,6 +444,20 @@ def class TcpRegistry {
         return result;
     }
 
+    // sleeps until Nic.rxEvent is signalled after generation 'gen' (or
+    // timeoutMs passes; negative = no limit), instead of wait(1)-polling.
+    // Every caller follows the same shape: read gen = eventGen(Nic.rxEvent)
+    // FIRST, then pump() and check its own condition, then idle(gen, ...).
+    // Anything that changes state after the gen read - a frame arriving, or
+    // ANOTHER core's pump() handling a segment that belongs to this caller's
+    // connection (pump() signals after each handled segment for exactly
+    // that reason) - bumps the generation, so idle() returns at once
+    // instead of sleeping through it. A spurious return is harmless: every
+    // caller loops.
+    static def idle(gen, timeoutMs) {
+        waitEvent(Nic.rxEvent, gen, timeoutMs);
+    }
+
     // drains every frame CURRENTLY queued on the NIC, routing each to
     // whichever registered connection it belongs to. Has to be global
     // across every connection this process owns, not a per-connection
@@ -430,6 +473,17 @@ def class TcpRegistry {
     // internally - a program using this stack never has to call it
     // directly.
     static def pump() {
+        // one core at a time: frames are popped from the NIC queue in
+        // order, but without this two cores could each pop a consecutive
+        // frame and then run handleSegment() for them concurrently, in
+        // either order - e.g. a connection's data segment handled before
+        // the ACK frame that precedes it, or two segments of one stream
+        // swapped so the in-order check (seg.seq == rcvNext) silently
+        // drops one, and with no retransmission nothing ever recovers it.
+        // Holding pumpLock across pop AND handle keeps arrival order. The
+        // mutex is reentrant, so handleSegment() -> sendSegment() paths
+        // that end up back in pump() are fine.
+        lock(TcpRegistry.pumpLock);
         while (true) {
             frame = Nic.tryRecv();
             if (frame == nil) { break; }
@@ -441,9 +495,14 @@ def class TcpRegistry {
             target = TcpRegistry.findMatch(ipHeader, seg);
             if (target != nil) {
                 target.handleSegment(ipHeader, seg);
+                // the connection's owner may be a DIFFERENT core, asleep in
+                // idle() - see idle()'s own doc
+                signalEvent(Nic.rxEvent);
             }
         }
+        unlock(TcpRegistry.pumpLock);
     }
 }
 TcpRegistry.conns = [];
 TcpRegistry.lock = newMutex();
+TcpRegistry.pumpLock = newMutex();

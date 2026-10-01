@@ -28,4 +28,11 @@ public final class NativeMethods {
     // loads and runs a separate compiled (.bl0c) file as a genuinely
     // isolated child process - see Bl0jv2_jVM's own registration
     public static final byte EXEC = 0x11;
+    // generation-counted event (see Bl0jEvent): eventGen() snapshots it,
+    // signalEvent() bumps it and wakes every waiter, waitEvent() sleeps
+    // until it differs from a snapshot (or timeout / deliverable interrupt)
+    public static final byte NEW_EVENT = 0x12;
+    public static final byte SIGNAL_EVENT = 0x13;
+    public static final byte WAIT_EVENT = 0x14;
+    public static final byte EVENT_GEN = 0x15;
 }

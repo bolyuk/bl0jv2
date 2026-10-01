@@ -5,6 +5,8 @@ import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Interrupt registration and the pending queue, kept separate from
@@ -48,6 +50,28 @@ public final class InterruptController {
     private final PriorityBlockingQueue<PendingInterrupt> pending = new PriorityBlockingQueue<>();
     private int pollInterval = 5;
 
+    // one monitor shared by every blocking waiter (Bl0jEvent.await) and by
+    // raiseInterrupt(): a core blocked in waitEvent() must wake the moment
+    // either its event is signalled OR an interrupt becomes pending, and a
+    // single shared condition is the simplest way to get both without
+    // polling. Waiters re-check their own predicate after every wakeup, so
+    // a signalAll() that wakes someone else's event is harmless.
+    private final ReentrantLock wakeLock = new ReentrantLock();
+    private final Condition wakeCond = wakeLock.newCondition();
+
+    public ReentrantLock wakeLock() { return wakeLock; }
+    public Condition wakeCond() { return wakeCond; }
+
+    /** wakes every thread blocked on the shared monitor (see wakeLock) */
+    public void wakeWaiters() {
+        wakeLock.lock();
+        try {
+            wakeCond.signalAll();
+        } finally {
+            wakeLock.unlock();
+        }
+    }
+
     private static void checkVector(int vector) {
         if (vector < 0 || vector >= VECTOR_COUNT)
             throw new Bl0j_VM_Exception("interrupt vector out of range [0, " + VECTOR_COUNT + "): " + vector);
@@ -63,6 +87,7 @@ public final class InterruptController {
         HandlerEntry entry = handlers.get(vector);
         if (entry != null)
             pending.offer(new PendingInterrupt(vector, entry.priority()));
+        wakeWaiters();
     }
 
     // synchronous lookup for syscall(): the same vector table raiseInterrupt/

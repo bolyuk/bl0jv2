@@ -228,6 +228,40 @@ public final class Bl0jv2_jVM {
             ((Bl0jMutex) m).unlock();
             return null;
         });
+        nativeMethods.put(NativeMethods.NEW_EVENT, (ignored) -> new Bl0jEvent(interrupts));
+        nativeMethods.put(NativeMethods.SIGNAL_EVENT, (e) -> {
+            requireEvent(e).signal();
+            return null;
+        });
+        nativeMethods.put(NativeMethods.EVENT_GEN, (e) -> requireEvent(e).generation());
+        // waitEvent(e, gen, timeoutMs): arrives as a 3-element array (a
+        // native takes exactly one operand - see Bl0jv2_Compiler's
+        // compileWaitEvent). true = the event was signalled since the
+        // eventGen() snapshot 'gen'; false = timed out, or an interrupt this
+        // core can actually take right now is pending (return so the
+        // cooperative poll can deliver it - see Bl0jEvent's own doc on why
+        // that matters). A masked core ignores pending interrupts here, same
+        // as the poll itself does, otherwise it would spin on an interrupt
+        // it is not allowed to take. The generation is an int that wraps -
+        // only ever compared for equality, which a wrap doesn't break.
+        nativeMethods.put(NativeMethods.WAIT_EVENT, (arg) -> {
+            if (!(arg instanceof Bl0jArray args) || args.length() != 3)
+                throw new Bl0j_VM_Exception("waitEvent: expected (event, gen, timeoutMs)");
+            Bl0jEvent event = requireEvent(unbox(args.getRaw(0)));
+            Object gen = unbox(args.getRaw(1));
+            Object ms = unbox(args.getRaw(2));
+            if (!(gen instanceof Integer seenGen))
+                throw new Bl0j_VM_Exception("waitEvent: gen must be the int returned by eventGen()");
+            if (!(ms instanceof Integer timeout))
+                throw new Bl0j_VM_Exception("waitEvent: timeout must be an int (ms, negative = forever)");
+            CoreContext ctx = currentContext();
+            try {
+                return event.await(seenGen,
+                        timeout, () -> panicked || (ctx.disableDepth == 0 && interrupts.hasPending()));
+            } catch (InterruptedException e) {
+                return false;
+            }
+        });
         // one-way: lowers this core's own privilege, never raises it - see
         // CoreContext.privileged's own doc. Throws if already unprivileged,
         // the same "not held"-style strictness as Bl0jMutex.unlock(): a
@@ -462,8 +496,15 @@ public final class Bl0jv2_jVM {
         if (value instanceof Bl0jClass) return "class";
         if (value instanceof Bl0jInstance instance) return instance.cls.name;
         if (value instanceof Bl0jMutex) return "mutex";
+        if (value instanceof Bl0jEvent) return "event";
         if (value == NIL_OBJECT) return "nil";
         throw new Bl0j_VM_Exception("unknown type: " + value.getClass().getSimpleName());
+    }
+
+    private static Bl0jEvent requireEvent(Object value) {
+        if (value instanceof Bl0jEvent e)
+            return e;
+        throw new Bl0j_VM_Exception("expected an event, got " + (value == null ? "nil" : value.getClass().getSimpleName()));
     }
 
     private String readLine() {

@@ -28,10 +28,8 @@ def class Http {
 
         response = '';
         while (!conn.peerFinReceived) {
-            if (conn.hasData()) {
+            if (conn.waitData(-1)) {
                 response = response + conn.receive();
-            } else {
-                wait(1);
             }
         }
         response = response + conn.receive(); // whatever arrived alongside the FIN itself
@@ -61,10 +59,10 @@ def class Http {
 
         request = '';
         while (Find.find(request, '\r\n\r\n') < 0) {
-            if (conn.hasData()) {
+            if (conn.waitData(-1)) {
                 request = request + conn.receive();
             } else {
-                wait(1);
+                break; // peer closed before sending a full request
             }
         }
 

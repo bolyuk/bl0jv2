@@ -146,7 +146,8 @@ def class Dns {
         i = 0;
         while (i < 300) {
             i = i + 1;
-            if (!Udp.hasPacket()) { wait(20); continue; }
+            gen = eventGen(Nic.rxEvent);
+            if (!Udp.hasPacket()) { waitEvent(Nic.rxEvent, gen, 20); continue; }
 
             pkt = UdpPacket.receive();
             if (pkt.srcIp == Dns.myIp && pkt.srcPort == Dns.myPort) { continue; }

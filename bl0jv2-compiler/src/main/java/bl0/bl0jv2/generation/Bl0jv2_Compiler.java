@@ -463,6 +463,77 @@ public final class Bl0jv2_Compiler {
         return result;
     }
 
+    // newEvent(): zero-arg, value-producing - same shape as newMutex()
+    private Integer compileNewEvent(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "newEvent", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.NEW_EVENT, result);
+        return result;
+    }
+
+    // signalEvent(e): 1-arg, same clobber-avoidance MOV as lock(m)
+    private Integer compileSignalEvent(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "signalEvent", 1))
+            return null;
+
+        int eRegRaw = compileInner(funCall.args.get(0));
+        int eReg = regIndex++;
+        _emit(OpCodes.MOV, eReg, eRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.SIGNAL_EVENT, eReg);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    // eventGen(e): 1-arg, value-producing (the event's current generation) -
+    // same shape as exec(path)
+    private Integer compileEventGen(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "eventGen", 1))
+            return null;
+
+        int eRegRaw = compileInner(funCall.args.get(0));
+        int eReg = regIndex++;
+        _emit(OpCodes.MOV, eReg, eRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.EVENT_GEN, eReg);
+        return eReg;
+    }
+
+    // waitEvent(e, gen, timeoutMs): a native call carries exactly one
+    // operand register, so the three arguments are packed into a fresh
+    // 3-element array first (laid out exactly like an ArrayLiteralNode's own
+    // registers) and unpacked again inside the native. Result: true if the
+    // event was signalled since 'gen' was read, false on timeout or a
+    // pending interrupt.
+    private Integer compileWaitEvent(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "waitEvent", 3))
+            return null;
+
+        int[] argRegs = new int[3];
+        for (int i = 0; i < 3; i++)
+            argRegs[i] = compileInner(funCall.args.get(i));
+
+        int startReg = regIndex++;
+        for (int argReg : argRegs) {
+            _emit(OpCodes.MOV, regIndex, argReg);
+            regIndex++;
+        }
+        _emit(OpCodes.NEW_ARRAY, startReg, 3);
+
+        // the heap has no GC (only explicit free), so the packing array is
+        // freed right after the call instead of leaking one slot per wait -
+        // CALL_NATIVE overwrites startReg with the result, so the array's
+        // reference is parked in its own register first
+        int arrRef = regIndex++;
+        _emit(OpCodes.MOV, arrRef, startReg);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.WAIT_EVENT, startReg);
+        _emit(OpCodes.FREE, arrRef);
+        return startReg;
+    }
+
     // peek8(addr)/peek16(addr)/peek32(addr): the width is known at compile
     // time (which builtin name matched), so it's baked in as PEEK's b
     // operand directly - an immediate, not a register
@@ -854,6 +925,10 @@ public final class Bl0jv2_Compiler {
         if ((r = compileNewMutex(funCall)) != null) return r;
         if ((r = compileLockMutex(funCall)) != null) return r;
         if ((r = compileUnlockMutex(funCall)) != null) return r;
+        if ((r = compileNewEvent(funCall)) != null) return r;
+        if ((r = compileSignalEvent(funCall)) != null) return r;
+        if ((r = compileEventGen(funCall)) != null) return r;
+        if ((r = compileWaitEvent(funCall)) != null) return r;
         if ((r = compileRaiseInterrupt(funCall)) != null) return r;
         if ((r = compileRegisterHandler(funCall)) != null) return r;
         if ((r = compileDispatch(funCall)) != null) return r;
