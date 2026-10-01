@@ -455,7 +455,7 @@ public final class Bl0jv2_jVM {
 
         int stackDepthBefore = ctx.callStack.size();
         boolean privilegedBefore = ctx.privileged;
-        ctx.callStack.push(new Frame(newRegisters(registersLength), -1, -1));
+        ctx.callStack.push(newRegisters(registersLength), -1, -1);
         if (unprivileged) ctx.privileged = false;
         try {
             execute(entryAddr, stackDepthBefore, true);
@@ -880,7 +880,7 @@ public final class Bl0jv2_jVM {
         exports.clear();
         externConsts.clear();
         definedNames.clear();
-        ctx.callStack.add(new Frame(newRegisters(registers_length), -1, -1));
+        ctx.callStack.push(newRegisters(registers_length), -1, -1);
         consts = new long[constants_length];
 
         rawMemory.reset();
@@ -1081,8 +1081,7 @@ public final class Bl0jv2_jVM {
     private void collectGarbage(CoreContext ctx) {
         Collector collector = new Collector(heap);
         collector.markValues(consts);
-        for (Frame frame : ctx.callStack)
-            collector.markValues(frame.regs());
+        ctx.callStack.forEachLive(collector::markValues);
         interrupts.forEachHandlerFn(collector::markObject);
         collector.drain();
         collector.sweep();
@@ -1268,7 +1267,7 @@ public final class Bl0jv2_jVM {
         public void run() {
             CoreContext ctx = new CoreContext(coreId);
             coreContext.set(ctx);
-            ctx.callStack.push(new Frame(new long[1], -1, -1));
+            ctx.callStack.push(new long[1], -1, -1);
 
             while (true) {
                 DispatchedWork work;
@@ -1364,7 +1363,7 @@ public final class Bl0jv2_jVM {
         // resultReg=0 is safe to reuse here: every frame's own reg[0] is
         // never assigned to a real variable by the compiler (regIndex
         // starts at 1), so it's free scratch space for exactly this
-        ctx.callStack.push(new Frame(regs, -1, 0));
+        ctx.callStack.push(regs, -1, 0);
         ctx.invokeDepth++;
         try {
             execute(fun.address() * C.INSTR_WIDTH, stopAtDepth, pollEligible);
@@ -1373,7 +1372,7 @@ public final class Bl0jv2_jVM {
         } finally {
             ctx.invokeDepth--;
         }
-        return unbox(ctx.callStack.peek().regs()[0]);
+        return unbox(ctx.callStack.top()[0]);
     }
 
     // the trap gate: invoke()s callee with this core temporarily forced
@@ -1442,7 +1441,7 @@ public final class Bl0jv2_jVM {
             // refreshed wherever the top frame changes: CALL, RETURN, and an
             // exception unwinding to a handler (a nested invoke() always restores
             // the stack to where it was, so it needs nothing)
-            long[] reg = ctx.callStack.peek().regs();
+            long[] reg = ctx.callStack.top();
 
             for(int addr = startAddr; addr < code.length;){
                 try {
@@ -1581,10 +1580,11 @@ public final class Bl0jv2_jVM {
                         if (ctx.callStack.size() >= maxCallDepth)
                             throw stackOverflow(maxCallDepth);
 
-                        long[] regs = newRegisters(fun.regs());
+                        // the callee's registers come from the call stack's own slot for this depth
+                        // (reused, not allocated, when the size matches)
+                        long[] regs = ctx.callStack.pushNew(fun.regs(), addr, b);
                         System.arraycopy(capturedCells, 0, regs, 1, capturedCells.length);
                         System.arraycopy(reg, b + 1, regs, 1 + capturedCells.length, c);
-                        ctx.callStack.push(new Frame(regs, addr, b));
                         reg = regs;
                         addr = fun.address() * C.INSTR_WIDTH;
                     }
@@ -1861,11 +1861,13 @@ public final class Bl0jv2_jVM {
                         while (!ctx.handlerStack.isEmpty() && ctx.handlerStack.peek().callStackDepth() >= ctx.callStack.size())
                             ctx.handlerStack.pop();
 
-                        Frame frame = ctx.callStack.pop();
-                        long[] callerRegs = ctx.callStack.peek().regs();
-                        callerRegs[frame.resultReg] = reg[a];
+                        int resultReg = ctx.callStack.topResultReg();
+                        int returnTo = ctx.callStack.topReturnAddress();
+                        ctx.callStack.pop();
+                        long[] callerRegs = ctx.callStack.top();
+                        callerRegs[resultReg] = reg[a];
                         reg = callerRegs;
-                        addr = frame.addressToReturn;
+                        addr = returnTo;
 
                         // the frame invoke() pushed has just returned -
                         // hand control back to the native Java caller
@@ -1908,7 +1910,7 @@ public final class Bl0jv2_jVM {
                         String message = e instanceof StackOverflowError ? "stack overflow: native recursion too deep"
                                 : e instanceof Bl0j_VM_Exception v ? v.plainMessage()
                                 : e.getMessage() != null ? e.getMessage() : e.toString();
-                        reg = ctx.callStack.peek().regs();
+                        reg = ctx.callStack.top();
                         reg[handler.errReg()] = box(new Bl0jError(message));
                         addr = handler.catchAddr();
                         continue;
@@ -1941,7 +1943,7 @@ public final class Bl0jv2_jVM {
         for (int i = 0; i < args.length; i++)
             regs[i+1] = args[i];
 
-        ctx.callStack.push(new Frame(regs, addressToReturn, resultReg));
+        ctx.callStack.push(regs, addressToReturn, resultReg);
     }
 
     private long boxRef(Object value) {
@@ -1987,7 +1989,58 @@ public final class Bl0jv2_jVM {
         return new String(strBytes, StandardCharsets.UTF_8);
     }
 
-    private record Frame(long[] regs, int addressToReturn, int resultReg) {}
+    // The call stack: one register file per active call, in parallel arrays (no object per call). The
+    // register array of a depth is kept after the call returns and reused by the next call at that depth
+    // when it needs the same number of registers - a recursive function allocates nothing per call, which
+    // is most of what a call used to cost. A frame's registers are only ever reached through here (closures
+    // capture cells, not registers), and only the live depths are scanned by the collector.
+    private static final class CallStack {
+        private long[][] regs = new long[32][];
+        private int[] returnAddress = new int[32];
+        private int[] resultReg = new int[32];
+        private int size;
+
+        int size() { return size; }
+        void clear() { size = 0; }
+        void pop() { size--; }
+        long[] top() { return regs[size - 1]; }
+        int topReturnAddress() { return returnAddress[size - 1]; }
+        int topResultReg() { return resultReg[size - 1]; }
+
+        private void grow() {
+            int n = regs.length * 2;
+            regs = Arrays.copyOf(regs, n);
+            returnAddress = Arrays.copyOf(returnAddress, n);
+            resultReg = Arrays.copyOf(resultReg, n);
+        }
+
+        void push(long[] registers, int returnTo, int result) {
+            if (size == regs.length) grow();
+            regs[size] = registers;
+            returnAddress[size] = returnTo;
+            resultReg[size] = result;
+            size++;
+        }
+
+        /** a new frame of 'count' registers, all nil - the array of this depth when it has the right size */
+        long[] pushNew(int count, int returnTo, int result) {
+            if (size == regs.length) grow();
+            long[] r = regs[size];
+            if (r == null || r.length != count) {
+                r = new long[count];
+                regs[size] = r;
+            }
+            Arrays.fill(r, NanBox.NIL);
+            returnAddress[size] = returnTo;
+            resultReg[size] = result;
+            size++;
+            return r;
+        }
+
+        void forEachLive(java.util.function.Consumer<long[]> action) {
+            for (int i = 0; i < size; i++) action.accept(regs[i]);
+        }
+    }
 
     // callStackDepth is callStack.size() at the moment TRY_ENTER ran, so a
     // RETURN that unwinds past this depth knows the handler no longer
@@ -2002,7 +2055,7 @@ public final class Bl0jv2_jVM {
     // core must not affect another core's own polling.
     private static final class CoreContext {
         final int coreId;
-        final ArrayDeque<Frame> callStack = new ArrayDeque<>();
+        final CallStack callStack = new CallStack();
         final ArrayDeque<Handler> handlerStack = new ArrayDeque<>();
         // this core's own interrupt-enable state - a nesting-safe counter,
         // not a flag (disableInterrupts()/enableInterrupts() must nest
