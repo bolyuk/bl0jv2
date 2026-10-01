@@ -56,9 +56,7 @@ def class Dns {
         ];
         qname = Dns.encodeName(hostname);
 
-        packet = [];
-        i = 0; while (i < len(header)) { push(packet, header[i]); i = i + 1; }
-        i = 0; while (i < len(qname)) { push(packet, qname[i]); i = i + 1; }
+        packet = Arr.appendAll(header, qname);
         push(packet, 0x00); push(packet, 0x01); // QTYPE=1 (A)
         push(packet, 0x00); push(packet, 0x01); // QCLASS=1 (IN)
         return packet;

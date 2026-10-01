@@ -93,7 +93,8 @@
 def class Nic {
     static field vector;
     static field txQueue;  // frames sent but not yet moved to rxQueue by the ISR
-    static field rxQueue;  // array of already-delivered frame arrays
+    static field rxQueue;  // already-delivered frames; the live ones start at rxHead
+    static field rxHead;   // index of the oldest unread frame (popping advances this instead of copying the array)
     static field lock;
     static field dropNext; // test hook / lossy-link simulation: silently discard the next N sent frames
     static field rxEvent;  // signalled whenever the network state may have changed (a frame queued, a TCP segment handled) - see recvWait()
@@ -187,33 +188,43 @@ def class Nic {
         }
     }
 
-    static def hasFrame() {
+    // number of frames waiting to be received
+    static def pending() {
         lock(Nic.lock);
-        result = len(Nic.rxQueue) > 0;
+        result = len(Nic.rxQueue) - Nic.rxHead;
         unlock(Nic.lock);
         return result;
     }
 
-    // FIFO: pops the OLDEST frame, not the newest - Bl0jArray's own pop()
-    // only ever removes from the back (LIFO), wrong order for a receive
-    // queue, so this rebuilds the array shifted down by one instead.
-    // Caller must check hasFrame() first, same contract kbReadChar()
-    // already has for an empty keyboard buffer - fine under single-core
-    // use, but with two real cores polling, hasFrame() and recv() are two
-    // separate locked sections, so another core can still drain the queue
-    // in between them; use tryRecv() instead of this pair when that
+    static def hasFrame() {
+        return Nic.pending() > 0;
+    }
+
+    // FIFO: pops the OLDEST frame, not the newest. Popping advances rxHead (and
+    // clears the slot) - it used to rebuild the whole array shifted down by
+    // one, O(queue length) per frame. Once everything has been read the array
+    // is replaced by an empty one. Caller must check hasFrame() first, same
+    // contract kbReadChar() already has for an empty keyboard buffer - fine
+    // under single-core use, but with two real cores polling, hasFrame() and
+    // recv() are two separate locked sections, so another core can still drain
+    // the queue in between them; use tryRecv() instead of this pair when that
     // matters.
     static def recv() {
         lock(Nic.lock);
-        frame = Nic.rxQueue[0];
-        rest = [];
-        i = 1;
-        while (i < len(Nic.rxQueue)) {
-            push(rest, Nic.rxQueue[i]);
-            i = i + 1;
-        }
-        Nic.rxQueue = rest;
+        frame = Nic.popLocked();
         unlock(Nic.lock);
+        return frame;
+    }
+
+    // the pop itself; the caller holds Nic.lock and has checked the queue is not empty
+    static def popLocked() {
+        frame = Nic.rxQueue[Nic.rxHead];
+        Nic.rxQueue[Nic.rxHead] = nil;
+        Nic.rxHead = Nic.rxHead + 1;
+        if (Nic.rxHead == len(Nic.rxQueue)) {
+            Nic.rxQueue = [];
+            Nic.rxHead = 0;
+        }
         return frame;
     }
 
@@ -249,18 +260,11 @@ def class Nic {
     // separate calls (see recv()'s own doc)
     static def tryRecv() {
         lock(Nic.lock);
-        if (len(Nic.rxQueue) == 0) {
+        if (len(Nic.rxQueue) == Nic.rxHead) {
             unlock(Nic.lock);
             return nil;
         }
-        frame = Nic.rxQueue[0];
-        rest = [];
-        i = 1;
-        while (i < len(Nic.rxQueue)) {
-            push(rest, Nic.rxQueue[i]);
-            i = i + 1;
-        }
-        Nic.rxQueue = rest;
+        frame = Nic.popLocked();
         unlock(Nic.lock);
         return frame;
     }
@@ -268,6 +272,7 @@ def class Nic {
 Nic.vector = 3; // distinct from kernel.bl0's Keyboard.vector=2 and Console.sysWriteVector=1
 Nic.txQueue = [];
 Nic.rxQueue = [];
+Nic.rxHead = 0;
 Nic.lock = newMutex();
 Nic.rxEvent = newEvent();
 Nic.dropNext = 0;

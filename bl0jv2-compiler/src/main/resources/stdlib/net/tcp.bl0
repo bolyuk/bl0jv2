@@ -117,12 +117,12 @@ def class TcpConn {
             Ip.byteAt(tcpLen, 8), Ip.byteAt(tcpLen, 0)
         ];
 
-        combined = [];
-        i = 0; while (i < len(pseudo)) { push(combined, pseudo[i]); i = i + 1; }
-        i = 0; while (i < len(header)) { push(combined, header[i]); i = i + 1; }
-        i = 0; while (i < len(payloadBytes)) { push(combined, payloadBytes[i]); i = i + 1; }
-
-        cs = Ip.checksum(combined);
+        // pseudo-header (12 bytes) and header (20) are both even, so the sum can
+        // run over the three parts in place - see Ip.partialSum
+        sum = Ip.partialSum(pseudo, 0);
+        sum = Ip.partialSum(header, sum);
+        sum = Ip.partialSum(payloadBytes, sum);
+        cs = Ip.finishSum(sum);
         header[16] = Ip.byteAt(cs, 8);
         header[17] = Ip.byteAt(cs, 0);
         return header;
@@ -241,25 +241,14 @@ def class TcpConn {
     // retransmission re-sends the ORIGINAL seq, not the current sndNext).
     // The ack field is always the current rcvNext.
     def transmit(seq, flags, payload) {
-        payloadBytes = [];
-        i = 0;
-        while (i < len(payload)) {
-            push(payloadBytes, int(payload[i]));
-            i = i + 1;
-        }
+        payloadBytes = Ip.bytesOf(payload);
 
         header = TcpConn.buildHeader(this.localPort, this.remotePort, seq, this.rcvNext, flags);
         header = TcpConn.applyChecksum(header, this.localIp, this.remoteIp, payloadBytes);
 
-        segment = [];
-        i = 0; while (i < len(header)) { push(segment, header[i]); i = i + 1; }
-        i = 0; while (i < len(payloadBytes)) { push(segment, payloadBytes[i]); i = i + 1; }
+        ipHeader = Ip.buildHeader(this.localIp, this.remoteIp, Ip.protoTcp, len(header) + len(payloadBytes));
 
-        ipHeader = Ip.buildHeader(this.localIp, this.remoteIp, Ip.protoTcp, len(segment));
-
-        frame = [];
-        i = 0; while (i < len(ipHeader)) { push(frame, ipHeader[i]); i = i + 1; }
-        i = 0; while (i < len(segment)) { push(frame, segment[i]); i = i + 1; }
+        frame = Arr.appendAll(Arr.appendAll(ipHeader, header), payloadBytes);
 
         Nic.send(frame);
     }

@@ -106,6 +106,16 @@ def class Arr {
         pop(arr);
     }
 
+    // pushes every element of src onto dst, in order (dst changes, src doesn't):
+    // building a frame out of header + payload parts in ONE array instead of
+    // concat()ing, which makes a fresh array per step
+    static def appendAll(dst, src) {
+        i = 0;
+        n = len(src);
+        while (i < n) { push(dst, src[i]); i = i + 1; }
+        return dst;
+    }
+
     // a NEW array holding every element of a then every element of b, in
     // order (unlike removeAt, order matters here and is preserved) -
     // arrays have no concat/spread of their own, so building one by hand
