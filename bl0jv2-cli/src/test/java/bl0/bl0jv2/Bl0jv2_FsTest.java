@@ -226,4 +226,66 @@ class Bl0jv2_FsTest {
                 "f = Fs.lookup(Fs.encodeName('d/')); Fs.writeMeta(f, [0, 0, 0]); " +
                 "a = Fs.stat('old'); b = Fs.stat('d'); print str(a[2]) + ',' + str(a[0]) + '|' + str(b[2]) + ',' + str(b[0]);"));
     }
+
+    private static String twoDisks(Path dir, MemoryDisk first, MemoryDisk second, String body) throws IOException {
+        Path entry = dir.resolve("entry.bl0");
+        Files.writeString(entry, "import 'stdlib/fs/fs.bl0'; Disk.init(8192); " + body);
+        return Bl0jv2_TestRunner.runFile(entry, vm -> { vm.attach_disk(first); vm.attach_disk(second); });
+    }
+
+    @Test
+    void aSecondDriveIsMountedAsAFolder(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        assertEquals("on usb|6|true|mnt/usb/,mnt/usb/a.txt|root only|false", twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.formatUnit(1); Fs.write('mnt/usb/', ''); Fs.mountDrive(1, 'mnt/usb'); " +
+                "Fs.write('mnt/usb/a.txt', 'on usb'); Fs.write('b.txt', 'root only'); " +
+                "print Fs.read('mnt/usb/a.txt') + '|' + str(Fs.size('mnt/usb/a.txt')) + '|' + str(Fs.exists('mnt/usb/a.txt')) + '|'; " +
+                "names = []; e = Fs.list('mnt/usb/'); i = 0; while (i < len(e)) { push(names, e[i][0]); i += 1; } " +
+                "print strJoin(names, ',') + '|' + Fs.read('b.txt') + '|' + str(Fs.exists('a.txt'));"));
+    }
+
+    @Test
+    void whatWasWrittenToTheDriveStaysOnItAndComesBackWhenItIsMountedAgain(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        assertEquals("false|true|usb data", twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.formatUnit(1); Fs.write('m/', ''); Fs.mountDrive(1, 'm'); Fs.write('m/x', 'usb data'); " +
+                "Fs.unmountDrive('m'); print str(Fs.exists('m/x')) + '|'; " +
+                "Fs.mountDrive(1, 'm'); print str(Fs.exists('m/x')) + '|' + Fs.read('m/x');"));
+    }
+
+    @Test
+    void theRootListingShowsTheDriveAndEachDriveHasItsOwnSpace(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        // total sectors of the second drive, and the root's listing holding the mounted file too
+        assertEquals("48|64|true|2", twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.formatUnit(1); Fs.write('m/', ''); Fs.mountDrive(1, 'm'); Fs.write('m/x', 'data'); " +
+                "print str(Fs.infoOf('m/x')[0]) + '|' + str(Fs.info()[0]) + '|'; " +
+                "all = Fs.list(''); found = false; i = 0; while (i < len(all)) { if (all[i][0] == 'm/x') { found = true; } i += 1; } " +
+                "print str(found) + '|' + str(len(Fs.mountList()) + len(Fs.driveList()) - 1);"));
+    }
+
+    @Test
+    void filesMoveBetweenDrivesWithRename(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        assertEquals("moved|false|true|back|true", twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.formatUnit(1); Fs.write('m/', ''); Fs.mountDrive(1, 'm'); Fs.write('f', 'moved'); " +
+                "Fs.rename('f', 'm/f'); print Fs.read('m/f') + '|' + str(Fs.exists('f')) + '|'; " +
+                "Fs.write('m/g', 'back'); Fs.rename('m/g', 'g'); print str(Fs.exists('m/f')) + '|' + Fs.read('g') + '|' + str(Fs.exists('g'));"));
+    }
+
+    @Test
+    void mountMistakesAreErrors(@TempDir Path dir) throws IOException {
+        var second = new MemoryDisk(48);
+        String out = twoDisks(dir, new MemoryDisk(64), second,
+                "Fs.format(); Fs.write('m/', ''); Fs.write('file', 'x'); " +
+                "def tryIt(f) { try { f(); return 'ok'; } catch (e) { return str(e); } } " +
+                "print tryIt(() -> Fs.mountDrive(1, 'm')) + '|';" +                      // drive 1 has no file system yet
+                "Fs.formatUnit(1); " +
+                "print tryIt(() -> Fs.mountDrive(1, 'file')) + '|' + tryIt(() -> Fs.mountDrive(1, 'nosuch')) + '|' + tryIt(() -> Fs.mountDrive(0, 'm')) + '|' + " +
+                "tryIt(() -> Fs.mountDrive(5, 'm')) + '|'; " +
+                "Fs.mountDrive(1, 'm'); " +
+                "print tryIt(() -> Fs.mountDrive(1, 'm')) + '|' + tryIt(() -> Fs.formatUnit(1)) + '|' + tryIt(() -> Fs.rename('m', 'z')) + '|' + tryIt(() -> Fs.unmountDrive('nope'));");
+        for (String part : new String[]{"holds no file system", "no such folder", "no drive 0", "no drive 5", "already mounted", "in use", "is a mount point", "not a mount point"})
+            org.junit.jupiter.api.Assertions.assertTrue(out.contains(part), part + " in: " + out);
+    }
 }

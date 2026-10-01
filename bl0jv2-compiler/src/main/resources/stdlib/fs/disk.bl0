@@ -19,13 +19,26 @@ def class Disk {
     static field bufAddr;
     static field sectors;   // 0 = no disk
     static field vector;    // syscall vector user mode reaches the controller through
+    static field unit;      // the drive the commands go to (the controller can have several)
 
     // privileged; buffer is the raw address of 512 bytes the caller owns
     static def init(buffer) {
         Disk.bufAddr = buffer;
         reserve(buffer, 512);
-        Disk.sectors = in32(0x0F00);
+        Disk.select(0);
         registerHandler(onDiskSyscall, Disk.vector, 1);
+    }
+
+    // privileged: how many drives are attached
+    static def units() {
+        return in8(0x0F0F);
+    }
+
+    // privileged: the commands that follow are for drive 'unit'; Disk.sectors is its size (0 = no such drive)
+    static def select(unit) {
+        out8(0x0F0E, unit);
+        Disk.unit = unit;
+        Disk.sectors = in32(0x0F00);
     }
 
     // for a program the kernel started: the driver state the kernel already set up
@@ -42,6 +55,7 @@ def class Disk {
 
     // privileged part: one command, returns the controller's status (0 = ok)
     static def command(op, sector) {
+        out8(0x0F0E, Disk.unit);
         out32(0x0F04, sector);
         out32(0x0F08, Disk.bufAddr);
         out8(0x0F0C, op);
@@ -65,6 +79,7 @@ def class Disk {
         return Disk.run(2, sector);
     }
 }
+Disk.unit = 0;
 Disk.vector = 6; // 1 console, 2 keyboard, 3 nic, 4 host rx, 5 host send
 
 // runs elevated, whatever ring the caller is in
