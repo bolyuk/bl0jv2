@@ -26,6 +26,7 @@ def class Process {
     field ended;
     field reported;    // the shell has told the user it ended
     field background;
+    field system;      // the shell: listed by ps, but not something to wait for or stop
 
     def init(pid, name, path, core) {
         this.pid = pid;
@@ -38,6 +39,7 @@ def class Process {
         this.ended = 0;
         this.reported = false;
         this.background = false;
+        this.system = false;
     }
 }
 
@@ -50,8 +52,11 @@ def class Proc {
 
     // privileged, once, after Ctx and the abort words exist
     static def init() {
-        Proc.table = [];
-        Proc.nextPid = 1;
+        // the shell is a process too: pid 1, on core 0, running as long as the machine is
+        shell = new Process(1, 'shell', '', 0);
+        shell.system = true;
+        Proc.table = [shell];
+        Proc.nextPid = 2;
         Proc.mutex = newMutex();
         Proc.changed = newEvent();
         Proc.busy = [];
@@ -169,7 +174,7 @@ def class Proc {
     // asks the process to stop; true if there was a running process of that number
     static def kill(pid) {
         p = Proc.find(pid);
-        if (p == nil || p.state != 'running') { return false; }
+        if (p == nil || p.state != 'running' || p.system) { return false; }
         abortRequest(p.core);
         return true;
     }
@@ -188,7 +193,7 @@ def class Proc {
         i = 0;
         while (i < len(Proc.table)) {
             p = Proc.table[i];
-            if (p.state == 'running' && (pid == 0 || p.pid == pid)) { return true; }
+            if (p.state == 'running' && !p.system && (pid == 0 || p.pid == pid)) { return true; }
             i += 1;
         }
         return false;
