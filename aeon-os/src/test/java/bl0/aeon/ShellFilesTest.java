@@ -291,4 +291,45 @@ class ShellFilesTest {
         command(s, "diff a.txt c.txt", "- 3 3\n+ 3 X");
         command(s, "diff a.txt nosuch", "no such file");
     }
+
+    @Test
+    void aliasesPathAndHistory(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        // etc/profile ran: ll and h are aliases
+        command(s, "alias", "alias ll='ls'");
+        command(s, "ll bin", "seq.bl0c");
+        command(s, "alias both='echo a b'", "$ ");
+        command(s, "both c", "a b c");
+        command(s, "alias bad='ls | wc'", "one simple command");
+        command(s, "which both", "alias for 'echo a b'");
+        command(s, "which echo", "built-in");
+        command(s, "which seq", "/bin/seq.bl0c");
+        command(s, "which nosuchthing", "not found");
+        command(s, "unalias both", "$ ");
+        command(s, "both c", "both: command not found");
+        // PATH
+        command(s, "mkdir tools", "$ ");
+        command(s, "cp bin/seq.bl0c tools/myseq.bl0c", "$ ");
+        command(s, "myseq 2", "myseq: command not found");
+        command(s, "tools/myseq 2", "1\n2");                     // a path needs no PATH
+        command(s, "PATH=bin:tools", "$ ");
+        command(s, "myseq 2", "1\n2");
+        command(s, "which myseq", "/tools/myseq.bl0c");
+        command(s, "echo 3 | myseq 1 | wc", "1 lines");
+        command(s, "PATH=tools", "$ ");
+        command(s, "seq 2", "seq: command not found");
+        command(s, "cd tools", "$ ");
+        command(s, "PATH=.", "$ ");
+        command(s, "myseq 1", "1");
+        // history
+        command(s, "PATH=bin", "$ ");
+        command(s, "cd /", "$ ");
+        command(s, "echo one", "one");
+        command(s, "echo two", "two");
+        command(s, "!!", "echo two\ntwo");                       // the command is shown, then runs
+        command(s, "!echo o", "echo two o\ntwo o");              // the latest echo, with what follows appended
+        command(s, "!-2", "echo two\ntwo");
+        command(s, "!nosuchcommand", "event not found");
+        command(s, "history", "echo one");
+    }
 }

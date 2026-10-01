@@ -147,6 +147,19 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   on the line before it is split, so a value is parsed like typed text. `sh file [args]` runs the lines of a
   text file as commands (empty lines and `#` comments skipped); `$0`, `$1`... are the file's name and the
   arguments while it runs.
+* **Aliases, PATH, history**:
+  - `alias name='text'` makes `name` stand for a simple command (`alias` lists them, `unalias name` removes one,
+    `which name` says what a word is). Only the first word of a command is replaced; an alias naming another
+    alias is followed, each once.
+  - Programs are looked for in the folders of the variable `PATH` (`bin` by default, folders separated by `:`,
+    `.` is the current folder). A name with a `/` is a path, with or without the `.bl0c`. Tab completes from all of
+    PATH and the aliases.
+  - `etc/profile` (put on the disk from `aeon-os/etc`) is run as a script before the first prompt: the place for
+    `PATH=...` and `alias ...`.
+  - `history` lists the remembered commands (the last 200, kept in `var/history`). `!!` repeats the last, `!N`
+    command N, `!-N` the Nth from the end, `!text` the latest starting with text; the expanded line is shown and
+    remembered. In the line editor **Ctrl-R** searches the history as you type (Ctrl-R again for older, Enter runs
+    the match, Esc puts the line back, any other key takes the match for editing).
 * **Folders as a whole**: `cp -r`, `mv` and `rm -r` work on a folder with everything in it (a folder is a name
   prefix, so they act on every name below it); without `-r` they say it is a folder. `tree [folder]` shows the
   folders and files below one with sizes. `cp`/`mv` refuse to put a folder into itself.

@@ -155,12 +155,14 @@ def class ShellState {
     static field cwd;
     static field pipeSeq;
     static field vars;         // [[name, value], ...]: the shell's variables
+    static field aliases;      // [[name, text], ...]
     static field depth;        // scripts running inside scripts
 }
 ShellState.running = true;
 ShellState.cwd = '';
 ShellState.pipeSeq = 0;
-ShellState.vars = [];
+ShellState.vars = [['PATH', 'bin']];
+ShellState.aliases = [];
 ShellState.depth = 0;
 
 // a path as typed -> the stored name, relative to the current folder
@@ -234,12 +236,49 @@ def programPath(cmd) {
     return 'bin/' + cmd + '.bl0c';
 }
 
+// the folders programs are looked for in: the variable PATH, folders separated by ':' ('.' is the
+// current folder, a leading '/' is ignored)
+def pathDirs() {
+    value = varGet('PATH');
+    dirs = [];
+    if (value == nil) { return dirs; }
+    parts = Split.split(value, ':');
+    i = 0;
+    while (i < len(parts)) {
+        d = parts[i];
+        if (d == '.') { push(dirs, ShellState.cwd); }
+        else if (d != '') { push(dirs, FsPath.resolve('', d)); }
+        i += 1;
+    }
+    return dirs;
+}
+
+// the file of the program 'cmd' names, or nil. A name with a '/' is a path (the .bl0c may be left
+// off); any other name is looked for in the PATH folders.
+def findProgram(cmd) {
+    if (!Fs.mounted) { return nil; }
+    if (strFind(cmd, '/', 0) >= 0) {
+        path = here(cmd);
+        if (Fs.size(path) >= 0 && !Dirs.isDir(path)) { return path; }
+        if (Fs.size(path + '.bl0c') >= 0) { return path + '.bl0c'; }
+        return nil;
+    }
+    dirs = pathDirs();
+    i = 0;
+    while (i < len(dirs)) {
+        path = FsPath.prefix(dirs[i]) + cmd + '.bl0c';
+        if (Fs.size(path) >= 0) { return path; }
+        i += 1;
+    }
+    return nil;
+}
+
 // Runs the program at 'path' here, on the shell's own core, with 'words' as its command line (words[0]
 // is its name). Whatever redirection or pipe this core's Ctx holds applies; the ends of the pipes
 // close when it is over. Ctrl-C meanwhile is a request to stop it, not text for it.
 def runProgram(path, words, label) {
     c = Ctx.me();
-    if (!Disk.present() || !Fs.mounted || Fs.size(path) < 0) {
+    if (path == nil || !Disk.present() || !Fs.mounted || Fs.size(path) < 0) {
         sayErr(label + ': command not found');
         c.finish();
         return nil;
@@ -308,9 +347,14 @@ def runStage(words) {
     if (cmd == 'sh') { guarded(cmdSh, words); return nil; }
     if (cmd == 'set') { cmdSet(words); return nil; }
     if (cmd == 'unset') { guarded(cmdUnset, words); return nil; }
+    if (cmd == 'alias') { guarded(cmdAlias, words); return nil; }
+    if (cmd == 'unalias') { guarded(cmdUnalias, words); return nil; }
+    if (cmd == 'which') { cmdWhich(words); return nil; }
+    if (cmd == 'history') { cmdHistory(words); return nil; }
     if (cmd == 'format') { guarded(cmdFormat, words); return nil; }
     // anything else: a program on the disk
-    runProgram(programPath(cmd), words, cmd);
+    found = findProgram(cmd);
+    runProgram(found, words, cmd);
 }
 
 // Runs the stages one after another, on this core. Each stage's standard input and output are files:
@@ -401,12 +445,13 @@ def runConcurrent(stages, background) {
             outPath = here(stage.outFile);
             if (!stage.append) { Fs.write(outPath, ''); }
         }
-        if (!failed && Fs.size(programPath(cmd)) < 0) {
+        found = failed ? nil : findProgram(cmd);
+        if (!failed && found == nil) {
             sayErr(cmd + ': command not found');
             failed = true;
         }
         if (!failed) {
-            result = syscall(Exec.spawnVector, [programPath(cmd), stage.words, ShellState.cwd, [inPath, outPath, pipeIn, pipeOut, background]]);
+            result = syscall(Exec.spawnVector, [found, stage.words, ShellState.cwd, [inPath, outPath, pipeIn, pipeOut, background]]);
             if (result[0]) {
                 push(spawned, result[1]);
                 if (background) { say('[' + result[1].pid + '] ' + cmd); }
@@ -500,7 +545,155 @@ def runCommand(line) {
         }
         return nil;
     }
-    if (len(stages) > 0) { runPipeline(stages); }
+    if (len(stages) > 0) {
+        expandAliases(stages);
+        runPipeline(stages);
+    }
+}
+
+// --- aliases ---
+
+def aliasGet(name) {
+    i = 0;
+    while (i < len(ShellState.aliases)) {
+        if (ShellState.aliases[i][0] == name) { return ShellState.aliases[i][1]; }
+        i += 1;
+    }
+    return nil;
+}
+
+// alias               lists them
+// alias name=text     'name' now stands for 'text' (a simple command: no pipe, no redirection)
+// alias name          shows one
+def cmdAlias(words) {
+    if (len(words) == 1) {
+        i = 0;
+        while (i < len(ShellState.aliases)) {
+            say('alias ' + ShellState.aliases[i][0] + "='" + ShellState.aliases[i][1] + "'");
+            i += 1;
+        }
+        return nil;
+    }
+    i = 1;
+    while (i < len(words)) {
+        eq = strFind(words[i], '=', 0);
+        if (eq < 0) {
+            v = aliasGet(words[i]);
+            if (v == nil) { sayErr(words[i] + ': no such alias'); }
+            else { say('alias ' + words[i] + "='" + v + "'"); }
+        } else {
+            name = strSub(words[i], 0, eq);
+            text = strSub(words[i], eq + 1, len(words[i]));
+            if (name == '' || strFind(name, ' ', 0) >= 0) {
+                sayErr('alias: bad name');
+            } else {
+                parsed = Cmdline.parse(text);
+                if (len(parsed) != 1 || parsed[0].inFile != nil || parsed[0].outFile != nil || parsed[0].background || len(parsed[0].words) == 0) {
+                    sayErr('alias: the text must be one simple command');
+                } else {
+                    unaliasOne(name);
+                    push(ShellState.aliases, [name, text]);
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+def unaliasOne(name) {
+    kept = [];
+    i = 0;
+    while (i < len(ShellState.aliases)) {
+        if (ShellState.aliases[i][0] != name) { push(kept, ShellState.aliases[i]); }
+        i += 1;
+    }
+    ShellState.aliases = kept;
+}
+
+def cmdUnalias(words) {
+    if (len(words) < 2) { sayErr('usage: unalias <name>...'); return nil; }
+    i = 1;
+    while (i < len(words)) {
+        if (aliasGet(words[i]) == nil) { sayErr(words[i] + ': no such alias'); }
+        unaliasOne(words[i]);
+        i += 1;
+    }
+}
+
+// the first word of each stage that is an alias is replaced by the alias's words (an alias that names
+// another alias is followed, each at most once, so 'alias ls=ls' is fine)
+def expandAliases(stages) {
+    i = 0;
+    while (i < len(stages)) {
+        seen = [];
+        while (len(stages[i].words) > 0 && !Arr.contains(seen, stages[i].words[0])) {
+            text = aliasGet(stages[i].words[0]);
+            if (text == nil) { break; }
+            push(seen, stages[i].words[0]);
+            parsed = Cmdline.parse(text);
+            stages[i].words = Arr.concat(parsed[0].words, Arr.slice(stages[i].words, 1, len(stages[i].words)));
+        }
+        i += 1;
+    }
+}
+
+// which <name>...: what a command word stands for
+def cmdWhich(words) {
+    if (len(words) < 2) { sayErr('usage: which <name>...'); return nil; }
+    i = 1;
+    while (i < len(words)) {
+        w = words[i];
+        if (aliasGet(w) != nil) { say(w + ": alias for '" + aliasGet(w) + "'"); }
+        else if (isBuiltin(w)) { say(w + ': a built-in command'); }
+        else {
+            found = findProgram(w);
+            if (found == nil) { sayErr(w + ': not found'); } else { say('/' + found); }
+        }
+        i += 1;
+    }
+}
+
+// --- history ---
+
+// history: the remembered commands, numbered (the numbers are positions in the list the editor keeps:
+// the last 200). '!!' is the previous command, '!N' command N, '!-N' the Nth from the last, '!text' the
+// latest one that starts with text; what follows on the line is appended.
+def cmdHistory(words) {
+    h = LineEditor.history;
+    i = 0;
+    while (i < len(h)) {
+        say(Fmt.format('{:>5}  {}', [i + 1, h[i]]));
+        i += 1;
+    }
+}
+
+// the line with a leading !-reference replaced, or nil when there is no such command. The line itself
+// (just remembered by the editor) is the last history entry and is not a candidate.
+def histExpand(line) {
+    h = LineEditor.history;
+    last = len(h) - 2;
+    sp = strFind(line, ' ', 0);
+    token = sp < 0 ? line : strSub(line, 0, sp);
+    rest = sp < 0 ? '' : strSub(line, sp, len(line));
+    ref = strSub(token, 1, len(token));
+    entry = nil;
+    if (ref == '!') {
+        if (last >= 0) { entry = h[last]; }
+    } else if (ref != '' && strFind('0123456789', strSub(ref, 0, 1), 0) >= 0) {
+        n = portNumber(ref);
+        if (n != nil && n >= 1 && n <= last + 1) { entry = h[n - 1]; }
+    } else if (len(ref) > 1 && strSub(ref, 0, 1) == '-') {
+        n = portNumber(strSub(ref, 1, len(ref)));
+        if (n != nil && n >= 1 && last + 1 - n >= 0) { entry = h[last + 1 - n]; }
+    } else if (ref != '') {
+        i = last;
+        while (i >= 0 && entry == nil) {
+            if (strFind(h[i], ref, 0) == 0) { entry = h[i]; }
+            i -= 1;
+        }
+    }
+    if (entry == nil) { return nil; }
+    return entry + rest;
 }
 
 // --- variables and scripts ---
@@ -638,7 +831,7 @@ def histSave(line) {
 }
 
 def shellBuiltins() {
-    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec', 'sh', 'set', 'unset'];
+    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec', 'sh', 'set', 'unset', 'alias', 'unalias', 'which', 'history'];
 }
 
 // Tab: what could replace the word under the cursor. The first word is a command
@@ -656,14 +849,26 @@ def shellComplete(line, pos) {
             if (strFind(names[i], word, 0) == 0) { push(found, names[i]); }
             i += 1;
         }
+        i = 0;
+        while (i < len(ShellState.aliases)) {
+            if (strFind(ShellState.aliases[i][0], word, 0) == 0 && !Arr.contains(found, ShellState.aliases[i][0])) { push(found, ShellState.aliases[i][0]); }
+            i += 1;
+        }
         if (Fs.mounted) {
-            programs = Dirs.list('bin');
-            i = 0;
-            while (i < len(programs)) {
-                n = programs[i][0];
-                if (!programs[i][2] && len(n) > 5 && strSub(n, len(n) - 5, len(n)) == '.bl0c') { n = strSub(n, 0, len(n) - 5); }
-                if (strFind(n, word, 0) == 0 && !Arr.contains(found, n)) { push(found, n); }
-                i += 1;
+            dirs = pathDirs();
+            d = 0;
+            while (d < len(dirs)) {
+                if (Dirs.isDir(dirs[d])) {
+                    programs = Dirs.list(dirs[d]);
+                    i = 0;
+                    while (i < len(programs)) {
+                        n = programs[i][0];
+                        if (!programs[i][2] && len(n) > 5 && strSub(n, len(n) - 5, len(n)) == '.bl0c') { n = strSub(n, 0, len(n) - 5); }
+                        if (strFind(n, word, 0) == 0 && !Arr.contains(found, n)) { push(found, n); }
+                        i += 1;
+                    }
+                }
+                d += 1;
             }
         }
         return [start, found];
@@ -694,12 +899,16 @@ def shellComplete(line, pos) {
 LineEditor.completer = shellComplete;
 histLoad();
 
+
 consoleWriteLine('=== aeon-os shell booting ===');
 
 dropToUserMode();
 
 consoleWriteLine(Term.paintBold(6, '  aeon-os') + Term.paint(7, ' - ' + coreCount() + ' core(s)'));
 consoleWriteLine('aeon-shell ready - type a command, press enter (try: ' + Term.paint(3, 'help') + ')');
+
+// the user's own settings: etc/profile is run as a script before the first prompt
+if (Fs.mounted && Fs.exists('etc/profile')) { cmdSh(['sh', 'etc/profile']); }
 
 commandsRun = 0;
 // The line editor sleeps in kbWait() while there is no input: the keyboard handler
@@ -713,6 +922,20 @@ while (ShellState.running) {
         // Ctrl-D on an empty line
         ShellState.running = false;
     } else {
+        if (len(line) > 1 && strSub(line, 0, 1) == '!') {
+            // the editor remembered the line as typed; what runs (and is remembered) is what it stands for
+            expanded = histExpand(line);
+            h = LineEditor.history;
+            pop(h);
+            if (expanded == nil) {
+                sayErr(line + ': event not found');
+                line = '';
+            } else {
+                line = expanded;
+                LineEditor.remember(line);
+                say(line);
+            }
+        }
         if (line != '') { histSave(line); }
         runCommand(line);
         commandsRun = commandsRun + 1;
