@@ -41,7 +41,7 @@ class ShellFilesTest {
         command(s, "ls", "no filesystem");
         command(s, "format", "run \"format yes\"");
         command(s, "format yes", "formatted 256 sectors");
-        command(s, "ls", "(no files)");
+        command(s, "ls", "(empty)");
     }
 
     @Test
@@ -55,12 +55,104 @@ class ShellFilesTest {
         command(s, "cp notes.txt docs/copy.txt", "$ ");
         command(s, "mv notes.txt old.txt", "$ ");
         command(s, "ls", "old.txt");
-        assertTrue(s.output().contains("docs/copy.txt"), s.output());
-        command(s, "ls docs/", "docs/copy.txt");
+        assertTrue(s.output().contains("<dir>  docs/"), s.output());
+        command(s, "ls docs", "copy.txt");
         command(s, "cat notes.txt", "notes.txt: no such file");
         command(s, "rm old.txt", "$ ");
         command(s, "rm old.txt", "old.txt: no such file");
         command(s, "df", "1 files");
+    }
+
+    @Test
+    void foldersCanBeMadeEnteredAndRemovedAndPathsAreRelative(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "format yes", "formatted");
+        command(s, "mkdir a", "$ ");
+        command(s, "mkdir a/b", "$ ");
+        command(s, "cd a/b", "/a/b $ ");
+        command(s, "pwd", "/a/b");
+        command(s, "write f.txt deep", "wrote 4 bytes");
+        command(s, "cd ..", "/a $ ");
+        command(s, "ls", "<dir>  b/");
+        command(s, "cat b/f.txt", "deep");
+        command(s, "cat /a/b/f.txt", "deep");
+        command(s, "rmdir b", "fs: a/b is not empty");
+        command(s, "cd /", "$ ");
+        command(s, "mkdir a", "fs: a already exists");
+        command(s, "mkdir x/y", "fs: x: no such directory");
+        command(s, "cd nowhere", "nowhere: no such folder");
+        command(s, "rm a/b/f.txt", "$ ");
+        command(s, "rmdir a/b", "$ ");
+        command(s, "rmdir a", "$ ");
+        command(s, "ls", "(empty)");
+    }
+
+    @Test
+    void cpAndMvIntoAFolderKeepTheName(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "format yes", "formatted");
+        command(s, "mkdir box", "$ ");
+        command(s, "write one.txt 1", "wrote");
+        command(s, "cp one.txt box", "$ ");
+        command(s, "mv one.txt box/two.txt", "$ ");
+        command(s, "ls box", "two.txt");
+        assertTrue(s.output().contains("one.txt"), s.output());
+    }
+
+    @Test
+    void dataCommandsWorkOnLinesAndBytes(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "format yes", "formatted");
+        command(s, "write t.txt one\\ntwo apple\\nthree", "wrote 19 bytes");
+        command(s, "cat t.txt", "three");
+        command(s, "wc t.txt", "3 lines, 4 words, 19 bytes");
+        command(s, "head -n 1 t.txt", "one");
+        command(s, "grep apple t.txt", "two apple");
+        command(s, "grep zzz t.txt", "(no match)");
+        command(s, "echo hello > e.txt", "$ ");
+        command(s, "echo world >> e.txt", "$ ");
+        command(s, "wc e.txt", "2 lines, 2 words, 12 bytes");
+        command(s, "hexdump e.txt", "0000  68 65 6c 6c 6f 0a 77 6f 72 6c 64 0a");
+        command(s, "stat e.txt", "file, 12 bytes, 1 sectors");
+        command(s, "touch empty", "$ ");
+        command(s, "stat empty", "file, 0 bytes, 0 sectors");
+    }
+
+    // a program compiled on the host, put on the disk, run by the shell
+    private static AeonSession shellWith(Path dir, String name, String source) throws Exception {
+        Path src = dir.resolve(name + ".bl0");
+        java.nio.file.Files.writeString(src, source);
+        var s = new AeonSession();
+        s.start(AeonSession.compile("shell.bl0"), 1, vm -> {
+            try {
+                var disk = new FileDisk(dir.resolve("d.img"), 256);
+                DiskImport.put(disk, java.util.List.of(DiskImport.Spec.parse(src.toString())), java.util.List.of());
+                vm.attach_disk(disk);
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        assertTrue(s.waitFor("aeon-shell ready", 15_000), s.output());
+        return s;
+    }
+
+    @Test
+    void execRunsAProgramFromTheDiskWithoutPrivilege(@TempDir Path dir) throws Exception {
+        var s = shellWith(dir, "hello", "println 'hello from the disk, privileged: ' + str(isPrivileged());");
+        command(s, "ls", "hello.bl0c");
+        command(s, "exec hello.bl0c", "hello from the disk, privileged: false");
+        command(s, "whoami", "user"); // the shell itself is still in user mode, and alive
+    }
+
+    @Test
+    void aProgramThatFailsReportsAndTheShellCarriesOn(@TempDir Path dir) throws Exception {
+        var s = shellWith(dir, "bad", "println 'about to fail'; throw('boom');");
+        command(s, "exec bad.bl0c", "boom");
+        command(s, "whoami", "user");
+        command(s, "exec missing", "missing: no such file");
+        command(s, "write notaprogram hello", "wrote");
+        command(s, "exec notaprogram", "notaprogram: ");
+        command(s, "whoami", "user");
     }
 
     @Test

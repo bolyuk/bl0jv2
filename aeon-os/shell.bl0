@@ -78,8 +78,9 @@ if (Disk.present()) { Fs.mount(); }
 // --- built-in commands ---
 def cmdHelp() {
     consoleWriteLine('available commands: help, echo <text>, uptime, whoami, reboot, exit');
-    consoleWriteLine('files:   ls [prefix], cat <file>, write <file> <text>, append <file> <text>, rm <file>,');
-    consoleWriteLine('         mv <from> <to>, cp <from> <to>, df, format yes');
+    consoleWriteLine('files:   pwd, cd, ls [folder], mkdir, rmdir, touch, cat, write <file> <text>, append, rm, mv, cp,');
+    consoleWriteLine('         stat, wc, head [-n N], grep <text> <file>, hexdump, echo <text> > <file>, df, format yes');
+    consoleWriteLine('         exec <file>  (run a compiled program from the disk; \\n in text is a line break)');
     consoleWriteLine('network: net, netstat, setip <ip>, setdns <ip>, ping <host>, resolve <host>,');
     consoleWriteLine('         http <host[:port]> [path], tcp <host> <port> <text>, udp <host> <port> <text>, httpd <port>');
 }
@@ -326,8 +327,11 @@ def cmdHttpd(words) {
 // --- file commands ---
 //
 // The disk is the host's --disk image behind the block-device ports; Fs (a
-// filesystem written in bl0) does the rest. Names are flat: 'docs/a.txt' is one
-// name, and 'ls docs/' lists the ones starting with that prefix.
+// filesystem written in bl0) does the rest. Folders are name prefixes (see
+// stdlib/fs/dirs.bl0); every command takes paths relative to the current
+// folder ('cd'), absolute ones starting with '/', and '.' / '..'.
+
+import '../stdlib/fs/dirs.bl0';
 
 // true when the files can be used; otherwise says why
 def fsReady() {
@@ -342,63 +346,253 @@ def fsReady() {
     return true;
 }
 
-def cmdLs(words) {
-    if (!fsReady()) { return nil; }
-    prefix = '';
-    if (len(words) > 1) { prefix = words[1]; }
-    entries = Fs.list(prefix);
+// a path as typed -> the stored name, relative to the current folder
+def here(path) {
+    return FsPath.resolve(ShellState.cwd, path);
+}
+
+def prompt() {
+    if (ShellState.cwd == '') { return '$ '; }
+    return '/' + ShellState.cwd + ' $ ';
+}
+
+// what was typed may hold \n for a line break (the keyboard cannot type one)
+def unescape(text) {
+    return strJoin(Split.split(text, '\\n'), strChar(10));
+}
+
+// text to the console, one line at a time (the console shows control characters as '?')
+def printText(text) {
+    lines = Split.split(text, strChar(10));
     i = 0;
-    while (i < len(entries)) {
-        consoleWriteLine(Fmt.format('{:>8}  {}', [entries[i][1], entries[i][0]]));
+    last = len(lines);
+    if (last > 0 && lines[last - 1] == '') { last -= 1; }
+    while (i < last) {
+        line = lines[i];
+        if (len(line) > 0 && strSub(line, len(line) - 1, len(line)) == strChar(13)) { line = strSub(line, 0, len(line) - 1); }
+        consoleWriteLine(line);
         i += 1;
     }
-    if (len(entries) == 0) { consoleWriteLine('(no files)'); }
+}
+
+// a destination for cp/mv: an existing folder means "inside it"
+def destination(from, to) {
+    target = here(to);
+    if (Dirs.isDir(target)) { target = FsPath.prefix(target) + FsPath.base(from); }
+    return target;
+}
+
+def cmdPwd() {
+    consoleWriteLine('/' + ShellState.cwd);
+}
+
+def cmdCd(words) {
+    if (len(words) > 2) { consoleWriteLine('usage: cd [folder]'); return nil; }
+    if (!fsReady()) { return nil; }
+    target = '';
+    if (len(words) == 2) { target = here(words[1]); }
+    if (!Dirs.isDir(target)) { consoleWriteLine(words[1] + ': no such folder'); return nil; }
+    ShellState.cwd = target;
+}
+
+def cmdMkdir(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: mkdir <folder>'); return nil; }
+    if (!fsReady()) { return nil; }
+    Dirs.mkdir(here(words[1]));
+}
+
+def cmdRmdir(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: rmdir <folder>'); return nil; }
+    if (!fsReady()) { return nil; }
+    if (!Dirs.rmdir(here(words[1]))) { consoleWriteLine(words[1] + ': no such folder'); }
+}
+
+def cmdLs(words) {
+    if (len(words) > 2) { consoleWriteLine('usage: ls [folder]'); return nil; }
+    if (!fsReady()) { return nil; }
+    dir = ShellState.cwd;
+    if (len(words) == 2) { dir = here(words[1]); }
+    if (!Dirs.isDir(dir)) { consoleWriteLine(words[1] + ': no such folder'); return nil; }
+    entries = Dirs.list(dir);
+    i = 0;
+    while (i < len(entries)) {
+        if (entries[i][2]) {
+            consoleWriteLine(Fmt.format('   <dir>  {}/', [entries[i][0]]));
+        } else {
+            consoleWriteLine(Fmt.format('{:>8}  {}', [entries[i][1], entries[i][0]]));
+        }
+        i += 1;
+    }
+    if (len(entries) == 0) { consoleWriteLine('(empty)'); }
 }
 
 def cmdCat(words) {
     if (len(words) != 2) { consoleWriteLine('usage: cat <file>'); return nil; }
     if (!fsReady()) { return nil; }
-    text = Fs.read(words[1]);
+    text = Fs.read(here(words[1]));
     if (text == nil) {
         consoleWriteLine(words[1] + ': no such file');
     } else {
-        consoleWriteLine(text);
+        printText(text);
     }
 }
 
 def cmdWrite(words) {
     if (len(words) < 2) { consoleWriteLine('usage: write <file> <text>'); return nil; }
     if (!fsReady()) { return nil; }
-    text = restOf(words, 2);
-    Fs.write(words[1], text);
-    consoleWriteLine(Fmt.format('wrote {} bytes to {}', [Fs.size(words[1]), words[1]]));
+    name = here(words[1]);
+    Fs.write(name, unescape(restOf(words, 2)));
+    consoleWriteLine(Fmt.format('wrote {} bytes to {}', [Fs.size(name), words[1]]));
 }
 
 def cmdAppend(words) {
     if (len(words) < 3) { consoleWriteLine('usage: append <file> <text>'); return nil; }
     if (!fsReady()) { return nil; }
-    Fs.append(words[1], restOf(words, 2));
-    consoleWriteLine(Fmt.format('{} is now {} bytes', [words[1], Fs.size(words[1])]));
+    name = here(words[1]);
+    Fs.append(name, unescape(restOf(words, 2)));
+    consoleWriteLine(Fmt.format('{} is now {} bytes', [words[1], Fs.size(name)]));
+}
+
+def cmdTouch(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: touch <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    name = here(words[1]);
+    if (!Fs.exists(name)) { Fs.write(name, ''); }
 }
 
 def cmdRm(words) {
     if (len(words) != 2) { consoleWriteLine('usage: rm <file>'); return nil; }
     if (!fsReady()) { return nil; }
-    if (!Fs.remove(words[1])) { consoleWriteLine(words[1] + ': no such file'); }
+    if (!Fs.remove(here(words[1]))) { consoleWriteLine(words[1] + ': no such file'); }
 }
 
 def cmdMv(words) {
     if (len(words) != 3) { consoleWriteLine('usage: mv <from> <to>'); return nil; }
     if (!fsReady()) { return nil; }
-    if (!Fs.rename(words[1], words[2])) { consoleWriteLine(words[1] + ': no such file'); }
+    from = here(words[1]);
+    if (!Fs.rename(from, destination(from, words[2]))) { consoleWriteLine(words[1] + ': no such file'); }
 }
 
 def cmdCp(words) {
     if (len(words) != 3) { consoleWriteLine('usage: cp <from> <to>'); return nil; }
     if (!fsReady()) { return nil; }
-    text = Fs.read(words[1]);
+    from = here(words[1]);
+    data = Fs.readData(from);
+    if (data == nil) { consoleWriteLine(words[1] + ': no such file'); return nil; }
+    Fs.writeData(destination(from, words[2]), data);
+    free(data);
+}
+
+def cmdStat(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: stat <path>'); return nil; }
+    if (!fsReady()) { return nil; }
+    name = here(words[1]);
+    size = Fs.size(name);
+    if (size >= 0) {
+        consoleWriteLine(Fmt.format('{}: file, {} bytes, {} sectors', [name, size, (size + 511) >> 9]));
+    } else if (Dirs.isDir(name)) {
+        consoleWriteLine(Fmt.format('{}: folder, {} entries', [name == '' ? '/' : name, len(Dirs.list(name))]));
+    } else {
+        consoleWriteLine(words[1] + ': no such file or folder');
+    }
+}
+
+def isSpace(c) {
+    return c == ' ' || c == strChar(10) || c == strChar(13) || c == strChar(9);
+}
+
+def cmdWc(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: wc <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    text = Fs.read(here(words[1]));
     if (text == nil) { consoleWriteLine(words[1] + ': no such file'); return nil; }
-    Fs.write(words[2], text);
+    lines = 0;
+    wordCount = 0;
+    inWord = false;
+    i = 0;
+    while (i < len(text)) {
+        c = text[i];
+        if (c == strChar(10)) { lines += 1; }
+        if (isSpace(c)) {
+            inWord = false;
+        } else if (!inWord) {
+            inWord = true;
+            wordCount += 1;
+        }
+        i += 1;
+    }
+    if (len(text) > 0 && text[len(text) - 1] != strChar(10)) { lines += 1; }
+    consoleWriteLine(Fmt.format('{} lines, {} words, {} bytes', [lines, wordCount, Fs.size(here(words[1]))]));
+}
+
+// head [-n N] <file>
+def cmdHead(words) {
+    count = 10;
+    at = 1;
+    if (len(words) >= 3 && words[1] == '-n') {
+        count = portNumber(words[2]);
+        if (count == nil) { consoleWriteLine('usage: head [-n N] <file>'); return nil; }
+        at = 3;
+    }
+    if (len(words) != at + 1) { consoleWriteLine('usage: head [-n N] <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    text = Fs.read(here(words[at]));
+    if (text == nil) { consoleWriteLine(words[at] + ': no such file'); return nil; }
+    lines = Split.split(text, strChar(10));
+    if (len(lines) > 0 && lines[len(lines) - 1] == '') { pop(lines); }
+    shown = [];
+    i = 0;
+    while (i < len(lines) && i < count) {
+        push(shown, lines[i]);
+        i += 1;
+    }
+    printText(strJoin(shown, strChar(10)));
+}
+
+def cmdGrep(words) {
+    if (len(words) != 3) { consoleWriteLine('usage: grep <text> <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    text = Fs.read(here(words[2]));
+    if (text == nil) { consoleWriteLine(words[2] + ': no such file'); return nil; }
+    lines = Split.split(text, strChar(10));
+    found = 0;
+    i = 0;
+    while (i < len(lines)) {
+        if (strFind(lines[i], words[1], 0) >= 0) {
+            printText(lines[i]);
+            found += 1;
+        }
+        i += 1;
+    }
+    if (found == 0) { consoleWriteLine('(no match)'); }
+}
+
+def cmdHexdump(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: hexdump <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    data = Fs.readData(here(words[1]));
+    if (data == nil) { consoleWriteLine(words[1] + ': no such file'); return nil; }
+    limit = len(data) < 512 ? len(data) : 512;
+    off = 0;
+    while (off < limit) {
+        hex = [];
+        ascii = '';
+        i = 0;
+        while (i < 16) {
+            if (off + i < limit) {
+                b = data[off + i];
+                push(hex, Fmt.format('{:02x}', [b]));
+                ascii = ascii + Char.char(b == 32 ? 46 : b);
+            } else {
+                push(hex, '  ');
+            }
+            i += 1;
+        }
+        consoleWriteLine(Fmt.format('{:04x}  {}  {}', [off, strJoin(hex, ' '), ascii]));
+        off += 16;
+    }
+    if (limit < len(data)) { consoleWriteLine(Fmt.format('... {} more bytes', [len(data) - limit])); }
+    free(data);
 }
 
 def cmdDf(words) {
@@ -414,15 +608,82 @@ def cmdFormat(words) {
         return nil;
     }
     Fs.format();
+    ShellState.cwd = '';
     consoleWriteLine('formatted ' + Disk.sectors + ' sectors');
+}
+
+// --- running programs from the disk ---
+//
+// exec <file> loads a compiled program (.bl0c, put on the disk with
+// --disk-put prog.bl0) into a fixed buffer in raw memory and asks the kernel to
+// run it: the kernel side (sysExec, registered before dropToUserMode()) calls
+// execMem, which runs the program UNPRIVILEGED, in this same machine, and
+// returns when it finishes. A program that fails reports its error here and the
+// shell goes on; one that calls panic() halts the machine, as it would anywhere.
+
+def class Exec {
+    static field buffer;
+    static field limit;
+    static field vector;
+}
+Exec.limit = 65536;
+Exec.vector = 7;
+
+def sysExec(size) {
+    try {
+        execMem(Exec.buffer, size);
+        return '';
+    } catch (e) {
+        return str(e);
+    }
+}
+
+def cmdExec(words) {
+    if (len(words) < 2) { consoleWriteLine('usage: exec <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    data = Fs.readData(here(words[1]));
+    if (data == nil) { consoleWriteLine(words[1] + ': no such file'); return nil; }
+    size = len(data);
+    if (size == 0 || size > Exec.limit) {
+        free(data);
+        consoleWriteLine(Fmt.format('{}: not a program ({} bytes; at most {})', [words[1], size, Exec.limit]));
+        return nil;
+    }
+    i = 0;
+    while (i < size) {
+        poke8(Exec.buffer + i, data[i]);
+        i += 1;
+    }
+    free(data);
+    problem = syscall(Exec.vector, size);
+    if (problem != '') { consoleWriteLine(words[1] + ': ' + problem); }
 }
 
 def class ShellState {
     static field running;
+    static field cwd;
 }
 ShellState.running = true;
+ShellState.cwd = '';
 
 // a file command that fails (disk full, bad name, ...) reports it and the shell carries on
+// echo <text> prints it; echo <text> > <file> (or >> to add) puts it in a file instead
+def cmdEcho(args) {
+    line = args[0];
+    words = tokens(line);
+    k = 1;
+    while (k < len(words) && words[k] != '>' && words[k] != '>>') { k += 1; }
+    if (k == len(words)) {
+        consoleWriteLine(Substr.substr(line, 5, len(line)));
+        return nil;
+    }
+    if (k + 2 != len(words)) { consoleWriteLine('usage: echo <text> > <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    text = unescape(Arr.join(Arr.slice(words, 1, k), ' '));
+    name = here(words[k + 1]);
+    if (words[k] == '>') { Fs.write(name, text + strChar(10)); } else { Fs.append(name, text + strChar(10)); }
+}
+
 def guarded(command, words) {
     try {
         command(words);
@@ -442,7 +703,7 @@ def runCommand(line) {
         return nil;
     }
     if (Affix.startsWith(line, 'echo ')) {
-        consoleWriteLine(Substr.substr(line, 5, len(line)));
+        guarded(cmdEcho, [line]);
         return nil;
     }
     if (line == '') { return nil; }
@@ -450,6 +711,17 @@ def runCommand(line) {
     words = tokens(line);
     if (len(words) == 0) { return nil; }
     cmd = words[0];
+    if (cmd == 'pwd') { cmdPwd(); return nil; }
+    if (cmd == 'cd') { guarded(cmdCd, words); return nil; }
+    if (cmd == 'mkdir') { guarded(cmdMkdir, words); return nil; }
+    if (cmd == 'rmdir') { guarded(cmdRmdir, words); return nil; }
+    if (cmd == 'touch') { guarded(cmdTouch, words); return nil; }
+    if (cmd == 'stat') { guarded(cmdStat, words); return nil; }
+    if (cmd == 'wc') { guarded(cmdWc, words); return nil; }
+    if (cmd == 'head') { guarded(cmdHead, words); return nil; }
+    if (cmd == 'grep') { guarded(cmdGrep, words); return nil; }
+    if (cmd == 'hexdump') { guarded(cmdHexdump, words); return nil; }
+    if (cmd == 'exec') { guarded(cmdExec, words); return nil; }
     if (cmd == 'ls') { guarded(cmdLs, words); return nil; }
     if (cmd == 'cat') { guarded(cmdCat, words); return nil; }
     if (cmd == 'write') { guarded(cmdWrite, words); return nil; }
@@ -472,12 +744,16 @@ def runCommand(line) {
     consoleWriteLine(line + ': command not found');
 }
 
+// where exec puts a program read from the disk, and the kernel half that runs it
+Exec.buffer = kalloc(Exec.limit);
+registerHandler(sysExec, Exec.vector, 1);
+
 println '=== aeon-os shell booting ===';
 
 dropToUserMode();
 
 println 'aeon-shell ready - type a command, press enter (try: help)';
-print '$ ';
+print prompt();
 
 line = '';
 commandsRun = 0;
@@ -496,7 +772,7 @@ while (ShellState.running) {
             line = '';
             commandsRun = commandsRun + 1;
             if (ShellState.running) {
-                print '$ ';
+                print prompt();
             }
         } else {
             ch = Char.char(b);

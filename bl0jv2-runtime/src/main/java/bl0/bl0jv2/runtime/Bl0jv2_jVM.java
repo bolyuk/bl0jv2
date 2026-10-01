@@ -423,45 +423,67 @@ public final class Bl0jv2_jVM {
                 throw new Bl0j_VM_Exception("exec: cannot read '" + path + "': " + e.getMessage());
             }
 
-            int entryAddr;
-            int registersLength;
-            try {
-                int[] loaded = loadRelocated(fileBytes);
-                entryAddr = loaded[0] * C.INSTR_WIDTH;
-                registersLength = loaded[1];
-            } catch (Bl0j_VM_Exception e) {
-                throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': " + e.getMessage());
-            }
-
-            int stackDepthBefore = ctx.callStack.size();
-            boolean privilegedBefore = ctx.privileged;
-            ctx.callStack.push(new Frame(newRegisters(registersLength), -1, -1));
-            try {
-                execute(entryAddr, stackDepthBefore, true);
-                return 0;
-            } catch (Bl0j_VM_Panic e) {
-                // never wrapped, never treated as an ordinary failure -
-                // propagates exactly as if panic() had been called
-                // directly here, see this method's own doc on why
-                throw e;
-            } catch (Bl0j_VM_Exception | IOException e) {
-                throw new Bl0j_VM_Exception("exec: '" + path + "' failed: " + e.getMessage());
-            } finally {
-                while (ctx.callStack.size() > stackDepthBefore)
-                    ctx.callStack.pop();
-                // a loaded program that called dropToUserMode() (aeon-os's
-                // own shell.bl0 does - see its own doc) must not leave the
-                // CALLER permanently de-privileged: this core's
-                // ctx.privileged is one flag shared across the whole call
-                // stack, not scoped per-frame, so without restoring it here
-                // the kernel that exec()'d a child would itself be stuck in
-                // user mode for everything it does afterward, the same IRET
-                // ("privilege restored to whatever it was before", not
-                // unconditionally reset to kernel) rule invokeAsTrap()
-                // already applies to interrupt/syscall handlers
-                ctx.privileged = privilegedBefore;
-            }
+            return execBytes(fileBytes, path, false);
         });
+        // execMem(addr, size): the same, for a program already sitting in raw
+        // memory (a kernel that read it from a disk, say) - and the program runs
+        // UNPRIVILEGED: whoever asks (usually a syscall handler, which is itself
+        // elevated) is handing control to code it does not trust. Returns 0.
+        nativeMethods.put(NativeMethods.EXEC_MEM, (arg) -> {
+            requirePrivileged(currentContext(), "execMem");
+            Object[] a = nativeArgs(arg, 2, "execMem(addr, size)");
+            int addr = requireInt(a[0], "execMem"), size = requireInt(a[1], "execMem");
+            if (size <= 0)
+                throw new Bl0j_VM_Exception("execMem: size must be positive");
+            byte[] fileBytes = new byte[size];
+            rawMemory.readBytes(addr, fileBytes);
+            return execBytes(fileBytes, "memory at " + addr, true);
+        });
+    }
+
+    // loads and runs a compiled program in this VM (see the exec() doc above);
+    // 'label' only names it in error messages
+    private Object execBytes(byte[] fileBytes, String path, boolean unprivileged) {
+        CoreContext ctx = currentContext();
+        int entryAddr;
+        int registersLength;
+        try {
+            int[] loaded = loadRelocated(fileBytes);
+            entryAddr = loaded[0] * C.INSTR_WIDTH;
+            registersLength = loaded[1];
+        } catch (Bl0j_VM_Exception e) {
+            throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': " + e.getMessage());
+        }
+
+        int stackDepthBefore = ctx.callStack.size();
+        boolean privilegedBefore = ctx.privileged;
+        ctx.callStack.push(new Frame(newRegisters(registersLength), -1, -1));
+        if (unprivileged) ctx.privileged = false;
+        try {
+            execute(entryAddr, stackDepthBefore, true);
+            return 0;
+        } catch (Bl0j_VM_Panic e) {
+            // never wrapped, never treated as an ordinary failure -
+            // propagates exactly as if panic() had been called
+            // directly here, see this method's own doc on why
+            throw e;
+        } catch (Bl0j_VM_Exception | IOException e) {
+            throw new Bl0j_VM_Exception("exec: '" + path + "' failed: " + e.getMessage());
+        } finally {
+            while (ctx.callStack.size() > stackDepthBefore)
+                ctx.callStack.pop();
+            // a loaded program that called dropToUserMode() (aeon-os's
+            // own shell.bl0 does - see its own doc) must not leave the
+            // CALLER permanently de-privileged: this core's
+            // ctx.privileged is one flag shared across the whole call
+            // stack, not scoped per-frame, so without restoring it here
+            // the kernel that exec()'d a child would itself be stuck in
+            // user mode for everything it does afterward, the same IRET
+            // ("privilege restored to whatever it was before", not
+            // unconditionally reset to kernel) rule invokeAsTrap()
+            // already applies to interrupt/syscall handlers
+            ctx.privileged = privilegedBefore;
+        }
     }
 
     private static double toDouble(Object numeric) {

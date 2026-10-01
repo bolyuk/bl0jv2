@@ -414,6 +414,24 @@ def class Fs {
         return text;
     }
 
+    // the file as an array of bytes (nil if missing) - for binary data
+    static def doReadData(name) {
+        Fs.need();
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        free(nb);
+        if (e < 0) { return nil; }
+        first = Fs.entryFirst(e);
+        return Fs.readBytes(first, Fs.entrySize(e));
+    }
+
+    static def doWriteData(name, bytes) {
+        Fs.need();
+        nb = Fs.encodeName(name);
+        Fs.store(nb, bytes);
+        free(nb);
+    }
+
     static def doSize(name) {
         Fs.need();
         nb = Fs.encodeName(name);
@@ -527,6 +545,8 @@ def class Fs {
             else if (op == 8) { Fs.doFormat(); }
             else if (op == 9) { result = Fs.doMount(); }
             else if (op == 10) { Fs.doAppend(a, b); }
+            else if (op == 11) { result = Fs.doReadData(a); }
+            else if (op == 12) { Fs.doWriteData(a, b); }
         } catch (err) {
             unlock(Fs.lock);
             throw(err);
@@ -542,6 +562,9 @@ def class Fs {
     static def append(name, text) { Fs.run(10, name, text); }
     // the file's text, or nil if there is no such file
     static def read(name) { return Fs.run(2, name, nil); }
+    // the same for binary data: an array of ints 0-255 (readData gives nil if missing)
+    static def readData(name) { return Fs.run(11, name, nil); }
+    static def writeData(name, bytes) { Fs.run(12, name, bytes); }
     // true if the file existed
     static def remove(name) { return Fs.run(3, name, nil); }
     static def rename(from, to) { return Fs.run(5, from, to); }

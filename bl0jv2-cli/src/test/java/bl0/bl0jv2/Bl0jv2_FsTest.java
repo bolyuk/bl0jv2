@@ -140,4 +140,21 @@ class Bl0jv2_FsTest {
                 "i = 1; while (i < 30) { if (Fs.read('file' + str(i)) != 'content ' + str(i * 7)) { ok = false; } i += 2; } " +
                 "print ok;"));
     }
+
+    @Test
+    void pathsAreFoldedRelativeToTheCurrentFolder(@TempDir Path dir) throws IOException {
+        assertEquals("a/b/c|x|a|a/b|b|c|", run(dir, 64,
+                "import 'stdlib/fs/path.bl0'; " +
+                "print FsPath.resolve('a', 'b/./c') + '|' + FsPath.resolve('a/b', '/x') + '|' + FsPath.resolve('a/b', '..') + '|' + " +
+                "FsPath.resolve('', '../../a/b') + '|' + FsPath.base('a/b') + '|' + FsPath.base('c') + '|' + FsPath.parent('c');"));
+    }
+
+    @Test
+    void foldersExistByPrefixAndEmptyOnesNeedAMarker(@TempDir Path dir) throws IOException {
+        assertEquals("true|true|false|a.txt:false,docs:true,e:true|true|fs: docs is not empty|false", run(dir, 64,
+                "import 'stdlib/fs/dirs.bl0'; Fs.format(); Fs.write('docs/x', '1'); Fs.write('a.txt', '1'); Dirs.mkdir('e'); " +
+                "print str(Dirs.isDir('docs')) + '|' + str(Dirs.isDir('e')) + '|' + str(Dirs.isDir('a.txt')) + '|'; " +
+                "l = Dirs.list(''); s = ''; i = 0; while (i < len(l)) { if (i > 0) { s = s + ','; } s = s + l[i][0] + ':' + str(l[i][2]); i += 1; } " +
+                "print s + '|' + str(Dirs.rmdir('e')) + '|'; try { Dirs.rmdir('docs'); } catch (x) { print x; } print '|' + str(Dirs.isDir('e'));"));
+    }
 }

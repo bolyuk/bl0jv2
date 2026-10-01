@@ -1,0 +1,64 @@
+// Folders on top of fs.bl0's flat namespace. A folder is a name prefix:
+// 'docs/a.txt' lives in folder 'docs'. A folder exists as soon as any file is
+// under it, and mkdir() additionally writes a zero-length entry called 'docs/'
+// so an EMPTY folder can exist too. All paths here are already resolved (see
+// path.bl0): no leading or trailing '/', root is ''.
+
+import 'fs.bl0';
+import 'path.bl0';
+
+def class Dirs {
+    static def isDir(dir) {
+        if (dir == '') { return true; }
+        return len(Fs.list(dir + '/')) > 0;
+    }
+
+    static def mkdir(dir) {
+        if (dir == '') { throw('fs: the root directory already exists'); }
+        if (Fs.exists(dir)) { throw('fs: ' + dir + ' is a file'); }
+        if (Dirs.isDir(dir)) { throw('fs: ' + dir + ' already exists'); }
+        if (!Dirs.isDir(FsPath.parent(dir))) { throw('fs: ' + FsPath.parent(dir) + ': no such directory'); }
+        Fs.write(dir + '/', '');
+    }
+
+    // false if there is no such folder; an error if it still holds files
+    static def rmdir(dir) {
+        if (dir == '') { throw('fs: cannot remove the root directory'); }
+        if (!Dirs.isDir(dir)) { return false; }
+        inside = Fs.list(dir + '/');
+        if (len(inside) > 1 || (len(inside) == 1 && inside[0][0] != dir + '/')) {
+            throw('fs: ' + dir + ' is not empty');
+        }
+        Fs.remove(dir + '/');
+        return true;
+    }
+
+    // what is directly inside 'dir': array of [name, size, isFolder], files and folders
+    // each once, in name order
+    static def list(dir) {
+        prefix = FsPath.prefix(dir);
+        all = Fs.list(prefix);
+        out = [];
+        i = 0;
+        while (i < len(all)) {
+            rest = strSub(all[i][0], len(prefix), len(all[i][0]));
+            slash = strFind(rest, '/', 0);
+            if (rest == '') {
+                // the marker of 'dir' itself
+            } else if (slash < 0) {
+                push(out, [rest, all[i][1], false]);
+            } else {
+                name = strSub(rest, 0, slash);
+                seen = false;
+                j = 0;
+                while (j < len(out)) {
+                    if (out[j][2] && out[j][0] == name) { seen = true; }
+                    j += 1;
+                }
+                if (!seen) { push(out, [name, 0, true]); }
+            }
+            i += 1;
+        }
+        return out;
+    }
+}

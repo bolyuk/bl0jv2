@@ -60,6 +60,7 @@ public class Bl0jv2_CLI {
     private final java.util.List<Path> includeDirs = new java.util.ArrayList<>();
     // --disk: a host file presented to the program as a block device (see DiskController)
     private Path diskImage = null;
+    private final java.util.List<DiskImport.Spec> diskPuts = new java.util.ArrayList<>();
     private int diskSectors = 2048; // 1 MiB, used only when the image does not exist yet
 
     private void parseArgs(String[] args) {
@@ -130,6 +131,13 @@ public class Bl0jv2_CLI {
                         System.exit(1);
                     }
                     diskImage = Path.of(args[++i]);
+                }
+                case "--disk-put" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--disk-put requires HOSTFILE[:NAME]");
+                        System.exit(1);
+                    }
+                    diskPuts.add(DiskImport.Spec.parse(args[++i]));
                 }
                 case "--disk-sectors" -> {
                     if (i + 1 >= args.length) {
@@ -204,6 +212,9 @@ public class Bl0jv2_CLI {
         System.out.println("                  the file that names it (repeatable)");
         System.out.println("      --disk FILE  present FILE to the program as a block device (512-byte");
         System.out.println("                  sectors, ports 0x0F00-0x0F0D); created when missing");
+        System.out.println("      --disk-put HOSTFILE[:NAME]  copy a host file onto the --disk image first");
+        System.out.println("                  (formats a blank image); a .bl0 file is compiled and stored as");
+        System.out.println("                  .bl0c, ready for the shell's exec (repeatable)");
         System.out.println("      --disk-sectors N  size of a newly created image (default 2048)");
         System.out.println("  -h, --help      show this help message and exit");
         System.out.println("  -V, --version   print version information and exit");
@@ -406,11 +417,17 @@ public class Bl0jv2_CLI {
                 // fine, this just keeps VM setup grouped together
                 vm.set_core_count(cores);
                 vm.feed_compiled_file(ByteBuffer.wrap(bytes));
+                if (diskImage == null && !diskPuts.isEmpty()) {
+                    System.err.println("--disk-put needs --disk <image>");
+                    return 1;
+                }
                 if (diskImage != null) {
                     try {
-                        vm.attach_disk(new FileDisk(diskImage, diskSectors));
+                        var disk = new FileDisk(diskImage, diskSectors);
+                        if (!diskPuts.isEmpty()) DiskImport.put(disk, diskPuts, includeDirs);
+                        vm.attach_disk(disk);
                     } catch (IOException e) {
-                        System.err.println("--disk: cannot open " + diskImage + ": " + e.getMessage());
+                        System.err.println("--disk " + diskImage + ": " + e.getMessage());
                         return 1;
                     }
                 }

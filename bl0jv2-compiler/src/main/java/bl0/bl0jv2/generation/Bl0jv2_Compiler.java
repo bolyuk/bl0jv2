@@ -1130,6 +1130,7 @@ public final class Bl0jv2_Compiler {
         if ((r = compileValueNative(funCall, "throw", 1, NativeMethods.THROW)) != null) return r;
         if ((r = compileValueNative(funCall, "strSub", 3, NativeMethods.STR_SUB)) != null) return r;
         if ((r = compileValueNative(funCall, "strFind", 3, NativeMethods.STR_FIND)) != null) return r;
+        if ((r = compileValueNative(funCall, "execMem", 2, NativeMethods.EXEC_MEM)) != null) return r;
         if ((r = compileValueNative(funCall, "strChar", 1, NativeMethods.STR_CHAR)) != null) return r;
         if ((r = compileValueNative(funCall, "strUpper", 1, NativeMethods.STR_UPPER)) != null) return r;
         if ((r = compileValueNative(funCall, "strLower", 1, NativeMethods.STR_LOWER)) != null) return r;

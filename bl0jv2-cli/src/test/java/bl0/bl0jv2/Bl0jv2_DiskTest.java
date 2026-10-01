@@ -70,4 +70,21 @@ class Bl0jv2_DiskTest {
         byte[] bytes = new Bl0jv2_Compiler().compile(linked);
         assertEquals("hi from libs", Bl0jv2_TestRunner.runInstructions(bytes, null));
     }
+
+    @Test
+    void execMemRunsAProgramFromRawMemoryWithoutPrivilege() throws Exception {
+        byte[] child = Bl0jv2_TestRunner.compile("println 'child, privileged: ' + str(isPrivileged());");
+        var disk = new MemoryDisk(8);
+        StringBuilder poke = new StringBuilder();
+        for (int i = 0; i < child.length; i++) poke.append("poke8(").append(20000 + i).append(", ").append(child[i] & 0xFF).append("); ");
+        String out = Bl0jv2_TestRunner.run(poke + "execMem(20000, " + child.length + "); print 'back, privileged: ' + str(isPrivileged());",
+                vm -> vm.attach_disk(disk));
+        assertEquals("child, privileged: falseback, privileged: true", out.replace("\r", "").replace("\n", ""));
+    }
+
+    @Test
+    void execMemRejectsGarbageWithACatchableError() {
+        assertEquals("exec: cannot load 'memory at 20000': Wrong magic number", Bl0jv2_TestRunner.run(
+                "poke8(20000, 1); try { execMem(20000, 16); } catch (e) { print e; }"));
+    }
 }

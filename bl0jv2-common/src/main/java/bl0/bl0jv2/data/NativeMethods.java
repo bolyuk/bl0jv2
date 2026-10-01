@@ -53,4 +53,6 @@ public final class NativeMethods {
     public static final byte THROW = 0x1E;
     // strChar(codePoint): the one-character string for a Unicode code point
     public static final byte STR_CHAR = 0x1F;
+    // execMem(addr, size): run a compiled program that sits in raw memory, unprivileged
+    public static final byte EXEC_MEM = 0x20;
 }
