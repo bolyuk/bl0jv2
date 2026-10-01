@@ -150,6 +150,10 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
 * **Folders as a whole**: `cp -r`, `mv` and `rm -r` work on a folder with everything in it (a folder is a name
   prefix, so they act on every name below it); without `-r` they say it is a folder. `tree [folder]` shows the
   folders and files below one with sizes. `cp`/`mv` refuse to put a folder into itself.
+* **`more [file]`** pages text a screenful at a time (Space/PgDn next screen, Enter/Down one line, `q`/Esc quit;
+  it just copies when its output is a pipe or a file). `diff old new` prints the lines that differ (`- N` old,
+  `+ N` new; common start and end skipped, the middle compared with an LCS table, refused when huge). `seq [first] last`
+  prints numbers.
 * **More filters and search**: `sort [-r] [-n]`, `uniq [-c]` (stable merge sort, neighbouring duplicates) read a
   file or standard input like `grep`; `find <text> [folder]` lists files below a folder whose name contains the text.
 * **Colours**: the prompt, `ls` (folders, programs), `ps`, `df`, error messages and the banner use

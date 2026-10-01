@@ -277,4 +277,18 @@ class ShellFilesTest {
         command(s, "ls proj", "no such folder");
         command(s, "rm -r /", "will not remove the root");
     }
+
+    @Test
+    void seqAndDiff(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "seq 3", "1\n2\n3");
+        command(s, "seq 5 7 | wc", "3 lines");
+        command(s, "seq 5 > a.txt", "$ ");
+        command(s, "seq 6 > b.txt", "$ ");
+        command(s, "diff a.txt a.txt", "identical");
+        command(s, "diff a.txt b.txt", "+ 6 6");
+        command(s, "echo \"1\\n2\\nX\\n4\\n5\" > c.txt", "$ ");
+        command(s, "diff a.txt c.txt", "- 3 3\n+ 3 X");
+        command(s, "diff a.txt nosuch", "no such file");
+    }
 }
