@@ -109,29 +109,29 @@ public final class Bl0jv2_Utils {
             switch (op) {
                 case OpCodes.LOAD_NIL -> writer.append(String.format("LOAD_NIL %d", a));
                 case OpCodes.LOAD_CONST -> writer.append(String.format("LOAD_CONST r%d = const[%d]", a, b));
-                case OpCodes.LR_ADD -> writer.append(String.format("ADD r%d = r%d + r%d", a, a, b));
-                case OpCodes.LR_SUB -> writer.append(String.format("SUB r%d = r%d - r%d", a, a, b));
-                case OpCodes.LR_MUL -> writer.append(String.format("MUL r%d = r%d * r%d", a, a, b));
-                case OpCodes.LR_DIV -> writer.append(String.format("DIV r%d = r%d / r%d", a, a, b));
-                case OpCodes.LR_REM -> writer.append(String.format("REM r%d = r%d / r%d", a, a, b));
-                case OpCodes.LR_POW -> writer.append(String.format("POW r%d = r%d ** r%d", a, a, b));
-                case OpCodes.LR_AND -> writer.append(String.format("AND r%d = r%d & r%d", a, a, b));
-                case OpCodes.LR_OR -> writer.append(String.format("OR  r%d = r%d | r%d", a, a, b));
-                case OpCodes.LR_XOR -> writer.append(String.format("XOR r%d = r%d ^ r%d", a, a, b));
-                case OpCodes.LR_SHL -> writer.append(String.format("SHL r%d = r%d << r%d", a, a, b));
-                case OpCodes.LR_SHR -> writer.append(String.format("SHR r%d = r%d >> r%d", a, a, b));
-                case OpCodes.LR_USHR -> writer.append(String.format("USHR r%d = r%d >>> r%d", a, a, b));
+                case OpCodes.LR_ADD -> writer.append(String.format("ADD r%d = r%d + r%d", c, a, b));
+                case OpCodes.LR_SUB -> writer.append(String.format("SUB r%d = r%d - r%d", c, a, b));
+                case OpCodes.LR_MUL -> writer.append(String.format("MUL r%d = r%d * r%d", c, a, b));
+                case OpCodes.LR_DIV -> writer.append(String.format("DIV r%d = r%d / r%d", c, a, b));
+                case OpCodes.LR_REM -> writer.append(String.format("REM r%d = r%d % r%d", c, a, b));
+                case OpCodes.LR_POW -> writer.append(String.format("POW r%d = r%d ** r%d", c, a, b));
+                case OpCodes.LR_AND -> writer.append(String.format("AND r%d = r%d & r%d", c, a, b));
+                case OpCodes.LR_OR -> writer.append(String.format("OR r%d = r%d | r%d", c, a, b));
+                case OpCodes.LR_XOR -> writer.append(String.format("XOR r%d = r%d ^ r%d", c, a, b));
+                case OpCodes.LR_SHL -> writer.append(String.format("SHL r%d = r%d << r%d", c, a, b));
+                case OpCodes.LR_SHR -> writer.append(String.format("SHR r%d = r%d >> r%d", c, a, b));
+                case OpCodes.LR_USHR -> writer.append(String.format("USHR r%d = r%d >>> r%d", c, a, b));
                 case OpCodes.BIT_NOT -> writer.append(String.format("BIT_NOT r%d", a));
 
                 case OpCodes.JUMP -> writer.append(String.format("JUMP %d", a));
                 case OpCodes.JUMP_IF -> writer.append(String.format("JUMP_IF r%d -> %d", a, b));
                 case OpCodes.JUMP_IF_NOT -> writer.append(String.format("JUMP_IF_NOT r%d -> %d", a, b));
 
-                case OpCodes.EQ -> writer.append(String.format("EQ r%d = r%d == r%d", a, a, b));
-                case OpCodes.LESS -> writer.append(String.format("LESS r%d = r%d < r%d", a, a, b));
-                case OpCodes.GREATER -> writer.append(String.format("GREATER r%d = r%d > r%d", a, a, b));
-                case OpCodes.LESS_EQ -> writer.append(String.format("LESS_EQ r%d = r%d <= r%d", a, a, b));
-                case OpCodes.GREATER_EQ -> writer.append(String.format("GREATER_EQ r%d = r%d >= r%d", a, a, b));
+                case OpCodes.EQ -> writer.append(String.format("EQ r%d = r%d == r%d", c, a, b));
+                case OpCodes.LESS -> writer.append(String.format("LESS r%d = r%d < r%d", c, a, b));
+                case OpCodes.GREATER -> writer.append(String.format("GREATER r%d = r%d > r%d", c, a, b));
+                case OpCodes.LESS_EQ -> writer.append(String.format("LESS_EQ r%d = r%d <= r%d", c, a, b));
+                case OpCodes.GREATER_EQ -> writer.append(String.format("GREATER_EQ r%d = r%d >= r%d", c, a, b));
 
                 case OpCodes.MOV -> writer.append(String.format("MOV r%d = r%d", a, b));
                 case OpCodes.SET -> writer.append(String.format("SET r%d = r%d", a, b));

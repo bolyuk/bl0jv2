@@ -16,7 +16,10 @@ public final class C {
     // arity, and SET_FIELD/SET_STATIC_FIELD name their member directly
     // instead of packing it into a register pair; a FUN constant records
     // whether its first parameter is a receiver ('this')
-    public static final int VERSION = 6;
+    // 10.02.26
+    // binary operators are three-operand (reg[c] = reg[a] OP reg[b]) instead of
+    // 'reg[a] = reg[a] OP reg[b]' after a MOV of the left operand
+    public static final int VERSION = 7;
 
     public static final int MAGIC = 0x426C306A;
 

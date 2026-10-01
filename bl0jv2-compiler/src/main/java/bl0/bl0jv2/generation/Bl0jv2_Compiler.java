@@ -1022,8 +1022,7 @@ public final class Bl0jv2_Compiler {
         _emit(OpCodes.LOAD_CONST, expectedReg, constant(expectedType));
 
         int result = regIndex++;
-        _emit(OpCodes.MOV, result, typeReg);
-        _emit(OpCodes.EQ, result, expectedReg);
+        _emit(OpCodes.EQ, typeReg, expectedReg, result);
         return result;
     }
 
@@ -1695,8 +1694,8 @@ public final class Bl0jv2_Compiler {
                 default -> throw new Bl0j_CompilerException("Unknown op: " + n.op);
             };
 
-            _emit(OpCodes.MOV, result, left);
-            _emit(op, result, right);
+            // three-operand form: result = left op right, neither operand touched
+            _emit(op, left, right, result);
 
             if(n.op == Operator.NOT_EQUALS)
                 _emit(OpCodes.NOT, result);
@@ -1731,8 +1730,7 @@ public final class Bl0jv2_Compiler {
                 int one = regIndex++;
                 _emit(OpCodes.LOAD_CONST, one, constant(1));
                 int updated = regIndex++;
-                _emit(OpCodes.MOV, updated, oldValue);
-                _emit(op, updated, one);
+                _emit(op, oldValue, one, updated);
 
                 compileAssign(target, new RegValueNode(updated));
                 return oldValue;

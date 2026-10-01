@@ -1274,6 +1274,13 @@ public final class Bl0jv2_jVM {
 
             int sinceLastPoll = 0;
 
+            // the running frame's registers, kept in a local instead of being
+            // looked up on the call stack for every instruction. It must be
+            // refreshed wherever the top frame changes: CALL, RETURN, and an
+            // exception unwinding to a handler (a nested invoke() always restores
+            // the stack to where it was, so it needs nothing)
+            long[] reg = ctx.callStack.peek().regs();
+
             for(int addr = startAddr; addr < instructions.length;){
                 try {
 
@@ -1307,12 +1314,12 @@ public final class Bl0jv2_jVM {
                 int c = ((instructions[addr+5] & 0xFF) << 8) | (instructions[addr+6] & 0xFF);
                 addr += C.INSTR_WIDTH;
 
-                long[] reg = ctx.callStack.peek().regs();
-
                 switch (opcode) {
                     case OpCodes.LOAD_NIL -> reg[a] = NanBox.NIL;
                     case OpCodes.LOAD_CONST -> reg[a] = consts[b];
 
+                    // binary operators are three-operand: reg[c] = reg[a] OP reg[b]
+                    // (no copy of the left operand into the destination first).
                     // int/int and double/double are decoded straight from the
                     // NaN-boxed bits - no Object is allocated and no operator
                     // table consulted; everything else (strings, mixed
@@ -1320,40 +1327,40 @@ public final class Bl0jv2_jVM {
                     case OpCodes.LR_ADD -> {
                         long x = reg[a], y = reg[b];
                         if (NanBox.isInt(x) && NanBox.isInt(y))
-                            reg[a] = NanBox.ofInt(NanBox.asInt(x) + NanBox.asInt(y));
+                            reg[c] = NanBox.ofInt(NanBox.asInt(x) + NanBox.asInt(y));
                         else if (NanBox.isDouble(x) && NanBox.isDouble(y))
-                            reg[a] = Double.doubleToLongBits(Double.longBitsToDouble(x) + Double.longBitsToDouble(y));
+                            reg[c] = Double.doubleToLongBits(Double.longBitsToDouble(x) + Double.longBitsToDouble(y));
                         else
-                            reg[a] = box(ops.add.calculate(unbox(x), unbox(y)));
+                            reg[c] = box(ops.add.calculate(unbox(x), unbox(y)));
                     }
                     case OpCodes.LR_SUB -> {
                         long x = reg[a], y = reg[b];
                         if (NanBox.isInt(x) && NanBox.isInt(y))
-                            reg[a] = NanBox.ofInt(NanBox.asInt(x) - NanBox.asInt(y));
+                            reg[c] = NanBox.ofInt(NanBox.asInt(x) - NanBox.asInt(y));
                         else if (NanBox.isDouble(x) && NanBox.isDouble(y))
-                            reg[a] = Double.doubleToLongBits(Double.longBitsToDouble(x) - Double.longBitsToDouble(y));
+                            reg[c] = Double.doubleToLongBits(Double.longBitsToDouble(x) - Double.longBitsToDouble(y));
                         else
-                            reg[a] = box(ops.sub.calculate(unbox(x), unbox(y)));
+                            reg[c] = box(ops.sub.calculate(unbox(x), unbox(y)));
                     }
                     case OpCodes.LR_MUL -> {
                         long x = reg[a], y = reg[b];
                         if (NanBox.isInt(x) && NanBox.isInt(y))
-                            reg[a] = NanBox.ofInt(NanBox.asInt(x) * NanBox.asInt(y));
+                            reg[c] = NanBox.ofInt(NanBox.asInt(x) * NanBox.asInt(y));
                         else if (NanBox.isDouble(x) && NanBox.isDouble(y))
-                            reg[a] = Double.doubleToLongBits(Double.longBitsToDouble(x) * Double.longBitsToDouble(y));
+                            reg[c] = Double.doubleToLongBits(Double.longBitsToDouble(x) * Double.longBitsToDouble(y));
                         else
-                            reg[a] = box(ops.mul.calculate(unbox(x), unbox(y)));
+                            reg[c] = box(ops.mul.calculate(unbox(x), unbox(y)));
                     }
-                    case OpCodes.LR_DIV -> reg[a] = box(ops.div.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_REM -> reg[a] = box(ops.rem.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_POW -> reg[a] = box(ops.pow.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_DIV -> reg[c] = box(ops.div.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_REM -> reg[c] = box(ops.rem.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_POW -> reg[c] = box(ops.pow.calculate(unbox(reg[a]), unbox(reg[b])));
 
-                    case OpCodes.LR_AND -> reg[a] = box(ops.and.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_OR -> reg[a] = box(ops.or.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_XOR -> reg[a] = box(ops.xor.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_SHL -> reg[a] = box(ops.shl.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_SHR -> reg[a] = box(ops.shr.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_USHR -> reg[a] = box(ops.ushr.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_AND -> reg[c] = box(ops.and.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_OR -> reg[c] = box(ops.or.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_XOR -> reg[c] = box(ops.xor.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_SHL -> reg[c] = box(ops.shl.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_SHR -> reg[c] = box(ops.shr.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_USHR -> reg[c] = box(ops.ushr.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.BIT_NOT -> reg[a] = NanBox.ofInt(bitNot(unbox(reg[a])));
 
                     case OpCodes.JUMP -> addr = a * C.INSTR_WIDTH;
@@ -1367,14 +1374,14 @@ public final class Bl0jv2_jVM {
                         // strings, instances with their own equals() - goes
                         // through valuesEqual
                         if ((NanBox.isInt(x) && NanBox.isInt(y)) || (NanBox.isBool(x) && NanBox.isBool(y)))
-                            reg[a] = NanBox.ofBoolean(x == y);
+                            reg[c] = NanBox.ofBoolean(x == y);
                         else
-                            reg[a] = NanBox.ofBoolean(valuesEqual(unbox(x), unbox(y)));
+                            reg[c] = NanBox.ofBoolean(valuesEqual(unbox(x), unbox(y)));
                     }
-                    case OpCodes.LESS -> reg[a] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS));
-                    case OpCodes.GREATER -> reg[a] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER));
-                    case OpCodes.LESS_EQ -> reg[a] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS_EQ));
-                    case OpCodes.GREATER_EQ -> reg[a] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER_EQ));
+                    case OpCodes.LESS -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS));
+                    case OpCodes.GREATER -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER));
+                    case OpCodes.LESS_EQ -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS_EQ));
+                    case OpCodes.GREATER_EQ -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER_EQ));
                     case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!truth(reg[a], "operand of '!'"));
 
                     case OpCodes.MOV -> reg[a] = reg[b];
@@ -1417,6 +1424,7 @@ public final class Bl0jv2_jVM {
                         System.arraycopy(capturedCells, 0, regs, 1, capturedCells.length);
                         System.arraycopy(reg, b + 1, regs, 1 + capturedCells.length, c);
                         ctx.callStack.push(new Frame(regs, addr, b));
+                        reg = regs;
                         addr = fun.address() * C.INSTR_WIDTH;
                     }
 
@@ -1691,7 +1699,9 @@ public final class Bl0jv2_jVM {
                             ctx.handlerStack.pop();
 
                         Frame frame = ctx.callStack.pop();
-                        ctx.callStack.peek().regs[frame.resultReg]  = reg[a];
+                        long[] callerRegs = ctx.callStack.peek().regs();
+                        callerRegs[frame.resultReg] = reg[a];
+                        reg = callerRegs;
                         addr = frame.addressToReturn;
 
                         // the frame invoke() pushed has just returned -
@@ -1735,7 +1745,8 @@ public final class Bl0jv2_jVM {
                         String message = e instanceof StackOverflowError ? "stack overflow: native recursion too deep"
                                 : e instanceof Bl0j_VM_Exception v ? v.plainMessage()
                                 : e.getMessage() != null ? e.getMessage() : e.toString();
-                        ctx.callStack.peek().regs()[handler.errReg()] = box(new Bl0jError(message));
+                        reg = ctx.callStack.peek().regs();
+                        reg[handler.errReg()] = box(new Bl0jError(message));
                         addr = handler.catchAddr();
                         continue;
                     }
