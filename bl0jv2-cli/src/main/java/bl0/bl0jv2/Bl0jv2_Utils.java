@@ -130,6 +130,8 @@ public final class Bl0jv2_Utils {
                 case OpCodes.EQ -> writer.append(String.format("EQ r%d = r%d == r%d", a, a, b));
                 case OpCodes.LESS -> writer.append(String.format("LESS r%d = r%d < r%d", a, a, b));
                 case OpCodes.GREATER -> writer.append(String.format("GREATER r%d = r%d > r%d", a, a, b));
+                case OpCodes.LESS_EQ -> writer.append(String.format("LESS_EQ r%d = r%d <= r%d", a, a, b));
+                case OpCodes.GREATER_EQ -> writer.append(String.format("GREATER_EQ r%d = r%d >= r%d", a, a, b));
 
                 case OpCodes.MOV -> writer.append(String.format("MOV r%d = r%d", a, b));
                 case OpCodes.SET -> writer.append(String.format("SET r%d = r%d", a, b));

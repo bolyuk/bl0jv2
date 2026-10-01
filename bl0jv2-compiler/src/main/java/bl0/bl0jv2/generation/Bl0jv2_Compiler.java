@@ -1622,8 +1622,8 @@ public final class Bl0jv2_Compiler {
             int left  = compileInner(n.left);
             int right = compileInner(n.right);
 
-            // a <= b  and  a >= b  reuse GREATER/LESS the same way NOT_EQUALS
-            // reuses EQ: compute the opposite comparison, then negate it.
+            // != reuses EQ and negates it; <= and >= have their own opcodes
+            // (negating the opposite comparison gets NaN wrong).
             byte op = switch (n.op) {
                 case PLUS -> OpCodes.LR_ADD;
                 case MINUS -> OpCodes.LR_SUB;
@@ -1633,9 +1633,9 @@ public final class Bl0jv2_Compiler {
                 case REMAINDER ->  OpCodes.LR_REM;
                 case EQUALS, NOT_EQUALS -> OpCodes.EQ;
                 case LESS -> OpCodes.LESS;
-                case GREATER_EQUALS -> OpCodes.LESS;
+                case GREATER_EQUALS -> OpCodes.GREATER_EQ;
                 case GREATER -> OpCodes.GREATER;
-                case LESS_EQUALS -> OpCodes.GREATER;
+                case LESS_EQUALS -> OpCodes.LESS_EQ;
                 case BIT_AND -> OpCodes.LR_AND;
                 case BIT_OR -> OpCodes.LR_OR;
                 case BIT_XOR -> OpCodes.LR_XOR;
@@ -1648,7 +1648,7 @@ public final class Bl0jv2_Compiler {
             _emit(OpCodes.MOV, result, left);
             _emit(op, result, right);
 
-            if(n.op == Operator.NOT_EQUALS || n.op == Operator.LESS_EQUALS || n.op == Operator.GREATER_EQUALS)
+            if(n.op == Operator.NOT_EQUALS)
                 _emit(OpCodes.NOT, result);
 
             return result;

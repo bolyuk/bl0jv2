@@ -38,12 +38,7 @@ public final class Bl0jv2_jVM {
         public String toString() { return "nil"; }
     };
 
-    // marks a freed heap slot - distinct from NIL_OBJECT so a freed value
-    // is never confused with a field that legitimately holds nil
-    private static final Object FREED = new Object() {
-        @Override
-        public String toString() { return "<freed>"; }
-    };
+    private static final Object FREED = Heap.FREED;
 
     private static final long[] EMPTY_CELLS = new long[0];
 
@@ -83,21 +78,8 @@ public final class Bl0jv2_jVM {
     private Map<Byte, Function<Object, Object>> nativeMethods = new HashMap<>();
 
     // reference-typed values (strings, FunDefs, ...) that registers/consts
-    // hold as a NanBox REF index rather than inline. Shared across cores,
-    // so boxRef()/FREE's mutations take heapLock's write lock and unbox()'s
-    // read takes its read lock - boxRef() is the least-hot heap path (one
-    // call per allocation) so a coarser lock than RawMemory's disjoint-state
-    // split is fine here; unbox() is the hottest path in the whole
-    // interpreter, which is exactly why read/write (not one coarse lock)
-    // matters for this specific structure.
-    private final List<Object> heap = new ArrayList<>();
-    // indices freed via free() - boxRef() reuses these before growing heap,
-    // so alloc/free cycles don't exhaust maxHeapEntries even with zero
-    // actual leaks
-    private final ArrayDeque<Integer> freeHeapSlots = new ArrayDeque<>();
-    // 0 = unlimited, matching this VM's historical (unbounded) behavior
-    private long maxHeapEntries = 0;
-    private final ReentrantReadWriteLock heapLock = new ReentrantReadWriteLock();
+    // hold as a NanBox REF index rather than inline - see Heap
+    private final Heap heap = new Heap();
 
     private long[] consts;
     // parallel to consts: the interned symbol id of a string constant, else -1
@@ -476,6 +458,52 @@ public final class Bl0jv2_jVM {
         throw new Bl0j_VM_Exception("expected an array, got " + target.getClass().getSimpleName());
     }
 
+    private static final int COMPARE_LESS = 0, COMPARE_GREATER = 1, COMPARE_LESS_EQ = 2, COMPARE_GREATER_EQ = 3;
+
+    // a < b, a > b, a <= b, a >= b. Ints and doubles compare numerically (a
+    // NaN on either side makes every one of the four false, as in IEEE754);
+    // strings and chars compare by character order; anything else is an
+    // error naming both types rather than a ClassCastException.
+    private boolean compare(long lbits, long rbits, int kind) {
+        if (NanBox.isInt(lbits) && NanBox.isInt(rbits)) {
+            int l = NanBox.asInt(lbits), r = NanBox.asInt(rbits);
+            return switch (kind) {
+                case COMPARE_LESS -> l < r;
+                case COMPARE_GREATER -> l > r;
+                case COMPARE_LESS_EQ -> l <= r;
+                default -> l >= r;
+            };
+        }
+        Object lo = unbox(lbits), ro = unbox(rbits);
+        if (isNumeric(lo) && isNumeric(ro)) {
+            double l = toDouble(lo), r = toDouble(ro);
+            return switch (kind) {
+                case COMPARE_LESS -> l < r;
+                case COMPARE_GREATER -> l > r;
+                case COMPARE_LESS_EQ -> l <= r;
+                default -> l >= r;
+            };
+        }
+        if ((lo instanceof String || lo instanceof Character) && (ro instanceof String || ro instanceof Character)) {
+            int order = lo.toString().compareTo(ro.toString());
+            return switch (kind) {
+                case COMPARE_LESS -> order < 0;
+                case COMPARE_GREATER -> order > 0;
+                case COMPARE_LESS_EQ -> order <= 0;
+                default -> order >= 0;
+            };
+        }
+        throw new Bl0j_VM_Exception("cannot compare " + typeName(lo) + " with " + typeName(ro));
+    }
+
+    // a condition, '!' operand, ... must be a bool - 'if (5)' and 'while
+    // (nil)' are errors, not truthiness
+    private boolean truth(long bits, String what) {
+        if (NanBox.isBool(bits))
+            return NanBox.asBoolean(bits);
+        throw new Bl0j_VM_Exception(what + " must be a bool, got " + typeName(unbox(bits)));
+    }
+
     private static int bitNot(Object value) {
         if (value instanceof Integer i) return ~i;
         throw new Bl0j_VM_Exception("cannot apply '~' to " + value.getClass().getSimpleName());
@@ -672,7 +700,6 @@ public final class Bl0jv2_jVM {
         CoreContext ctx = currentContext();
         ctx.callStack.clear();
         heap.clear();
-        freeHeapSlots.clear();
         ctx.handlerStack.clear();
         ctx.callStack.add(new Frame(newRegisters(registers_length), -1, -1));
         consts = new long[constants_length];
@@ -802,7 +829,7 @@ public final class Bl0jv2_jVM {
     // takes effect on the next boxRef() call - no need to call this before
     // feed_compiled_file() the way set_max_raw_bytes() does
     public void set_max_heap_entries(long maxHeapEntries){
-        this.maxHeapEntries = maxHeapEntries;
+        heap.setMaxEntries(maxHeapEntries);
     }
 
     // must be called before feed_compiled_file(), which is what actually
@@ -1110,9 +1137,37 @@ public final class Bl0jv2_jVM {
                     case OpCodes.LOAD_NIL -> reg[a] = NanBox.NIL;
                     case OpCodes.LOAD_CONST -> reg[a] = consts[b];
 
-                    case OpCodes.LR_ADD -> reg[a] = box(ops.add.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_SUB -> reg[a] = box(ops.sub.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_MUL -> reg[a] = box(ops.mul.calculate(unbox(reg[a]), unbox(reg[b])));
+                    // int/int and double/double are decoded straight from the
+                    // NaN-boxed bits - no Object is allocated and no operator
+                    // table consulted; everything else (strings, mixed
+                    // int/double, errors) takes the general path below
+                    case OpCodes.LR_ADD -> {
+                        long x = reg[a], y = reg[b];
+                        if (NanBox.isInt(x) && NanBox.isInt(y))
+                            reg[a] = NanBox.ofInt(NanBox.asInt(x) + NanBox.asInt(y));
+                        else if (NanBox.isDouble(x) && NanBox.isDouble(y))
+                            reg[a] = Double.doubleToLongBits(Double.longBitsToDouble(x) + Double.longBitsToDouble(y));
+                        else
+                            reg[a] = box(ops.add.calculate(unbox(x), unbox(y)));
+                    }
+                    case OpCodes.LR_SUB -> {
+                        long x = reg[a], y = reg[b];
+                        if (NanBox.isInt(x) && NanBox.isInt(y))
+                            reg[a] = NanBox.ofInt(NanBox.asInt(x) - NanBox.asInt(y));
+                        else if (NanBox.isDouble(x) && NanBox.isDouble(y))
+                            reg[a] = Double.doubleToLongBits(Double.longBitsToDouble(x) - Double.longBitsToDouble(y));
+                        else
+                            reg[a] = box(ops.sub.calculate(unbox(x), unbox(y)));
+                    }
+                    case OpCodes.LR_MUL -> {
+                        long x = reg[a], y = reg[b];
+                        if (NanBox.isInt(x) && NanBox.isInt(y))
+                            reg[a] = NanBox.ofInt(NanBox.asInt(x) * NanBox.asInt(y));
+                        else if (NanBox.isDouble(x) && NanBox.isDouble(y))
+                            reg[a] = Double.doubleToLongBits(Double.longBitsToDouble(x) * Double.longBitsToDouble(y));
+                        else
+                            reg[a] = box(ops.mul.calculate(unbox(x), unbox(y)));
+                    }
                     case OpCodes.LR_DIV -> reg[a] = box(ops.div.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.LR_REM -> reg[a] = box(ops.rem.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.LR_POW -> reg[a] = box(ops.pow.calculate(unbox(reg[a]), unbox(reg[b])));
@@ -1126,13 +1181,25 @@ public final class Bl0jv2_jVM {
                     case OpCodes.BIT_NOT -> reg[a] = NanBox.ofInt(bitNot(unbox(reg[a])));
 
                     case OpCodes.JUMP -> addr = a * C.INSTR_WIDTH;
-                    case OpCodes.JUMP_IF -> { if ( (boolean) unbox(reg[a])) addr = b * C.INSTR_WIDTH; }
-                    case OpCodes.JUMP_IF_NOT -> { if (!(boolean) unbox(reg[a])) addr = b * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF -> { if (truth(reg[a], "condition")) addr = b * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT -> { if (!truth(reg[a], "condition")) addr = b * C.INSTR_WIDTH; }
 
-                    case OpCodes.EQ -> reg[a] = NanBox.ofBoolean(valuesEqual(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LESS -> reg[a] = NanBox.ofBoolean(toDouble(unbox(reg[a])) < toDouble(unbox(reg[b])));
-                    case OpCodes.GREATER  -> reg[a] = NanBox.ofBoolean(toDouble(unbox(reg[a])) > toDouble(unbox(reg[b])));
-                    case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!(boolean) unbox(reg[a]));
+                    case OpCodes.EQ -> {
+                        long x = reg[a], y = reg[b];
+                        // same-kind ints/bools compare as bits (ofInt/ofBoolean
+                        // are canonical); everything else - cross int/double,
+                        // strings, instances with their own equals() - goes
+                        // through valuesEqual
+                        if ((NanBox.isInt(x) && NanBox.isInt(y)) || (NanBox.isBool(x) && NanBox.isBool(y)))
+                            reg[a] = NanBox.ofBoolean(x == y);
+                        else
+                            reg[a] = NanBox.ofBoolean(valuesEqual(unbox(x), unbox(y)));
+                    }
+                    case OpCodes.LESS -> reg[a] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS));
+                    case OpCodes.GREATER -> reg[a] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER));
+                    case OpCodes.LESS_EQ -> reg[a] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS_EQ));
+                    case OpCodes.GREATER_EQ -> reg[a] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER_EQ));
+                    case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!truth(reg[a], "operand of '!'"));
 
                     case OpCodes.MOV -> reg[a] = reg[b];
                     case OpCodes.SET -> reg[a] = NanBox.ofInt(b);
@@ -1328,16 +1395,8 @@ public final class Bl0jv2_jVM {
                     // RawMemory's own doc for why
                     case OpCodes.FREE -> {
                         if (NanBox.isBoxed(reg[a]) && NanBox.tagOf(reg[a]) == NanBox.TAG_REF) {
-                            int idx = NanBox.asRefIndex(reg[a]);
-                            heapLock.writeLock().lock();
-                            try {
-                                if (heap.get(idx) == FREED)
-                                    throw new Bl0j_VM_Exception("double free");
-                                heap.set(idx, FREED);
-                                freeHeapSlots.push(idx);
-                            } finally {
-                                heapLock.writeLock().unlock();
-                            }
+                            if (!heap.free(NanBox.asRefIndex(reg[a])))
+                                throw new Bl0j_VM_Exception("double free");
                         } else {
                             throw new Bl0j_VM_Exception("cannot free " + typeName(unbox(reg[a])) + ": only managed values can be freed, there is no raw-memory allocator");
                         }
@@ -1513,27 +1572,9 @@ public final class Bl0jv2_jVM {
     }
 
     private long boxRef(Object value) {
-        heapLock.writeLock().lock();
-        try {
-            if (!freeHeapSlots.isEmpty()) {
-                int slot = freeHeapSlots.pop();
-                heap.set(slot, value);
-                return NanBox.ofRef(slot);
-            }
-            if (maxHeapEntries > 0 && heap.size() >= maxHeapEntries)
-                throw new Bl0j_VM_Exception("out of memory: heap entry limit (" + maxHeapEntries + ") reached");
-            heap.add(value);
-            return NanBox.ofRef(heap.size() - 1);
-        } finally {
-            heapLock.writeLock().unlock();
-        }
+        return NanBox.ofRef(heap.add(value));
     }
 
-    // converts a NaN-boxed register/const value into the plain Java object
-    // it represents, for the (currently still Object-based) OperatorTable
-    // and native methods to work with. Public so Bl0jArray and friends,
-    // now in runtime.values, can unbox their own elements (e.g. for
-    // toString) without duplicating this.
     public Object unbox(long bits) {
         if (!NanBox.isBoxed(bits))
             return Double.longBitsToDouble(bits);
@@ -1542,13 +1583,7 @@ public final class Bl0jv2_jVM {
             case NanBox.TAG_BOOL -> NanBox.asBoolean(bits);
             case NanBox.TAG_NIL -> NIL_OBJECT;
             case NanBox.TAG_REF -> {
-                Object v;
-                heapLock.readLock().lock();
-                try {
-                    v = heap.get(NanBox.asRefIndex(bits));
-                } finally {
-                    heapLock.readLock().unlock();
-                }
+                Object v = heap.get(NanBox.asRefIndex(bits));
                 if (v == FREED)
                     throw new Bl0j_VM_Exception("use after free");
                 yield v;

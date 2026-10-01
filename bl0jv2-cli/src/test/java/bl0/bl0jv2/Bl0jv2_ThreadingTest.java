@@ -121,9 +121,13 @@ class Bl0jv2_ThreadingTest {
         StringBuilder captured = new StringBuilder();
 
         Writer sink = new Writer() {
-            @Override public void write(char[] cbuf, int off, int len) {
+            // println writes its newline and its text as separate chunks, so the
+            // latch opens once the whole expected output has arrived, not on
+            // the first chunk
+            @Override public synchronized void write(char[] cbuf, int off, int len) {
                 captured.append(cbuf, off, len);
-                latch.countDown();
+                if (captured.toString().endsWith("C7"))
+                    latch.countDown();
             }
             @Override public void flush() {}
             @Override public void close() {}

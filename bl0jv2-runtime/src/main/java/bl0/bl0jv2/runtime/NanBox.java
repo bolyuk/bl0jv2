@@ -45,6 +45,24 @@ public final class NanBox {
 
     public static final long NIL = box(TAG_NIL, 0);
 
+    private static final long INT_MASK    = TAG_MASK | (TAG_BITS_MASK << TAG_SHIFT);
+    private static final long INT_PATTERN = TAG_PREFIX | ((long) TAG_INT << TAG_SHIFT);
+    private static final long BOOL_PATTERN = TAG_PREFIX | ((long) TAG_BOOL << TAG_SHIFT);
+
+    /** a boxed int - one mask-and-compare, no Object allocated */
+    public static boolean isInt(long bits) {
+        return (bits & INT_MASK) == INT_PATTERN;
+    }
+
+    public static boolean isBool(long bits) {
+        return (bits & INT_MASK) == BOOL_PATTERN;
+    }
+
+    /** a plain IEEE754 double (anything that is not a boxed value) */
+    public static boolean isDouble(long bits) {
+        return (bits & TAG_MASK) != TAG_PREFIX;
+    }
+
     public static boolean isBoxed(long bits) {
         return (bits & TAG_MASK) == TAG_PREFIX;
     }
