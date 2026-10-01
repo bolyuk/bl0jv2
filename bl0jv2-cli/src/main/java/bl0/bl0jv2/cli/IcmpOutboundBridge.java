@@ -25,13 +25,13 @@ import static bl0.bl0jv2.cli.NicFrame.*;
  * the same destinations as {@link TcpOutboundBridge#isAllowedDestination} are
  * refused. At most {@link #MAX_IN_FLIGHT} checks run at once.
  */
-final class IcmpOutboundBridge {
+public final class IcmpOutboundBridge {
 
     static final int MAX_IN_FLIGHT = 16;
 
     /** the reachability test - a seam so a test can answer without a network */
     @FunctionalInterface
-    interface Reachability {
+    public interface Reachability {
         boolean test(InetAddress address) throws IOException;
     }
 
@@ -39,16 +39,16 @@ final class IcmpOutboundBridge {
     private final Reachability reachability;
     private final Semaphore slots = new Semaphore(MAX_IN_FLIGHT);
 
-    IcmpOutboundBridge(Bl0jv2_jVM vm) {
+    public IcmpOutboundBridge(Bl0jv2_jVM vm) {
         this(vm, address -> address.isReachable(2000));
     }
 
-    IcmpOutboundBridge(Bl0jv2_jVM vm, Reachability reachability) {
+    public IcmpOutboundBridge(Bl0jv2_jVM vm, Reachability reachability) {
         this.vm = vm;
         this.reachability = reachability;
     }
 
-    void start() {
+    public void start() {
         var requests = TxDispatcher.of(vm).subscribe(frame ->
                 frame.length >= 28 && ipProto(frame) == IP_PROTO_ICMP && frame[20] == 8);
         Thread t = new Thread(() -> watchLoop(requests), "icmp-outbound-watch");

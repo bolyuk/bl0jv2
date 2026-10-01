@@ -1,6 +1,6 @@
-package bl0.bl0jv2.cli;
+package bl0.aeon;
 
-import bl0.bl0jv2.AeonSession;
+import bl0.bl0jv2.cli.*;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;

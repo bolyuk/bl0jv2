@@ -32,7 +32,7 @@ import static bl0.bl0jv2.cli.NicFrame.*;
  * "session" that expects several back-and-forth exchanges on one socket
  * would need a real table instead - not built here.
  */
-final class UdpOutboundBridge {
+public final class UdpOutboundBridge {
 
     static final int MAX_IN_FLIGHT = 64;
 
@@ -43,16 +43,16 @@ final class UdpOutboundBridge {
     // process (UdpBridge's replies) and are not relayed outward
     private final java.util.function.Predicate<byte[]> skip;
 
-    UdpOutboundBridge(Bl0jv2_jVM vm) {
+    public UdpOutboundBridge(Bl0jv2_jVM vm) {
         this(vm, frame -> false);
     }
 
-    UdpOutboundBridge(Bl0jv2_jVM vm, java.util.function.Predicate<byte[]> skip) {
+    public UdpOutboundBridge(Bl0jv2_jVM vm, java.util.function.Predicate<byte[]> skip) {
         this.vm = vm;
         this.skip = skip;
     }
 
-    void start() {
+    public void start() {
         var udp = TxDispatcher.of(vm).subscribe(frame -> frame.length >= 28 && ipProto(frame) == IP_PROTO_UDP);
         Thread t = new Thread(() -> watchLoop(udp), "udp-outbound-watch");
         t.setDaemon(true);

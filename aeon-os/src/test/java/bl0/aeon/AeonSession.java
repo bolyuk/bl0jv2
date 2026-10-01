@@ -1,4 +1,4 @@
-package bl0.bl0jv2;
+package bl0.aeon;
 
 import bl0.bl0jv2.generation.Bl0jv2_Compiler;
 import bl0.bl0jv2.generation.Bl0jv2_Lexer;

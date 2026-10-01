@@ -12,11 +12,11 @@ import java.nio.file.Path;
  * written in place. A missing image is created zero-filled at the requested
  * size; an existing one keeps the size it has (rounded down to whole sectors).
  */
-final class FileDisk implements BlockDevice, AutoCloseable {
+public final class FileDisk implements BlockDevice, AutoCloseable {
     private final RandomAccessFile file;
     private final long sectors;
 
-    FileDisk(Path image, int sectorsIfNew) throws IOException {
+    public FileDisk(Path image, int sectorsIfNew) throws IOException {
         boolean fresh = !Files.exists(image);
         this.file = new RandomAccessFile(image.toFile(), "rw");
         if (fresh) file.setLength((long) sectorsIfNew * SECTOR_SIZE);

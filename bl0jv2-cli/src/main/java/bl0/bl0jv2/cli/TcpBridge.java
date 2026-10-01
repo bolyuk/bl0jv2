@@ -25,7 +25,7 @@ import static bl0.bl0jv2.cli.TcpRelay.*;
  * (see tcpListen()'s own doc) - accept() blocks here until the current
  * bridged connection is fully done before taking the next real one.
  */
-final class TcpBridge {
+public final class TcpBridge {
 
     private final Bl0jv2_jVM vm;
     private final TcpRelay relay;
@@ -46,7 +46,7 @@ final class TcpBridge {
     // describes. Bound to loopback specifically - see UdpBridge's own doc
     // on why (a wildcard bind makes Windows prompt for network access this
     // bridge never actually needs, since it's local-testing-only).
-    TcpBridge(Bl0jv2_jVM vm, int hostTcpPort, int localFakeIp, int localFakePort, int remoteFakeIp) throws IOException {
+    public TcpBridge(Bl0jv2_jVM vm, int hostTcpPort, int localFakeIp, int localFakePort, int remoteFakeIp) throws IOException {
         this.vm = vm;
         this.relay = new TcpRelay(vm);
         // tell the guest a bridge is attached (Nic.initAuto reads it); a connection
@@ -59,7 +59,7 @@ final class TcpBridge {
         serverSocket.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), hostTcpPort));
     }
 
-    void start() {
+    public void start() {
         Thread t = new Thread(this::acceptLoop, "tcp-bridge-accept");
         t.setDaemon(true);
         t.start();

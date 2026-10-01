@@ -24,12 +24,12 @@ import java.util.List;
  * reads it. A file named *.bl0 is compiled first (imports resolved, -I
  * respected) and stored as a .bl0c, ready for the shell's exec.
  */
-final class DiskImport {
+public final class DiskImport {
     private DiskImport() {}
 
     /** one --disk-put argument: HOSTFILE or HOSTFILE:NAME on the disk */
-    record Spec(Path host, String name) {
-        static Spec parse(String text) {
+    public record Spec(Path host, String name) {
+        public static Spec parse(String text) {
             int colon = text.lastIndexOf(':');
             // a Windows drive letter (C:\x) is not a name separator
             if (colon > 1 || (colon == 1 && !Character.isLetter(text.charAt(0)))) {
@@ -39,7 +39,7 @@ final class DiskImport {
         }
     }
 
-    static void put(BlockDevice disk, List<Spec> specs, List<Path> includeDirs) throws IOException {
+    public static void put(BlockDevice disk, List<Spec> specs, List<Path> includeDirs) throws IOException {
         StringBuilder src = new StringBuilder("import 'stdlib/fs/fs.bl0'; Disk.init(8192); ")
                 .append("if (!Fs.mount()) { Fs.format(); } ");
         for (Spec spec : specs) {

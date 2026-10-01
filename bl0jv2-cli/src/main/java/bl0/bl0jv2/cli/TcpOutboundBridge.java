@@ -47,7 +47,7 @@ import static bl0.bl0jv2.cli.TcpRelay.*;
  * Loopback and private ranges are allowed: reaching a service on this
  * machine or LAN is the point of the bridge.
  */
-final class TcpOutboundBridge {
+public final class TcpOutboundBridge {
 
     static final int MAX_CONNECTIONS = 64;
 
@@ -58,7 +58,7 @@ final class TcpOutboundBridge {
     // 4-tuples of connections being set up or running - see the class doc
     private final java.util.Set<String> active = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    TcpOutboundBridge(Bl0jv2_jVM vm) {
+    public TcpOutboundBridge(Bl0jv2_jVM vm) {
         this.vm = vm;
         this.relay = new TcpRelay(vm);
     }
@@ -68,7 +68,7 @@ final class TcpOutboundBridge {
         return !(address.isAnyLocalAddress() || address.isMulticastAddress() || address.isLinkLocalAddress());
     }
 
-    void start() {
+    public void start() {
         // a bare SYN (no ACK) is the one frame shape that can only mean "the
         // VM is opening a new connection"
         var syns = TxDispatcher.of(vm).subscribe(frame ->

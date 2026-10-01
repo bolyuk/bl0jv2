@@ -1,4 +1,4 @@
-package bl0.bl0jv2;
+package bl0.aeon;
 
 import org.junit.jupiter.api.Test;
 
@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 // checked. Until now nothing ran them, so a language change could break them
 // unnoticed (arity checks did, in smp_boot: its dispatched tasks took no
 // argument although dispatch() passes one).
-class Bl0jv2_AeonOsTest {
+class AeonOsTest {
 
     @Test
     void childHelloRunsToCompletion() throws Exception {

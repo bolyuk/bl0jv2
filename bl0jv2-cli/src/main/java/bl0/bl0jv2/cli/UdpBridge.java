@@ -33,7 +33,7 @@ import static bl0.bl0jv2.cli.NicFrame.*;
  * socket) - a strict client checking that would reject a reply arriving
  * from UdpOutboundBridge's own, different, ephemeral port instead.
  */
-final class UdpBridge {
+public final class UdpBridge {
 
     private final Bl0jv2_jVM vm;
     private final DatagramSocket socket;
