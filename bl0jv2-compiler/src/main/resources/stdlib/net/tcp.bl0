@@ -2,10 +2,11 @@ import 'ip.bl0'; // brings in Ip.netByteToChar() too - see its own doc
 
 // a toy TCP over the IP/NIC layers below: real three-way handshake
 // (SYN / SYN+ACK / ACK), real sequence/ack numbers, a real four-way close
-// (FIN+ACK both directions), a real checksum over a pseudo-header - just
-// none of the loss-recovery machinery (retransmission timers, congestion
-// control, out-of-order reassembly) a lossless loopback link has no way to
-// ever need. One segment per TcpConn.send() call, no MSS-based
+// (FIN+ACK both directions), a real checksum over a pseudo-header, and
+// timeout-based retransmission of anything that consumed sequence space
+// (SYN, data, FIN) with exponential backoff - just none of congestion
+// control or out-of-order reassembly (an out-of-order segment is dropped and
+// simply arrives again when the sender retransmits). One segment per TcpConn.send() call, no MSS-based
 // segmentation - a real stack splits a large write across multiple
 // segments; this one just sends whatever you handed it as a single
 // segment.
@@ -56,6 +57,16 @@ def class TcpIsn {
 }
 TcpIsn.counter = 1000;
 
+// one transmitted segment still waiting for the peer to acknowledge it
+def class TcpUnacked {
+    field seq;
+    field flags;
+    field payload;
+    field seqLen;   // sequence numbers it occupies: payload length, +1 for SYN, +1 for FIN
+    field sentAt;   // ticks() of the last (re)transmission
+    field tries;    // retransmissions so far
+}
+
 // one live (or listening, or closing) connection. state is a plain string
 // ('LISTEN'/'SYN_SENT'/'SYN_RCVD'/'ESTABLISHED'/'FIN_WAIT'/'CLOSED') rather
 // than an enum - bl0jv2 has none, and a string prints usefully as-is while
@@ -70,8 +81,11 @@ def class TcpConn {
     field rcvNext;         // next sequence number we EXPECT from the peer
     field recvBuffer;      // in-order data received but not yet receive()'d
     field peerFinReceived;
+    field unacked;         // array of TcpUnacked, oldest first
 
     static field connectTimeoutMs;
+    static field rtoMs;        // base retransmission timeout; doubles per retry
+    static field maxRetries;   // after this many, the connection is declared dead (CLOSED)
 
     static def buildHeader(srcPort, dstPort, seq, ack, flags) {
         return [
@@ -132,6 +146,7 @@ def class TcpConn {
         conn.rcvNext = 0;
         conn.recvBuffer = '';
         conn.peerFinReceived = false;
+        conn.unacked = [];
         lock(TcpRegistry.lock);
         push(TcpRegistry.conns, conn);
         unlock(TcpRegistry.lock);
@@ -159,6 +174,7 @@ def class TcpConn {
         conn.rcvNext = 0;
         conn.recvBuffer = '';
         conn.peerFinReceived = false;
+        conn.unacked = [];
         lock(TcpRegistry.lock);
         push(TcpRegistry.conns, conn);
         unlock(TcpRegistry.lock);
@@ -187,6 +203,7 @@ def class TcpConn {
             }
         }
 
+        if (conn.state == 'CLOSED') { return nil; } // SYN retransmissions exhausted
         return conn;
     }
 
@@ -194,8 +211,36 @@ def class TcpConn {
     // always come from the connection's own state, never passed in
     // separately, so every call site of this stays consistent with
     // whatever handleSegment() last observed. payload is a string, '' for
-    // a pure control segment (SYN/ACK/FIN carrying no data).
+    // a pure control segment (SYN/ACK/FIN carrying no data). Anything that
+    // consumes sequence space is remembered in 'unacked' until the peer
+    // acknowledges it, so retransmitDue() can resend it; a pure ACK is
+    // fire-and-forget (the peer re-asks for it by retransmitting).
+    // Holds TcpRegistry.pumpLock so the unacked list is never mutated
+    // while another core is scanning it in retransmitTick().
     def sendSegment(flags, payload) {
+        seqLen = len(payload);
+        if (TcpFlags.has(flags, TcpFlags.syn)) { seqLen = seqLen + 1; }
+        if (TcpFlags.has(flags, TcpFlags.fin)) { seqLen = seqLen + 1; }
+
+        lock(TcpRegistry.pumpLock);
+        if (seqLen > 0) {
+            u = new TcpUnacked();
+            u.seq = this.sndNext;
+            u.flags = flags;
+            u.payload = payload;
+            u.seqLen = seqLen;
+            u.sentAt = ticks();
+            u.tries = 0;
+            push(this.unacked, u);
+        }
+        this.transmit(this.sndNext, flags, payload);
+        unlock(TcpRegistry.pumpLock);
+    }
+
+    // puts one segment on the wire with an explicit sequence number (a
+    // retransmission re-sends the ORIGINAL seq, not the current sndNext).
+    // The ack field is always the current rcvNext.
+    def transmit(seq, flags, payload) {
         payloadBytes = [];
         i = 0;
         while (i < len(payload)) {
@@ -203,7 +248,7 @@ def class TcpConn {
             i = i + 1;
         }
 
-        header = TcpConn.buildHeader(this.localPort, this.remotePort, this.sndNext, this.rcvNext, flags);
+        header = TcpConn.buildHeader(this.localPort, this.remotePort, seq, this.rcvNext, flags);
         header = TcpConn.applyChecksum(header, this.localIp, this.remoteIp, payloadBytes);
 
         segment = [];
@@ -219,11 +264,62 @@ def class TcpConn {
         Nic.send(frame);
     }
 
+    // the peer acknowledged everything below ackNum: forget those segments
+    def processAck(ackNum) {
+        kept = [];
+        i = 0;
+        while (i < len(this.unacked)) {
+            u = this.unacked[i];
+            if (u.seq + u.seqLen > ackNum) { push(kept, u); }
+            i = i + 1;
+        }
+        this.unacked = kept;
+    }
+
+    // resends every unacked segment whose timeout (TcpConn.rtoMs, doubled
+    // per previous retry) has passed; after TcpConn.maxRetries the
+    // connection is declared dead. Called from TcpRegistry.pump() under
+    // pumpLock.
+    def retransmitDue() {
+        now = ticks();
+        i = 0;
+        while (i < len(this.unacked)) {
+            u = this.unacked[i];
+            if (now - u.sentAt >= TcpConn.rtoMs * (1 << u.tries)) {
+                if (u.tries >= TcpConn.maxRetries) {
+                    this.state = 'CLOSED';
+                    this.unacked = [];
+                    return nil;
+                }
+                u.tries = u.tries + 1;
+                u.sentAt = now;
+                this.transmit(u.seq, u.flags, u.payload);
+            }
+            i = i + 1;
+        }
+    }
+
+    // resends everything unacked right now, without counting it as a
+    // timeout retry - used when the peer's own retransmission shows our
+    // reply to it was lost
+    def retransmitAll() {
+        i = 0;
+        while (i < len(this.unacked)) {
+            u = this.unacked[i];
+            u.sentAt = ticks();
+            this.transmit(u.seq, u.flags, u.payload);
+            i = i + 1;
+        }
+    }
+
     // advances this connection's state machine by exactly one segment
     // already confirmed to belong to it (see TcpRegistry.findMatch()) -
     // every branch below mirrors one real TCP state transition, just
-    // without retransmission on top of it
+    // (retransmission itself lives in retransmitDue(); this just
+    // acknowledges, de-duplicates and re-acks what the peer resends)
     def handleSegment(ipHeader, seg) {
+        if (TcpFlags.has(seg.flags, TcpFlags.ack)) { this.processAck(seg.ack); }
+
         if (this.state == 'LISTEN') {
             if (TcpFlags.has(seg.flags, TcpFlags.syn)) {
                 this.remoteIp = ipHeader.srcAddr;
@@ -254,7 +350,11 @@ def class TcpConn {
         }
 
         if (this.state == 'SYN_RCVD') {
-            if (!TcpFlags.has(seg.flags, TcpFlags.ack)) { return nil; }
+            if (!TcpFlags.has(seg.flags, TcpFlags.ack)) {
+                // the client's SYN again: our SYN+ACK was lost
+                if (TcpFlags.has(seg.flags, TcpFlags.syn)) { this.retransmitAll(); }
+                return nil;
+            }
             this.state = 'ESTABLISHED';
             // no return: the handshake's final ACK can already carry data
             // (or be followed by it before accept() even wakes) - fall
@@ -264,17 +364,35 @@ def class TcpConn {
         // ESTABLISHED, and FIN_WAIT (our own close already sent, but the
         // peer's FIN - or trailing data sent before it - can still arrive
         // after)
-        if (TcpFlags.has(seg.flags, TcpFlags.fin)) {
-            this.rcvNext = seg.seq + 1;
-            this.peerFinReceived = true;
+        if (TcpFlags.has(seg.flags, TcpFlags.syn)) {
+            // the server's SYN+ACK again: our handshake ACK was lost
             this.sendSegment(TcpFlags.ack, '');
             return nil;
         }
 
-        if (len(seg.payload) > 0 && seg.seq == this.rcvNext) {
-            this.recvBuffer = this.recvBuffer + seg.payload;
-            this.rcvNext = this.rcvNext + len(seg.payload);
-            this.sendSegment(TcpFlags.ack, '');
+        if (TcpFlags.has(seg.flags, TcpFlags.fin)) {
+            if (seg.seq == this.rcvNext) {
+                this.rcvNext = seg.seq + 1;
+                this.peerFinReceived = true;
+                this.sendSegment(TcpFlags.ack, '');
+            } else {
+                // a duplicate FIN gets re-acked; a FIN that ran ahead of
+                // lost data is dropped (accepting it would skip that data)
+                if (seg.seq < this.rcvNext) { this.sendSegment(TcpFlags.ack, ''); }
+            }
+            return nil;
+        }
+
+        if (len(seg.payload) > 0) {
+            if (seg.seq == this.rcvNext) {
+                this.recvBuffer = this.recvBuffer + seg.payload;
+                this.rcvNext = this.rcvNext + len(seg.payload);
+                this.sendSegment(TcpFlags.ack, '');
+            } else {
+                // already-delivered data again: our ACK was lost, say so
+                // again; data from the future is dropped until the gap fills
+                if (seg.seq < this.rcvNext) { this.sendSegment(TcpFlags.ack, ''); }
+            }
         }
     }
 
@@ -300,7 +418,7 @@ def class TcpConn {
             gen = eventGen(Nic.rxEvent);
             TcpRegistry.pump();
             if (len(this.recvBuffer) > 0) { return true; }
-            if (this.peerFinReceived) { return false; }
+            if (this.peerFinReceived || this.state == 'CLOSED') { return false; }
             if (timeoutMs < 0) {
                 TcpRegistry.idle(gen, -1);
             } else {
@@ -356,10 +474,10 @@ def class TcpConn {
     // here since a lossless loopback link has nothing left to ever
     // retransmit or duplicate.
     def waitClosed() {
-        while (!this.peerFinReceived) {
+        while (!this.peerFinReceived && this.state != 'CLOSED') {
             gen = eventGen(Nic.rxEvent);
             TcpRegistry.pump();
-            if (!this.peerFinReceived) { TcpRegistry.idle(gen, -1); }
+            if (!this.peerFinReceived && this.state != 'CLOSED') { TcpRegistry.idle(gen, -1); }
         }
         this.state = 'CLOSED';
     }
@@ -398,6 +516,8 @@ def class TcpSegment {
 }
 
 TcpConn.connectTimeoutMs = 10000;
+TcpConn.rtoMs = 200;
+TcpConn.maxRetries = 6;
 
 // every connection this process has created, LISTEN or otherwise - see
 // pump()'s own doc for why this has to be a registry, not a per-connection
@@ -454,8 +574,38 @@ def class TcpRegistry {
     // that reason) - bumps the generation, so idle() returns at once
     // instead of sleeping through it. A spurious return is harmless: every
     // caller loops.
+    //
+    // While anything is awaiting an ACK the wait is capped at
+    // TcpConn.rtoMs, so the caller wakes often enough for pump() to
+    // retransmit what is overdue.
     static def idle(gen, timeoutMs) {
+        if (TcpRegistry.hasUnacked() && (timeoutMs < 0 || timeoutMs > TcpConn.rtoMs)) {
+            timeoutMs = TcpConn.rtoMs;
+        }
         waitEvent(Nic.rxEvent, gen, timeoutMs);
+    }
+
+    static def hasUnacked() {
+        i = 0;
+        while (i < len(TcpRegistry.conns)) {
+            c = TcpRegistry.conns[i];
+            if (c.state != 'CLOSED' && len(c.unacked) > 0) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    // resends overdue segments on every live connection - see
+    // TcpConn.retransmitDue(). Runs at the end of every pump(), i.e.
+    // whenever any caller of this stack gets a turn: retransmission is
+    // driven by whoever is waiting, there is no background thread.
+    static def retransmitTick() {
+        i = 0;
+        while (i < len(TcpRegistry.conns)) {
+            c = TcpRegistry.conns[i];
+            if (c.state != 'CLOSED' && len(c.unacked) > 0) { c.retransmitDue(); }
+            i = i + 1;
+        }
     }
 
     // drains every frame CURRENTLY queued on the NIC, routing each to
@@ -500,6 +650,7 @@ def class TcpRegistry {
                 signalEvent(Nic.rxEvent);
             }
         }
+        TcpRegistry.retransmitTick();
         unlock(TcpRegistry.pumpLock);
     }
 }

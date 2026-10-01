@@ -95,6 +95,7 @@ def class Nic {
     static field txQueue;  // frames sent but not yet moved to rxQueue by the ISR
     static field rxQueue;  // array of already-delivered frame arrays
     static field lock;
+    static field dropNext; // test hook / lossy-link simulation: silently discard the next N sent frames
     static field rxEvent;  // signalled whenever the network state may have changed (a frame queued, a TCP segment handled) - see recvWait()
 
     static field hostBridgeEnabled;
@@ -173,6 +174,10 @@ def class Nic {
     // syscall() instead, which is exactly where this is heading, not a
     // finished design yet.
     static def send(frame) {
+        if (Nic.dropNext > 0) {
+            Nic.dropNext = Nic.dropNext - 1;
+            return nil;
+        }
         lock(Nic.lock);
         push(Nic.txQueue, frame);
         unlock(Nic.lock);
@@ -265,6 +270,7 @@ Nic.txQueue = [];
 Nic.rxQueue = [];
 Nic.lock = newMutex();
 Nic.rxEvent = newEvent();
+Nic.dropNext = 0;
 
 Nic.hostBridgeEnabled = false;
 Nic.maxFrameBytes = 1500; // a conventional Ethernet-ish MTU - plenty for this toy stack's own headers+payload

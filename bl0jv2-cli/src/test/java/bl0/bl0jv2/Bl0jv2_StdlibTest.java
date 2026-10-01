@@ -270,6 +270,64 @@ class Bl0jv2_StdlibTest {
                 "print TcpRegistry.conns[0].state;"));
     }
 
+    // --- tcp.bl0 retransmission --- Nic.dropNext = N silently discards the
+    // next N transmitted frames (a lossy link); a short TcpConn.rtoMs keeps
+    // these fast. All single-core: whoever is waiting pumps the shared
+    // registry, which is also what retransmits.
+
+    @Test
+    void tcpLostSynIsRetransmittedAndTheHandshakeStillCompletes(@TempDir Path dir) throws IOException {
+        assertEquals("ESTABLISHED|ESTABLISHED", run(dir, "net/tcp.bl0",
+                "Nic.init(); TcpConn.rtoMs = 20; " +
+                "server = TcpConn.listen(0x0A000001, 8080); " +
+                "Nic.dropNext = 1; " +
+                "client = TcpConn.connect(0x0A000002, 5000, 0x0A000001, 8080); " +
+                "server.accept(); " +
+                "print server.state + '|' + client.state;"));
+    }
+
+    @Test
+    void tcpLostDataSegmentIsRetransmittedAndDeliveredExactlyOnce(@TempDir Path dir) throws IOException {
+        assertEquals("true|hello|0", run(dir, "net/tcp.bl0",
+                "Nic.init(); TcpConn.rtoMs = 20; " +
+                "server = TcpConn.listen(0x0A000001, 8080); " +
+                "client = TcpConn.connect(0x0A000002, 5000, 0x0A000001, 8080); " +
+                "server.accept(); " +
+                "Nic.dropNext = 1; client.send('hello'); " +
+                "ok = server.waitData(3000); " +
+                "got = server.receive(); " +
+                "i = 0; while (i < 50 && len(client.unacked) > 0) { i = i + 1; client.waitData(10); } " +
+                "print str(ok) + '|' + got + '|' + str(len(client.unacked));"));
+    }
+
+    @Test
+    void tcpLostAckMakesTheSenderResendButTheReceiverDeduplicates(@TempDir Path dir) throws IOException {
+        // the server's ACK for 'a' is lost, so the client resends 'a'; the
+        // server must re-ack it without delivering it a second time
+        assertEquals("a||0", run(dir, "net/tcp.bl0",
+                "Nic.init(); TcpConn.rtoMs = 20; " +
+                "server = TcpConn.listen(0x0A000001, 8080); " +
+                "client = TcpConn.connect(0x0A000002, 5000, 0x0A000001, 8080); " +
+                "server.accept(); " +
+                "client.send('a'); " +
+                "Nic.dropNext = 1; " +
+                "server.waitData(1000); first = server.receive(); " +
+                "i = 0; while (i < 60 && len(client.unacked) > 0) { i = i + 1; client.waitData(10); server.waitData(10); } " +
+                "print first + '|' + server.receive() + '|' + str(len(client.unacked));"));
+    }
+
+    @Test
+    void tcpGivesUpAfterMaxRetriesAndMarksTheConnectionClosed(@TempDir Path dir) throws IOException {
+        assertEquals("CLOSED", run(dir, "net/tcp.bl0",
+                "Nic.init(); TcpConn.rtoMs = 5; TcpConn.maxRetries = 2; " +
+                "server = TcpConn.listen(0x0A000001, 8080); " +
+                "client = TcpConn.connect(0x0A000002, 5000, 0x0A000001, 8080); " +
+                "server.accept(); " +
+                "Nic.dropNext = 1000; client.send('lost'); " +
+                "i = 0; while (i < 200 && client.state != 'CLOSED') { i = i + 1; client.waitData(10); } " +
+                "print client.state;"));
+    }
+
     @Test
     void tcpHandshakeDataExchangeAndClose(@TempDir Path dir) throws IOException {
         assertEquals("ESTABLISHED|ESTABLISHED|GET / HTTP/1.0|HTTP/1.0 200 OK|CLOSED|CLOSED", run(dir, "net/tcp.bl0",
