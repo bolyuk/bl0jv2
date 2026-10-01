@@ -19,6 +19,7 @@ import bl0.bl0jv2.generation.tokens.data.*;
 import bl0.bl0jv2.generation.tokens.statements.*;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public final class Bl0jv2_Parser {
@@ -27,11 +28,22 @@ public final class Bl0jv2_Parser {
 
     private String sourceCode;
 
+    // unique per switch statement in one parse, so nested/sibling switches
+    // each get their own temp variable - see switch_statement()'s own doc
+    private int switchCounter = 0;
+
     // program        = statement*
-    // statement      =  if | for | try | fun | class | while | break | continue | sysCall | assign ';'
+    // statement      =  if | for | try | fun | class | enum | while | switch | break | continue | sysCall | assign ';'
     // break          = 'break' ';'
     // continue       = 'continue' ';'
     // class          = 'def' 'class' IDENT '{' (field | constField | staticField | fun | staticFun)* '}'   (no inheritance)
+    // enum           = 'enum' IDENT '{' IDENT (',' IDENT)* ','? '}'   (top-level only, same as class - desugars
+    //                    to a class with one static field + one singleton instance per constant, see
+    //                    enum_statement()'s own doc; a constant compares with '==' by reference, like any
+    //                    other singleton, and prints its own name via a generated toString())
+    // switch         = 'switch' '(' assign ')' '{' switchCase* switchDefault? '}'
+    // switchCase     = 'case' assign block   (no fallthrough - each case is its own block, not a label)
+    // switchDefault  = 'default' block
     // field          = 'field' IDENT ('=' literal)? ';'
     // constField     = 'const' 'field' IDENT ('=' literal)? ';'   (this.field = ... only allowed inside init(); compile-time only, see Bl0jv2_Compiler)
     // literal        = NUMBER | STRING | BOOL | 'nil'          (field initializer only - not full 'data')
@@ -83,8 +95,21 @@ public final class Bl0jv2_Parser {
     private PROGRAM_N program() {
         List<Node> stmts = new ArrayList<>();
 
-        while (!(peek_t() instanceof EOFToken))
-            stmts.add(classStatement());
+        while (!(peek_t() instanceof EOFToken)) {
+            Node stmt = classStatement();
+            // a PROGRAM_N here means a desugared multi-statement construct
+            // (currently only enum_statement()) - its own nodes are spliced
+            // in flat, at this list's own top level, not left nested one
+            // level deep inside a wrapper PROGRAM_N. That nesting would
+            // otherwise hide any ClassNode/FunNode it contains from
+            // Bl0jv2_Compiler.fetchFunctions(), which only scans a
+            // PROGRAM_N's own immediate .nodes list, never recursing into
+            // one nested inside it
+            if (stmt instanceof PROGRAM_N nested)
+                stmts.addAll(nested.nodes);
+            else
+                stmts.add(stmt);
+        }
 
         return new PROGRAM_N(stmts);
     }
@@ -92,6 +117,9 @@ public final class Bl0jv2_Parser {
     private Node classStatement() {
         if(peek_t() instanceof DefToken) // dont consume!!
             return define_function_or_class();
+
+        if(peek_t() instanceof EnumToken) // dont consume!!
+            return enum_statement();
 
         return statement();
     }
@@ -123,6 +151,9 @@ public final class Bl0jv2_Parser {
 
         if(peek_t() instanceof TryToken) // dont consume!!
             return try_statement(); // self-terminating via block()
+
+        if(peek_t() instanceof SwitchToken) // dont consume!!
+            return switch_statement(); // self-terminating via block()
 
         if(consume_if(BreakToken.class)) {
             consume_if(SemicolonToken.class);
@@ -374,6 +405,120 @@ public final class Bl0jv2_Parser {
         Node catchBody = block();
 
         return new TryNode(tryBody, catchVarName, catchBody);
+    }
+
+    // 'switch (expr) { case A { ... } case B { ... } default { ... } }'
+    // desugars to a chain of if/else-if/else comparing a ONE-TIME-evaluated
+    // copy of expr (a synthetic temp variable, so a side-effecting expr -
+    // a function call, say - runs exactly once, not once per case) against
+    // each case's own value with '==' - no fallthrough, no 'break' needed:
+    // every case is its own block, like an if-branch, not a label
+    // execution resumes from and keeps going past. The synthetic temp
+    // variable's name ('$switch0', '$switch1', ...) can never collide with
+    // a real identifier - '$' isn't in Bl0jv2_Lexer's own isIdentity()
+    // alphabet, so no token the lexer could ever produce for real source
+    // names one - counted per switch (switchCounter) so nested/sibling
+    // switches in the same parse each get their own slot. Valid anywhere a
+    // statement is (not top-level-only like enum_statement()): the
+    // desugared PROGRAM_N here only ever holds a plain assignment and an
+    // IfNode, never a ClassNode/FunNode, so it needs none of
+    // program()'s own flattening - Bl0jv2_Compiler already compiles a
+    // nested PROGRAM_N wherever one appears, at any depth (see its own
+    // PROGRAM_N case in compileInner).
+    private Node switch_statement() {
+        consume_or_throw(SwitchToken.class, "'switch' token expected for switch statement");
+        consume_or_throw(LParenToken.class, "'(' token expected after 'switch'");
+        Node subject = assign_evaluation();
+        consume_or_throw(RParenToken.class, "')' token expected after switch subject");
+        consume_or_throw(LBraceToken.class, "'{' token expected to start switch body");
+
+        String tempName = "$switch" + (switchCounter++);
+        Node assignTemp = new BinaryNode(new IdentityNode(tempName), Operator.ASSIGNMENT, subject);
+
+        List<Node> caseValues = new ArrayList<>();
+        List<Node> caseBodies = new ArrayList<>();
+        Node defaultBody = null;
+
+        while (!consume_if(RBraceToken.class)) {
+            if (consume_if(CaseToken.class)) {
+                caseValues.add(assign_evaluation());
+                caseBodies.add(block());
+            } else if (consume_if(DefaultToken.class)) {
+                defaultBody = block();
+            } else {
+                Token t = peek_t();
+                throw new Bl0j_ParserException(t.line, t.line_index, "'case' or 'default' expected inside switch body");
+            }
+        }
+
+        // built from the LAST case backward, so each one's elseBody is
+        // whatever chain was already built from the cases after it -
+        // defaultBody (possibly null, meaning "do nothing") seeds it
+        Node chain = defaultBody;
+        for (int i = caseValues.size() - 1; i >= 0; i--) {
+            Node condition = new BinaryNode(new IdentityNode(tempName), Operator.EQUALS, caseValues.get(i));
+            chain = new IfNode(condition, caseBodies.get(i), chain);
+        }
+
+        List<Node> stmts = new ArrayList<>();
+        stmts.add(assignTemp);
+        if (chain != null) stmts.add(chain);
+        return new PROGRAM_N(stmts);
+    }
+
+    // 'enum Name { A, B, C }' desugars to a plain 'def class Name' (reusing
+    // exactly the class/static-field/instance-method machinery already
+    // there - see ClassNode's own doc) with one static field per constant,
+    // and one singleton instance per constant created right after the
+    // class definition - the same "new X(); x.field = ...;" pattern
+    // stdlib/net/ip.bl0's own IpHeader/tcp.bl0's own TcpSegment already
+    // use. Each singleton carries its own name (so printing one shows
+    // 'LISTEN', not an opaque int - the exact reason tcp.bl0's own
+    // TcpConn.state is still a plain string today, not an int constant: an
+    // int has no readable form of its own) and ordinal (declaration order,
+    // 0-based). '==' between two constants is already correct reference
+    // equality with no extra work needed: Bl0jv2_jVM's own valuesEqual()
+    // falls back to Objects.equals() for two Bl0jInstance values with no
+    // equals() override, and every constant is constructed exactly once,
+    // so "the same constant" and "the same object" already coincide.
+    //
+    // Only valid at the top level (classStatement(), the same restriction
+    // 'def class' itself already has) - the desugared output includes a
+    // ClassNode, and only program()'s own flattening step feeds a
+    // PROGRAM_N's nested nodes to Bl0jv2_Compiler.fetchFunctions() (see
+    // program()'s own doc); nothing does that for a PROGRAM_N nested
+    // inside a function body instead.
+    private Node enum_statement() {
+        consume_or_throw(EnumToken.class, "'enum' token expected for enum definition");
+        String enumName = consume_or_throw(IdentityToken.class, "identifier expected for enum name").name;
+        consume_or_throw(LBraceToken.class, "'{' token expected to start enum body");
+
+        List<String> constantNames = new ArrayList<>();
+        while (!(peek_t() instanceof RBraceToken)) {
+            constantNames.add(consume_or_throw(IdentityToken.class, "identifier expected for enum constant").name);
+            if (!consume_if(SeparatorToken.class))
+                break; // no trailing comma - must be the last constant
+        }
+        consume_or_throw(RBraceToken.class, "'}' token expected to end enum body");
+
+        FunNode toStringMethod = new FunNode(enumName + ".toString", new PARAMS_N(List.of("this")),
+                new ReturnNode(new FieldAccessNode(new IdentityNode("this"), "name")));
+
+        ClassNode classNode = new ClassNode(enumName,
+                List.of("name", "ordinal"), Arrays.asList(null, null), List.of(),
+                List.of(toStringMethod), List.of(), constantNames);
+
+        List<Node> stmts = new ArrayList<>();
+        stmts.add(classNode);
+        for (int i = 0; i < constantNames.size(); i++) {
+            Node constRef = new FieldAccessNode(new IdentityNode(enumName), constantNames.get(i));
+
+            stmts.add(new BinaryNode(constRef, Operator.ASSIGNMENT, new NewNode(enumName, List.of())));
+            stmts.add(new BinaryNode(new FieldAccessNode(constRef, "name"), Operator.ASSIGNMENT, new StringNode(constantNames.get(i))));
+            stmts.add(new BinaryNode(new FieldAccessNode(constRef, "ordinal"), Operator.ASSIGNMENT, new NumberNode(i)));
+        }
+
+        return new PROGRAM_N(stmts);
     }
 
     private Node block(){

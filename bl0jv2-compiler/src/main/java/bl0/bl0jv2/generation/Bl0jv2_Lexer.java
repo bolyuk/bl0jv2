@@ -219,6 +219,10 @@ public final class Bl0jv2_Lexer {
                             case "continue" -> tokens.add(new ContinueToken(line, start_index));
                             case "try" -> tokens.add(new TryToken(line, start_index));
                             case "catch" -> tokens.add(new CatchToken(line, start_index));
+                            case "switch" -> tokens.add(new SwitchToken(line, start_index));
+                            case "case" -> tokens.add(new CaseToken(line, start_index));
+                            case "default" -> tokens.add(new DefaultToken(line, start_index));
+                            case "enum" -> tokens.add(new EnumToken(line, start_index));
 
                             case "def" -> tokens.add(new DefToken(line, start_index));
                             case "return" -> tokens.add(new ReturnToken(line, start_index));

@@ -159,4 +159,62 @@ class Bl0jv2_ControlFlowTest {
                 "} " +
                 "x = 1 / 0;"));
     }
+
+    // --- switch --- desugars to an if/else-if/else chain (see
+    // Bl0jv2_Parser's own switch_statement() doc) - no fallthrough, each
+    // case is its own block.
+
+    @Test
+    void switchTakesTheMatchingCase() {
+        assertEquals("two", run("x = 2; switch (x) { case 1 { print 'one'; } case 2 { print 'two'; } }"));
+    }
+
+    @Test
+    void switchFallsBackToDefaultWhenNoCaseMatches() {
+        assertEquals("other", run("x = 99; switch (x) { case 1 { print 'one'; } default { print 'other'; } }"));
+    }
+
+    @Test
+    void switchWithNoMatchAndNoDefaultDoesNothing() {
+        assertEquals("", run("x = 99; switch (x) { case 1 { print 'one'; } }"));
+    }
+
+    @Test
+    void switchOnlyEverTakesOneCase() {
+        // no fallthrough: matching 'case 1' must not also run 'case 2'
+        assertEquals("one", run("x = 1; switch (x) { case 1 { print 'one'; } case 2 { print 'two'; } }"));
+    }
+
+    @Test
+    void switchEvaluatesItsSubjectExactlyOnceRegardlessOfCaseCount() {
+        assertEquals("one|1", run(
+                "def class Counter { static field n; } Counter.n = 0; " +
+                "def bump() { Counter.n = Counter.n + 1; return Counter.n; } " +
+                "switch (bump()) { case 1 { print 'one'; } case 2 { print 'two'; } default { print 'other'; } } " +
+                "print '|' + Counter.n;"));
+    }
+
+    @Test
+    void switchCasesCanBeArbitraryExpressionsNotJustLiterals() {
+        assertEquals("big", run(
+                "def class Threshold { static field big; } Threshold.big = 10; " +
+                "x = 10; switch (x) { case Threshold.big { print 'big'; } default { print 'small'; } }"));
+    }
+
+    @Test
+    void switchCanBeNested() {
+        assertEquals("one-one|one-other|other", run(
+                "def classify(a, b) { " +
+                "  switch (a) { " +
+                "    case 1 { switch (b) { case 1 { return 'one-one'; } default { return 'one-other'; } } } " +
+                "    default { return 'other'; } " +
+                "  } " +
+                "} " +
+                "print classify(1, 1) + '|' + classify(1, 2) + '|' + classify(2, 1);"));
+    }
+
+    @Test
+    void switchBodyMustContainOnlyCaseAndDefault() {
+        assertThrows(Bl0j_ParserException.class, () -> run("switch (1) { print 'oops'; }"));
+    }
 }
