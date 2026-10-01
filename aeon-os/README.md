@@ -164,6 +164,15 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   - On a fresh disk the shell starts as root without asking. Once root has a password it asks `login:` and starts the
     user in their home folder. The prompt shows the user's name when it is not root. History, `tmp/` for pipes and the
     system log are per-user, world-writable and kernel-written respectively.
+* **More than one drive** (`--disk` can be given several times): drive 0 is the root disk, the others are
+  mounted as folders. `mount` lists the drives; `mkfs <drive> yes` puts an empty file system on one (not drive 0 -
+  that is `format yes` - and not one that is mounted); `mount <drive> <folder>` makes the drive's files appear below
+  an existing folder (`mkdir mnt; mkdir mnt/usb; mount 1 mnt/usb`), `umount <folder>` takes it away again, the files
+  stay on the drive. Only root mounts. A line `1 mnt/usb` in `etc/fstab` does it at every start. `df` shows each
+  mounted drive. Paths cross drives freely: `cp`, `mv` (copy then delete), programs on a drive run, `tree`/`find`
+  look through it; the mount point itself cannot be moved or removed while mounted. The mechanism is in
+  `stdlib/fs/fs.bl0` (a record per volume, operations routed by the first name's mount point) on top of a disk driver
+  that selects the drive with a port.
 * **Aliases, PATH, history**:
   - `alias name='text'` makes `name` stand for a simple command (`alias` lists them, `unalias name` removes one,
     `which name` says what a word is). Only the first word of a command is replaced; an alias naming another

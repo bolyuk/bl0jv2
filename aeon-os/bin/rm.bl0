@@ -19,6 +19,8 @@ def main(words) {
             sayErr(paths[i] + ': is a folder (rm -r removes it with its contents, rmdir if it is empty)');
         } else if (path == '') {
             sayErr('rm: will not remove the root');
+        } else if (isMountPoint(path)) {
+            sayErr(paths[i] + ': is a mount point (umount it first)');
         } else if (!removeTree(path)) {
             sayErr(paths[i] + ': no such file');
         }

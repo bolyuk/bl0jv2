@@ -7,6 +7,7 @@ def main(words) {
     if (len(words) != 3) { sayErr('usage: mv <from> <to>'); return nil; }
     from = inCwd(words[1]);
     to = destination(from, words[2]);
+    if (isMountPoint(from) || isMountPoint(to)) { sayErr('mv: ' + words[1] + ' is a mount point'); return nil; }
     if (!Fs.exists(from) && Dirs.isDir(from)) {
         if (to == from || strFind(to, FsPath.prefix(from), 0) == 0) {
             sayErr('mv: cannot move a folder into itself');

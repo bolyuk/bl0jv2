@@ -95,8 +95,8 @@ def class Perm {
     // throws unless user 'uid' / group 'gid' may do operation 'op' (the numbers of Fs.run) on a and b
     static def check(uid, gid, op, a, b) {
         if (uid == 0) { return nil; }
-        if (op == 8 || op == 9) { Perm.deny('only root', ''); }
-        if (op == 7) { return nil; }
+        if (op == 8 || op == 9 || op == 16 || op == 17 || op == 18) { Perm.deny('only root may do that', ''); }
+        if (op == 7 || op == 19 || op == 20) { return nil; }
         if (op == 15) { Perm.deny('only root may change an owner', a); }
         name = Perm.plain(a);
         if (op == 4) {

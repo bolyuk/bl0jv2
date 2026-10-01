@@ -254,6 +254,17 @@ def ensureDir(path) {
     Dirs.mkdir(path);
 }
 
+// true when 'path' (a stored name) is the folder a drive is mounted on
+def isMountPoint(path) {
+    mounts = Fs.mountList();
+    i = 0;
+    while (i < len(mounts)) {
+        if (mounts[i][0] == path) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
 // removes a file, or a folder with everything in it; false when there is nothing of that name
 def removeTree(path) {
     if (Fs.exists(path)) { return Fs.remove(path); }

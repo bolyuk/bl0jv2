@@ -998,6 +998,12 @@ def class Fs {
         if (op == 4) { return Fs.routedList(a); }
         r = Fs.resolve(a, op);
         if (r == nil) { return Fs.dispatch(op, a, b); }
+        if (r[1] == '') {
+            // the drive's top level is a folder: it cannot be written to as a file or taken away
+            if (op == 1) { return nil; }                 // making the folder that is already there
+            if (op == 3) { throw('fs: ' + strSub(a, 0, len(a) - (strSub(a, len(a) - 1, len(a)) == '/' ? 1 : 0)) + ' is a mount point (unmount it)'); }
+            if (op == 2 || op == 10 || op == 11 || op == 12) { throw('fs: ' + a + ' is a folder'); }
+        }
         return Fs.onVolume(r[0], op, r[1], b);
     }
 

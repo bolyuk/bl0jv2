@@ -1,0 +1,16 @@
+// aeon-os program: put an empty file system on a drive; mkfs <drive> yes
+// Erases everything on it. Not the root disk (use 'format yes' for that) and not a drive that is
+// mounted. Only root. Loaded from the virtual disk by the shell (bin/mkfs.bl0c).
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 3 || words[2] != 'yes') { sayErr('usage: mkfs <drive> yes   (this erases the drive)'); return nil; }
+    unit = unsignedNumber(words[1]);
+    if (unit == nil) { sayErr(words[1] + ': not a drive number'); return nil; }
+    if (unit == 0) { sayErr('drive 0 is the root disk: use "format yes"'); return nil; }
+    Fs.formatUnit(unit);
+    say('drive ' + unit + ' formatted');
+}
+
+programMain(main);

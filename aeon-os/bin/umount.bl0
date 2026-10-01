@@ -1,0 +1,13 @@
+// aeon-os program: detach a mounted drive; umount <folder>
+// The folder is an ordinary folder of the root disk again; what is on the drive stays on it.
+// Only root. Loaded from the virtual disk by the shell (bin/umount.bl0c).
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: umount <folder>'); return nil; }
+    Fs.unmountDrive(inCwd(words[1]));
+    say(words[1] + ' unmounted');
+}
+
+programMain(main);

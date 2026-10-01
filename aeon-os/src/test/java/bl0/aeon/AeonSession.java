@@ -82,11 +82,18 @@ public final class AeonSession {
     }
 
     static AeonSession shellOn(java.nio.file.Path image, boolean fresh, java.nio.file.Path share, int cores) throws Exception {
+        return shellOn(image, fresh, share, cores, java.util.List.of());
+    }
+
+    /** the same with more drives attached after the first (drive 1, 2, ...) */
+    static AeonSession shellOn(java.nio.file.Path image, boolean fresh, java.nio.file.Path share, int cores,
+                               java.util.List<bl0.bl0jv2.runtime.device.BlockDevice> drives) throws Exception {
         var s = new AeonSession();
         s.start(compile("init.bl0"), cores, vm -> {
             try {
                 if (share != null) vm.attach_share(new bl0.bl0jv2.cli.DirShare(share));
                 vm.attach_disk(fresh ? AeonImage.os(image) : new bl0.bl0jv2.cli.FileDisk(image, AeonImage.SECTORS));
+                for (var drive : drives) vm.attach_disk(drive);
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);
             }

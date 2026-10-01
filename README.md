@@ -41,7 +41,7 @@ bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
   -b, --bridge-udp PORT          relay a real UDP socket into the VM's NIC
       --bridge-tcp HOSTPORT:VMPORT  relay a real TCP socket to a Tcp listener
       --bridge-outbound          let VM code open real sockets (see below)
-      --disk FILE [--disk-sectors N]  present FILE as a block device (created if missing)
+      --disk FILE [--disk-sectors N]  present FILE as a block device (created if missing); repeatable: drives 0, 1, ...
       --bridge-fs DIR    show the host folder DIR to the program (stdlib/fs/hostfs.bl0)
       --shared MANIFEST  shared libraries: programs put on the disk link to them (see below)
       --disk-put HOSTFILE[:NAME]  copy a host file or folder onto the --disk image first
@@ -279,7 +279,7 @@ zero padding and width.
 The VM's only file primitive is a **block device**, the thing every machine
 already has: `--disk image` presents a host file as sectors of 512 bytes behind
 five ports (`0x0F00` sector count, `0x0F04` sector, `0x0F08` buffer address,
-`0x0F0C` command 1 = read / 2 = write, `0x0F0D` status). The controller moves a
+`0x0F0C` command 1 = read / 2 = write, `0x0F0D` status, `0x0F0E` select a drive, `0x0F0F` number of drives). The controller moves a
 sector by DMA between the device and a buffer in raw memory and the command has
 finished when `out8` returns. Everything above that is bl0:
 

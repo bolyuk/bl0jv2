@@ -93,7 +93,7 @@ def cmdHelp() {
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump sort uniq find tree more diff seq chmod chown passwd useradd userdel df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
+    say('          hexdump sort uniq find tree more diff seq chmod chown passwd useradd userdel mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
 }
@@ -386,6 +386,27 @@ def ensureSystemDirs() {
         Fs.chmod('root', 0x1C0);             // 0700
     }
     if (!Fs.exists('home/')) { Fs.write('home/', ''); }
+}
+
+// etc/fstab: one line per drive to mount at start, '<drive number> <folder>'; # starts a comment. A line that
+// cannot be done (no such drive, no file system on it) is logged and skipped.
+def mountFstab() {
+    if (!Fs.mounted || !Fs.exists('etc/fstab')) { return nil; }
+    lines = Split.split(Fs.read('etc/fstab'), strChar(10));
+    i = 0;
+    while (i < len(lines)) {
+        words = tokens(lines[i]);
+        if (len(words) == 2 && strSub(words[0], 0, 1) != '#') {
+            unit = unsignedNumber(words[0]);
+            try {
+                if (unit == nil) { throw('not a drive number'); }
+                Fs.mountDrive(unit, FsPath.resolve('', words[1]));
+            } catch (e) {
+                Log.write('fstab: ' + lines[i] + ': ' + str(e));
+            }
+        }
+        i += 1;
+    }
 }
 
 def isBuiltin(cmd) {
@@ -1065,6 +1086,7 @@ def shellComplete(line, pos) {
 
 LineEditor.completer = shellComplete;
 ensureSystemDirs();
+mountFstab();
 
 
 consoleWriteLine('=== aeon-os shell booting ===');
