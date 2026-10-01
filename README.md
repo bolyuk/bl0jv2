@@ -15,8 +15,8 @@ suite, but it is a young language: see [Known limitations](#known-limitations).
 mvn package
 ```
 
-produces `target/bl0jv2-1.0-SNAPSHOT-fat.jar` (runnable) and, if `native-image`
-is on the PATH, a GraalVM native binary `target/bl0jv2`.
+produces `bl0jv2-cli/target/bl0jv2-vm-fat.jar` (runnable) and, if `native-image`
+is on the PATH, a GraalVM native binary `bl0jv2-cli/target/bl0jv2`.
 
 If packaging is unavailable (for example no native-image plugin offline),
 `mvn -DskipTests compile` is enough: run the CLI from the module `target/classes`
@@ -25,7 +25,7 @@ directories. On Windows, `aeon-os\aeon.cmd` does that for aeon-os.
 Modules: `bl0jv2-common` (opcodes, constant formats, exceptions),
 `bl0jv2-compiler` (lexer, parser, compiler, linker, `stdlib/`),
 `bl0jv2-runtime` (the VM), `bl0jv2-cli` (command line, host network bridges),
-`aeon-os/` (the OS and demo programs).
+`aeon-os/` (the OS and demo programs), `bl0jv2-ide` (placeholder for a future IDE: no code yet).
 
 ## Command line
 
@@ -50,7 +50,7 @@ bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
 ```
 
 ```
-java -jar bl0jv2-1.0-SNAPSHOT-fat.jar -c -e hello.bl0   # compile and run
+java -jar bl0jv2-cli/target/bl0jv2-vm-fat.jar -c -e hello.bl0   # compile and run
 ```
 
 `-c -e` together compile and run; `-e` alone expects an already compiled

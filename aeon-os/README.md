@@ -116,7 +116,9 @@ Terminal or a recent conhost. Ctrl-C reaches the guest as a key, so leave with
 Two paths lead to the same programs, which cannot tell them apart: the **serial line**
 (a UART; the default) and a **text-mode display** (`--display`). `lib/drivers.bl0` holds the
 drivers - the UART (initialised once; the receive interrupt drains the FIFO into the keyboard
-ring; transmit waits for room), and an **ANSI terminal emulator** that turns the text and escape
+ring; transmit goes through a ring in raw memory that the transmit-empty interrupt feeds into the
+chip 16 bytes at a time - a writer waits only when the ring is full, and `consoleFlush()` waits for
+the line to go idle before the shell exits), and an **ANSI terminal emulator** that turns the text and escape
 sequences programs write into cells in the display's frame buffer (text, wrapping with the
 xterm deferred wrap, scrolling by the display's command, cursor movement, erase, colours and
 attributes, cursor visibility, the alternate screen as a second frame buffer). Programs only
@@ -126,8 +128,8 @@ The console is a serial terminal, modelled as two devices (see the main README):
 guest writes UTF-8 bytes - with ANSI escape sequences for the cursor and the screen -
 to a port, and reads the bytes the terminal sends from a FIFO behind another. So the
 OS needs nothing from the host but a terminal: `-k` puts the host terminal in raw mode
-(Unix: via `stty`; elsewhere it stays in line mode and shows its own echo too) and
-passes size and keys through.
+(Unix: via `stty`; Windows: a PowerShell helper sets the console modes, see Running; if neither
+works it stays in line mode, warns, and shows its own echo too) and passes size and keys through.
 
 * **Line editor** (`lib/lineedit.bl0`): any Unicode, Backspace/Delete, arrows, Home/End,
   Ctrl-A/E/U/K/W, Ctrl-Left/Right and Alt-B/F by word, Ctrl-L, history (Up/Down, kept in
@@ -140,12 +142,18 @@ passes size and keys through.
   `head`, `tail`, `hexdump` are filters; with no file and no redirection they read the
   terminal until Ctrl-D) and report problems with `sayErr()`, which is always the
   terminal.
+* **Colours**: the prompt, `ls` (folders, programs), `ps`, `df`, error messages and the banner use
+  ANSI colours (`Term.paint`, `lib/term.bl0`). A program's `paint()` colours only when its output goes to the
+  terminal - never into a pipe or a file. The line editor measures the prompt without its escape sequences.
+  `clear` clears the screen.
+* **`top`**: a live full-screen view (alternate screen, refreshed every second): uptime, what each core runs,
+  disk use and the process table. `q`, Esc or Ctrl-C leaves. The shell itself is process 1 in `ps`/`top`.
 * **`edit <file>`**: a full-screen editor on the alternate screen: arrows, PgUp/PgDn,
   Home/End, typing, Enter, Backspace/Delete, Ctrl-S save, Ctrl-X exit (twice to discard),
   Ctrl-K/Ctrl-Y cut and paste a line, Ctrl-F find. Works on `host/` paths too.
 
-Limits: one terminal cell per character (no double-width or combining marks), no job
-control, stages of a pipeline do not run concurrently.
+Limits: one terminal cell per character (no double-width or combining marks); there is no
+preemption (see Several programs at once), and a background job cannot read the terminal.
 
 ## Moving files in and out
 
