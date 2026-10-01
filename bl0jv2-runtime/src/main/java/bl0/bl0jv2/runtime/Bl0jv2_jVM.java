@@ -595,6 +595,14 @@ public final class Bl0jv2_jVM {
 
     // a condition, '!' operand, ... must be a bool - 'if (5)' and 'while
     // (nil)' are errors, not truthiness
+    // ==: same-kind ints/bools compare as bits (ofInt/ofBoolean are canonical); everything else - cross
+    // int/double, strings, instances with their own equals() - goes through valuesEqual
+    private boolean rawEquals(long x, long y) {
+        if ((NanBox.isInt(x) && NanBox.isInt(y)) || (NanBox.isBool(x) && NanBox.isBool(y)))
+            return x == y;
+        return valuesEqual(unbox(x), unbox(y));
+    }
+
     private boolean truth(long bits, String what) {
         if (NanBox.isBool(bits))
             return NanBox.asBoolean(bits);
@@ -974,6 +982,10 @@ public final class Bl0jv2_jVM {
                 case OpCodes.JUMP -> relocateOperand(newInstructions, addr + 1, instrOffset);
                 case OpCodes.JUMP_IF, OpCodes.JUMP_IF_NOT, OpCodes.TRY_ENTER ->
                         relocateOperand(newInstructions, addr + 3, instrOffset);
+                // the fused compare-and-jump instructions keep their target in 'c'
+                case OpCodes.JUMP_IF_NOT_LESS, OpCodes.JUMP_IF_NOT_GREATER, OpCodes.JUMP_IF_NOT_LESS_EQ,
+                     OpCodes.JUMP_IF_NOT_GREATER_EQ, OpCodes.JUMP_IF_NOT_EQ, OpCodes.JUMP_IF_EQ ->
+                        relocateOperand(newInstructions, addr + 5, instrOffset);
                 // constant-pool-index operands - shift by constOffset.
                 // LOAD_CONST's b IS the index; GET_FIELD/LOOKUP_METHOD's b
                 // is a field/method NAME's const index (the object/target
@@ -1512,32 +1524,30 @@ public final class Bl0jv2_jVM {
                     case OpCodes.LR_SHL -> reg[c] = box(ops.shl.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.LR_SHR -> reg[c] = box(ops.shr.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.LR_USHR -> reg[c] = box(ops.ushr.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.BIT_NOT -> reg[a] = NanBox.ofInt(bitNot(unbox(reg[a])));
+                    case OpCodes.BIT_NOT -> reg[a] = NanBox.ofInt(bitNot(unbox(reg[b])));
 
                     case OpCodes.JUMP -> addr = a * C.INSTR_WIDTH;
                     case OpCodes.JUMP_IF -> { if (truth(reg[a], "condition")) addr = b * C.INSTR_WIDTH; }
                     case OpCodes.JUMP_IF_NOT -> { if (!truth(reg[a], "condition")) addr = b * C.INSTR_WIDTH; }
 
-                    case OpCodes.EQ -> {
-                        long x = reg[a], y = reg[b];
-                        // same-kind ints/bools compare as bits (ofInt/ofBoolean
-                        // are canonical); everything else - cross int/double,
-                        // strings, instances with their own equals() - goes
-                        // through valuesEqual
-                        if ((NanBox.isInt(x) && NanBox.isInt(y)) || (NanBox.isBool(x) && NanBox.isBool(y)))
-                            reg[c] = NanBox.ofBoolean(x == y);
-                        else
-                            reg[c] = NanBox.ofBoolean(valuesEqual(unbox(x), unbox(y)));
-                    }
+                    case OpCodes.EQ -> reg[c] = NanBox.ofBoolean(rawEquals(reg[a], reg[b]));
+
+                    // comparison and conditional jump in one (a, b operands; c target)
+                    case OpCodes.JUMP_IF_NOT_LESS -> { if (!compare(reg[a], reg[b], COMPARE_LESS)) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT_GREATER -> { if (!compare(reg[a], reg[b], COMPARE_GREATER)) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT_LESS_EQ -> { if (!compare(reg[a], reg[b], COMPARE_LESS_EQ)) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT_GREATER_EQ -> { if (!compare(reg[a], reg[b], COMPARE_GREATER_EQ)) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT_EQ -> { if (!rawEquals(reg[a], reg[b])) addr = c * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_EQ -> { if (rawEquals(reg[a], reg[b])) addr = c * C.INSTR_WIDTH; }
                     case OpCodes.LESS -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS));
                     case OpCodes.GREATER -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER));
                     case OpCodes.LESS_EQ -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS_EQ));
                     case OpCodes.GREATER_EQ -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER_EQ));
-                    case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!truth(reg[a], "operand of '!'"));
+                    case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!truth(reg[b], "operand of '!'"));
 
                     case OpCodes.MOV -> reg[a] = reg[b];
                     case OpCodes.SET -> reg[a] = NanBox.ofInt(b);
-                    case OpCodes.NEG  -> reg[a] = box(negate(unbox(reg[a])));
+                    case OpCodes.NEG  -> reg[a] = box(negate(unbox(reg[b])));
 
                     // reg[a] holds either a plain FunDef (an ordinary named
                     // function, called directly) or a Bl0jClosure (a
@@ -1616,7 +1626,7 @@ public final class Bl0jv2_jVM {
                     case OpCodes.INDEX_GET -> {
                         Object target = unbox(reg[a]);
                         int index = (int) unbox(reg[b]);
-                        reg[a] = switch (target) {
+                        reg[c] = switch (target) {
                             case Bl0jArray array -> array.getRaw(index);
                             case Bl0jTuple tuple -> tuple.getRaw(index);
                             case String s -> NanBox.ofChar(charAt(s, index));
@@ -1631,7 +1641,7 @@ public final class Bl0jv2_jVM {
                         array.setRaw(index, reg[b + 1]);
                     }
 
-                    case OpCodes.LENGTH -> reg[a] = NanBox.ofInt(length(unbox(reg[a])));
+                    case OpCodes.LENGTH -> reg[a] = NanBox.ofInt(length(unbox(reg[b])));
 
                     // mutates the Bl0jArray object the reference points at,
                     // not the register holding that reference - reg[a]
@@ -1655,27 +1665,27 @@ public final class Bl0jv2_jVM {
                             };
                     }
 
-                    case OpCodes.TO_INT -> reg[a] = box(toInt(unbox(reg[a])));
-                    case OpCodes.TO_FLOAT -> reg[a] = box(toFloat(unbox(reg[a])));
+                    case OpCodes.TO_INT -> reg[a] = box(toInt(unbox(reg[b])));
+                    case OpCodes.TO_FLOAT -> reg[a] = box(toFloat(unbox(reg[b])));
                     // str() and typeOf() used to take a fresh heap slot on every
                     // call, even though a string stays the same string and typeOf()
                     // only ever answers with one of a dozen words
                     case OpCodes.TO_STRING -> {
-                        Object value = unbox(reg[a]);
+                        Object value = unbox(reg[b]);
                         if (value instanceof String)
-                            ; // already a string: the register keeps referring to it
+                            reg[a] = reg[b];   // already a string
                         else if (value instanceof Boolean || value == NIL_OBJECT)
                             reg[a] = internedString(value.toString());
                         else
                             reg[a] = boxRef(value.toString());
                     }
-                    case OpCodes.TYPE_OF -> reg[a] = internedString(typeName(unbox(reg[a])));
+                    case OpCodes.TYPE_OF -> reg[a] = internedString(typeName(unbox(reg[b])));
 
                     // b holds the catch block's address (patched by the
                     // compiler), a the register the caught error lands in
                     case OpCodes.TRY_ENTER -> ctx.handlerStack.push(new Handler(b * C.INSTR_WIDTH, a, ctx.callStack.size()));
                     case OpCodes.TRY_EXIT -> ctx.handlerStack.pop();
-                    case OpCodes.MAKE_ERR -> reg[a] = boxRef(new Bl0jError(String.valueOf(unbox(reg[a]))));
+                    case OpCodes.MAKE_ERR -> reg[a] = boxRef(new Bl0jError(String.valueOf(unbox(reg[b]))));
 
                     // mutates a's own slot: class-ref in, instance-ref out
                     case OpCodes.NEW_INSTANCE -> reg[a] = boxRef(new Bl0jInstance((Bl0jClass) unbox(reg[a]), this));

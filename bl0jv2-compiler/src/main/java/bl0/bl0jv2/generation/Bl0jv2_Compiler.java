@@ -460,8 +460,12 @@ public final class Bl0jv2_Compiler {
         // the opcode mutates its operand in place, so a bare-variable
         // argument must not reuse its own register directly
         int result = regIndex++;
-        _emit(OpCodes.MOV, result, argReg);
-        _emit(opcode, result);
+        if (opcode == OpCodes.FREE) {
+            _emit(OpCodes.MOV, result, argReg);
+            _emit(opcode, result);
+        } else {
+            _emit(opcode, result, argReg);          // result = f(argReg): the argument is left alone
+        }
         return result;
     }
 
@@ -1059,8 +1063,7 @@ public final class Bl0jv2_Compiler {
 
         int argReg = compileInner(funCall.args.get(0));
         int typeReg = regIndex++;
-        _emit(OpCodes.MOV, typeReg, argReg);
-        _emit(OpCodes.TYPE_OF, typeReg);
+        _emit(OpCodes.TYPE_OF, typeReg, argReg);
 
         int expectedReg = regIndex++;
         _emit(OpCodes.LOAD_CONST, expectedReg, constant(expectedType));
@@ -1399,8 +1402,7 @@ public final class Bl0jv2_Compiler {
             int arrReg = compileInner(indexNode.left);
             int indexReg = compileInner(indexNode.index);
 
-            _emit(OpCodes.MOV, result, arrReg);
-            _emit(OpCodes.INDEX_GET, result, indexReg);
+            _emit(OpCodes.INDEX_GET, arrReg, indexReg, result);
 
             return result;
         }
@@ -1473,7 +1475,7 @@ public final class Bl0jv2_Compiler {
             int startJump = _instr_len();
             int condReg = compileInner(whileNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+            int patchJumpIfNot = emitJumpIfNot(condReg);
 
             LoopContext loop = new LoopContext(tryDepth);
             loopStack.push(loop);
@@ -1506,7 +1508,7 @@ public final class Bl0jv2_Compiler {
             int startJump = _instr_len();
             int condReg = compileInner(forNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+            int patchJumpIfNot = emitJumpIfNot(condReg);
 
             LoopContext loop = new LoopContext(tryDepth);
             loopStack.push(loop);
@@ -1593,7 +1595,7 @@ public final class Bl0jv2_Compiler {
             int resultReg = regIndex++;
             int condReg = compileInner(ternaryIfNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+            int patchJumpIfNot = emitJumpIfNot(condReg);
             int bodyReg = compileInner(ternaryIfNode.body);
 
             _emit(OpCodes.MOV, resultReg, bodyReg);
@@ -1612,7 +1614,7 @@ public final class Bl0jv2_Compiler {
         if (node instanceof IfNode ifNode) {
             int condReg = compileInner(ifNode.condition);
 
-            int patchJumpIfNot = _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+            int patchJumpIfNot = emitJumpIfNot(condReg);
             compileInner(ifNode.body);
 
             if (ifNode.elseBody != null) {
@@ -1736,7 +1738,7 @@ public final class Bl0jv2_Compiler {
             _emit(op, left, right, result);
 
             if(n.op == Operator.NOT_EQUALS)
-                _emit(OpCodes.NOT, result);
+                _emit(OpCodes.NOT, result, result);
 
             return result;
         }
@@ -1789,8 +1791,7 @@ public final class Bl0jv2_Compiler {
                 // register, and NEG/NOT would otherwise corrupt it (-x
                 // would silently also change x)
                 int result = regIndex++;
-                _emit(OpCodes.MOV, result, reg);
-                _emit(op, result);
+                _emit(op, result, reg);
 
                 return result;
             }
@@ -1973,6 +1974,49 @@ public final class Bl0jv2_Compiler {
         for (Object value : added) currentScope().hoisted.remove(value);
     }
 
+    // The conditional jump that skips a body when a condition is false; returns the index to patch
+    // with the target. When the condition was just computed by a comparison into a temporary that
+    // only this jump reads, the two become one instruction (a, b operands, c target) - for '!=' the
+    // EQ and the NOT after it become a jump on equality. Not when something jumps to the place the
+    // jump would sit.
+    private int emitJumpIfNot(int condReg) {
+        int size = bytecode.size();
+        boolean temp = !currentScope().identityMapping.containsValue(condReg) && !currentScope().hoisted.containsValue(condReg);
+        if (temp && size >= C.INSTR_WIDTH && labelAt != size) {
+            int p = size - C.INSTR_WIDTH;
+            int op = bytecode.get(p) & 0xFF;
+            int fused = switch (op) {
+                case OpCodes.LESS -> OpCodes.JUMP_IF_NOT_LESS;
+                case OpCodes.GREATER -> OpCodes.JUMP_IF_NOT_GREATER;
+                case OpCodes.LESS_EQ -> OpCodes.JUMP_IF_NOT_LESS_EQ;
+                case OpCodes.GREATER_EQ -> OpCodes.JUMP_IF_NOT_GREATER_EQ;
+                case OpCodes.EQ -> OpCodes.JUMP_IF_NOT_EQ;
+                default -> -1;
+            };
+            if (fused >= 0 && operandAt(p + C_OFFSET) == condReg) {
+                bytecode.set(p, (byte) fused);
+                patchAddr(p + C_OFFSET, 0);
+                return p + C_OFFSET;
+            }
+            // 'a != b' is EQ followed by NOT on its result
+            if (op == OpCodes.NOT && p >= C.INSTR_WIDTH && labelAt != p && operandAt(p + A_OFFSET) == condReg) {
+                int q = p - C.INSTR_WIDTH;
+                if ((bytecode.get(q) & 0xFF) == OpCodes.EQ && operandAt(q + C_OFFSET) == condReg) {
+                    for (int i = 0; i < C.INSTR_WIDTH; i++)
+                        bytecode.remove(bytecode.size() - 1);
+                    bytecode.set(q, (byte) OpCodes.JUMP_IF_EQ);
+                    patchAddr(q + C_OFFSET, 0);
+                    return q + C_OFFSET;
+                }
+            }
+        }
+        return _emit(OpCodes.JUMP_IF_NOT, condReg) + B_OFFSET;
+    }
+
+    private int operandAt(int index) {
+        return ((bytecode.get(index) & 0xFF) << 8) | (bytecode.get(index + 1) & 0xFF);
+    }
+
     // 'x = a + b' computes into a temporary and then copies it into x; when the instruction that
     // just computed the temporary can write x directly, do that and drop the copy. Only for
     // instructions with a single destination register that is not also needed afterwards: the
@@ -1991,8 +2035,10 @@ public final class Bl0jv2_Compiler {
         switch (op) {
             case OpCodes.LR_ADD, OpCodes.LR_SUB, OpCodes.LR_MUL, OpCodes.LR_DIV, OpCodes.LR_REM, OpCodes.LR_POW,
                  OpCodes.LR_AND, OpCodes.LR_OR, OpCodes.LR_XOR, OpCodes.LR_SHL, OpCodes.LR_SHR, OpCodes.LR_USHR,
-                 OpCodes.EQ, OpCodes.LESS, OpCodes.GREATER, OpCodes.LESS_EQ, OpCodes.GREATER_EQ -> operand = p + C_OFFSET;
-            case OpCodes.LOAD_CONST, OpCodes.LOAD_NIL -> operand = p + A_OFFSET;
+                 OpCodes.EQ, OpCodes.LESS, OpCodes.GREATER, OpCodes.LESS_EQ, OpCodes.GREATER_EQ, OpCodes.INDEX_GET -> operand = p + C_OFFSET;
+            case OpCodes.LOAD_CONST, OpCodes.LOAD_NIL,
+                 OpCodes.LENGTH, OpCodes.TO_INT, OpCodes.TO_FLOAT, OpCodes.TO_STRING, OpCodes.TYPE_OF,
+                 OpCodes.NEG, OpCodes.NOT, OpCodes.BIT_NOT, OpCodes.MAKE_ERR -> operand = p + A_OFFSET;
             default -> { return false; }
         }
         int current = ((bytecode.get(operand) & 0xFF) << 8) | (bytecode.get(operand + 1) & 0xFF);
