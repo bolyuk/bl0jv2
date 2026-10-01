@@ -314,7 +314,13 @@ public final class Bl0jv2_Compiler {
                 _emit(OpCodes.RETURN, 0);
 
             int constIndex = functionMapping.get(fun.name);
-            constants.set(constIndex, new FunDef(fun.name, adress, (short) arity, (short) regIndex));
+            // an instance method's first parameter is 'this' (see the parser's
+            // method desugaring) - only a mangled "Class.method" name can
+            // have one, so a lambda or plain function that merely names a
+            // parameter 'this' is not mistaken for a method
+            boolean receiver = dot >= 0 && classMapping.containsKey(fun.name.substring(0, dot))
+                    && fun.args.args.size() > 0 && fun.args.args.get(0).equals("this");
+            constants.set(constIndex, new FunDef(fun.name, adress, (short) arity, (short) regIndex, receiver));
         }
 
     }
@@ -953,7 +959,7 @@ public final class Bl0jv2_Compiler {
             regIndex++;
         }
 
-        _emit(OpCodes.CALL, methodReg, startReg);
+        _emit(OpCodes.CALL, methodReg, startReg, valRegs.length + 1); // + 'this'
         return startReg;
     }
 
@@ -1078,7 +1084,7 @@ public final class Bl0jv2_Compiler {
                         regIndex++;
                     }
 
-                    _emit(OpCodes.CALL, staticMethodReg, staticStartReg);
+                    _emit(OpCodes.CALL, staticMethodReg, staticStartReg, staticValRegs.length);
                     return staticStartReg;
                 }
 
@@ -1101,7 +1107,7 @@ public final class Bl0jv2_Compiler {
                 regIndex++;
             }
 
-            _emit(OpCodes.CALL, method, startReg);
+            _emit(OpCodes.CALL, method, startReg, valRegs.length);
             return startReg;
         }
 
@@ -1598,21 +1604,29 @@ public final class Bl0jv2_Compiler {
     // emitting it (see patchAddr)
     private static final int A_OFFSET = 1;
     private static final int B_OFFSET = 3;
+    private static final int C_OFFSET = 5;
 
     // returns the index of the instruction's own first (opcode) byte, not
     // the index right after it - callers that need to patch an operand
     // later add A_OFFSET/B_OFFSET to find it, which is far less error-prone
     // than counting backward from where bytecode.size() happened to land
-    private int _emit(int op, int a, int b) {
+    private int _emit(int op, int a, int b, int c) {
         checkOperand(a, "operand 'a'");
         checkOperand(b, "operand 'b'");
+        checkOperand(c, "operand 'c'");
         int start = bytecode.size();
         bytecode.add((byte) op);
         bytecode.add((byte) (a >> 8));
         bytecode.add((byte) a);
         bytecode.add((byte) (b >> 8));
         bytecode.add((byte) b);
+        bytecode.add((byte) (c >> 8));
+        bytecode.add((byte) c);
         return start;
+    }
+
+    private int _emit(int op, int a, int b) {
+        return _emit(op, a, b, 0);
     }
 
     private int _emit(int op, int a) {
@@ -1713,12 +1727,7 @@ public final class Bl0jv2_Compiler {
                 _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());
                 int valueRegRaw = compileInner(valueNode);
 
-                int base = regIndex++;
-                _emit(OpCodes.SET, base, fieldIndex);
-                _emit(OpCodes.MOV, regIndex, valueRegRaw);
-                regIndex++;
-
-                _emit(OpCodes.SET_STATIC_FIELD, classReg, base);
+                _emit(OpCodes.SET_STATIC_FIELD, classReg, valueRegRaw, fieldIndex);
                 return valueRegRaw;
             }
 
@@ -1737,16 +1746,7 @@ public final class Bl0jv2_Compiler {
             int objReg = compileInner(fieldAccess.target);
             int valueRegRaw = compileInner(valueNode);
 
-            // the field name's const index and the value need to sit in
-            // two consecutive registers, same trick as INDEX_SET above
-            // (SET_FIELD only has 2 operand slots but needs object + name
-            // + value)
-            int base = regIndex++;
-            _emit(OpCodes.SET, base, constant(fieldAccess.fieldName));
-            _emit(OpCodes.MOV, regIndex, valueRegRaw);
-            regIndex++;
-
-            _emit(OpCodes.SET_FIELD, objReg, base);
+            _emit(OpCodes.SET_FIELD, objReg, valueRegRaw, constant(fieldAccess.fieldName));
             return valueRegRaw;
         }
 
@@ -1955,6 +1955,7 @@ public final class Bl0jv2_Compiler {
                         dos.writeInt(f.address());
                         dos.writeShort(f.arity());
                         dos.writeShort(f.regs());
+                        dos.writeBoolean(f.receiver());
                     }
                     case Byte b -> {
                         dos.writeByte(Constants.BYTE);

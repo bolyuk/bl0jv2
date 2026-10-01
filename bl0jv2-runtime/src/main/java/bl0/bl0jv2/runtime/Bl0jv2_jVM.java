@@ -540,6 +540,16 @@ public final class Bl0jv2_jVM {
     // the receiver of a field/method access must be a class instance;
     // anything else (nil above all - an uninitialised or failed lookup) gets
     // a message naming the member, not a Java ClassCastException
+    // "A.inc expects 0 arguments, got 1" - counts only what the caller
+    // wrote: a closure's captured cells and a method's 'this' are implicit
+    private static Bl0j_VM_Exception arityError(FunDef fun, int captured, int passed) {
+        int implicit = fun.receiver() ? 1 : 0;
+        int expected = fun.arity() - captured - implicit;
+        int got = passed - implicit;
+        String name = fun.name().startsWith("<lambda") ? "lambda" : "function " + fun.name();
+        return new Bl0j_VM_Exception(name + " expects " + expected + " argument" + (expected == 1 ? "" : "s") + ", got " + got);
+    }
+
     private Bl0jInstance requireInstance(long bits, String action, int nameConst) {
         Object value = unbox(bits);
         if (value instanceof Bl0jInstance instance)
@@ -599,7 +609,8 @@ public final class Bl0jv2_jVM {
                         get_str(bytes),
                         (bytes.getInt() & 0xFFFF) + instrOffset,
                         bytes.getShort(),
-                        bytes.getShort()));
+                        bytes.getShort(),
+                        bytes.get() != 0));
                 case Constants.BYTE -> target[idx] = NanBox.ofInt(bytes.get());
                 case Constants.FLOAT -> target[idx] = Double.doubleToLongBits(bytes.getDouble());
                 // methods are always registered (and thus loaded) before
@@ -753,21 +764,8 @@ public final class Bl0jv2_jVM {
                 // sits in 'a', a register, never relocated)
                 case OpCodes.LOAD_CONST, OpCodes.GET_FIELD, OpCodes.LOOKUP_METHOD ->
                         relocateOperand(newInstructions, addr + 3, constOffset);
-                // SET_FIELD's own 'b' is a register, not a direct operand -
-                // it holds a field name's const-pool index packed there by
-                // a SET two instructions earlier (compileAssign's own
-                // fixed SET;MOV;SET_FIELD emission, nothing else in
-                // between - see its own comment), NOT by LOAD_CONST, so
-                // it's invisible to the case above. SET's own immediate
-                // otherwise means a plain literal (POKE/PORT_OUT widths)
-                // or a per-class field index (SET_STATIC_FIELD) that must
-                // NOT be relocated, so this has to be keyed off SET_FIELD
-                // specifically, not off every SET
-                case OpCodes.SET_FIELD -> {
-                    int setAddr = addr - 2 * C.INSTR_WIDTH;
-                    if (setAddr >= instructions.length && newInstructions[setAddr] == OpCodes.SET)
-                        relocateOperand(newInstructions, setAddr + 3, constOffset);
-                }
+                // SET_FIELD's own field name is operand 'c'
+                case OpCodes.SET_FIELD -> relocateOperand(newInstructions, addr + 5, constOffset);
                 default -> { }
             }
         }
@@ -960,7 +958,9 @@ public final class Bl0jv2_jVM {
     private ResolvedCallee resolveCallee(Object callee) {
         if (callee instanceof Bl0jClosure closure)
             return new ResolvedCallee(closure.funDef(), closure.capturedCells());
-        return new ResolvedCallee((FunDef) callee, EMPTY_CELLS);
+        if (callee instanceof FunDef fun)
+            return new ResolvedCallee(fun, EMPTY_CELLS);
+        throw new Bl0j_VM_Exception("cannot call " + typeName(callee) + " - not a function");
     }
 
     // synchronously calls a bl0jv2 function from native Java code (used by
@@ -995,6 +995,13 @@ public final class Bl0jv2_jVM {
         ResolvedCallee resolved = resolveCallee(callee);
         FunDef fun = resolved.fun();
         long[] capturedCells = resolved.capturedCells();
+
+        // interrupt handlers, dispatch() tasks, toString()/equals() are all
+        // called from Java with a fixed argument list - a callee declared
+        // with a different parameter count is a program error to report,
+        // not something to run with missing or ignored arguments
+        if (fun.arity() - capturedCells.length != args.length)
+            throw arityError(fun, capturedCells.length, args.length);
 
         long[] regs = newRegisters(fun.regs());
         for (int i = 0; i < capturedCells.length; i++)
@@ -1094,6 +1101,7 @@ public final class Bl0jv2_jVM {
 
                 int a = ((instructions[addr+1] & 0xFF) << 8) | (instructions[addr+2] & 0xFF);
                 int b = ((instructions[addr+3] & 0xFF) << 8) | (instructions[addr+4] & 0xFF);
+                int c = ((instructions[addr+5] & 0xFF) << 8) | (instructions[addr+6] & 0xFF);
                 addr += C.INSTR_WIDTH;
 
                 long[] reg = ctx.callStack.peek().regs();
@@ -1137,17 +1145,33 @@ public final class Bl0jv2_jVM {
                     // exactly the leading parameter slots the compiler
                     // reserved for them (see Bl0jv2_Compiler's LambdaNode
                     // handling; resolveCallee() is shared with invoke())
+                    // a = callee register, b = first argument register - 1
+                    // (reg[b] is also where the result lands), c = how many
+                    // arguments the call site passed (a method's 'this'
+                    // included). The callee's own frame is built right here,
+                    // straight from the caller's registers: leading slots
+                    // are a closure's captured cells, then the arguments.
                     case OpCodes.CALL -> {
-                        ResolvedCallee resolved = resolveCallee(unbox(reg[a]));
-                        FunDef fun = resolved.fun();
-                        long[] capturedCells = resolved.capturedCells();
+                        Object callee = unbox(reg[a]);
+                        FunDef fun;
+                        long[] capturedCells;
+                        if (callee instanceof FunDef f) {
+                            fun = f;
+                            capturedCells = EMPTY_CELLS;
+                        } else if (callee instanceof Bl0jClosure closure) {
+                            fun = closure.funDef();
+                            capturedCells = closure.capturedCells();
+                        } else {
+                            throw new Bl0j_VM_Exception("cannot call " + typeName(callee) + " - not a function");
+                        }
 
-                        long[] args = new long[fun.arity()];
-                        System.arraycopy(capturedCells, 0, args, 0, capturedCells.length);
-                        for (int i = capturedCells.length; i < fun.arity(); i++)
-                            args[i] = reg[b + 1 + (i - capturedCells.length)];
+                        if (fun.arity() - capturedCells.length != c)
+                            throw arityError(fun, capturedCells.length, c);
 
-                        gen_frame(ctx, fun, args, addr, b);
+                        long[] regs = newRegisters(fun.regs());
+                        System.arraycopy(capturedCells, 0, regs, 1, capturedCells.length);
+                        System.arraycopy(reg, b + 1, regs, 1 + capturedCells.length, c);
+                        ctx.callStack.push(new Frame(regs, addr, b));
                         addr = fun.address() * C.INSTR_WIDTH;
                     }
 
@@ -1247,15 +1271,14 @@ public final class Bl0jv2_jVM {
                         reg[a] = instance.getFieldRaw(slot);
                     }
 
-                    // field name's const index and the value sit at reg[b]
-                    // and reg[b+1], same packing trick as INDEX_SET
+                    // a = object, b = register holding the value, c = the
+                    // field name's const index
                     case OpCodes.SET_FIELD -> {
-                        int nameConst = NanBox.asInt(reg[b]);
-                        Bl0jInstance instance = requireInstance(reg[a], "set field", nameConst);
-                        int slot = instance.cls.fieldSlot(constSymbols[nameConst]);
+                        Bl0jInstance instance = requireInstance(reg[a], "set field", c);
+                        int slot = instance.cls.fieldSlot(constSymbols[c]);
                         if (slot < 0)
-                            throw noSuchMember(instance.cls, "field", nameConst);
-                        instance.setFieldRaw(slot, reg[b + 1]);
+                            throw noSuchMember(instance.cls, "field", c);
+                        instance.setFieldRaw(slot, reg[b]);
                     }
 
                     // b is the static field's own index, resolved at
@@ -1265,12 +1288,11 @@ public final class Bl0jv2_jVM {
                         reg[a] = cls.getStaticFieldRaw(b);
                     }
 
-                    // the field index and the value sit at reg[b] and
-                    // reg[b+1], same packing trick as SET_FIELD
+                    // a = class reference, b = register holding the value,
+                    // c = the static field's own index (compile-time)
                     case OpCodes.SET_STATIC_FIELD -> {
                         Bl0jClass cls = (Bl0jClass) unbox(reg[a]);
-                        int fieldIndex = (int) unbox(reg[b]);
-                        cls.setStaticFieldRaw(fieldIndex, reg[b + 1]);
+                        cls.setStaticFieldRaw(c, reg[b]);
                     }
 
                     // mutates a's own slot: object in, resolved FunDef out
