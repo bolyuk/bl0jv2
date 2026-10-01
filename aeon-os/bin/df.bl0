@@ -5,6 +5,12 @@ import '../lib/userland.bl0';
 
 def main(words) {
     info = Fs.info();
+    used = info[1] - info[2];
+    cells = info[1] > 0 ? (used * 30) / info[1] : 0;
+    bar = '';
+    k = 0;
+    while (k < 30) { bar += (k < cells ? '#' : '-'); k += 1; }
+    say('[' + paint(cells > 24 ? 1 : 2, bar) + ']');
     say(Fmt.format('{} files, {} of {} data sectors free ({} bytes free)', [info[3], info[2], info[1], info[2] * 512]));
 }
 

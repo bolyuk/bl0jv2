@@ -39,10 +39,11 @@ def class LineEditor {
     // writes text at the cursor and tracks where the cursor ends up
     static def put(text) {
         consoleWrite(text);
-        LineEditor.cur += len(text);
+        shown = Term.visibleLen(text);
+        LineEditor.cur += shown;
         // a character that fills the last column leaves the terminal in a half-wrapped
         // state; a blank and a carriage return finish the wrap so the cursor is where we think
-        if (len(text) > 0 && LineEditor.cur % LineEditor.columns() == 0) {
+        if (shown > 0 && LineEditor.cur % LineEditor.columns() == 0) {
             consoleWrite(' ' + strChar(13));
         }
     }
@@ -229,7 +230,7 @@ def class LineEditor {
         LineEditor.line = '';
         LineEditor.pos = 0;
         LineEditor.prompt = prompt;
-        LineEditor.promptWidth = len(prompt);
+        LineEditor.promptWidth = Term.visibleLen(prompt);
         LineEditor.cur = 0;
         LineEditor.put(prompt);
         h = LineEditor.history;

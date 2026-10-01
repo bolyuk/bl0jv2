@@ -18,5 +18,33 @@ def class Term {
     static def clearLine() { return Term.esc + '[2K'; }
     static def invert() { return Term.esc + '[7m'; }
     static def normal() { return Term.esc + '[0m'; }
+
+    // colours: SGR 30-37 (and 90-97 for the bright ones); the names are the palette's order
+    static def colour(n) { return Term.esc + '[' + (n < 8 ? 30 + n : 82 + n) + 'm'; }
+    static def bold() { return Term.esc + '[1m'; }
+    // 'text' in colour n (0 black 1 red 2 green 3 yellow 4 blue 5 magenta 6 cyan 7 grey), back to normal after
+    static def paint(n, text) { return Term.colour(n) + text + Term.normal(); }
+    static def paintBold(n, text) { return Term.bold() + Term.colour(n) + text + Term.normal(); }
+
+    // how many cells 'text' takes: an escape sequence (ESC [ ... final byte) takes none
+    static def visibleLen(text) {
+        n = 0;
+        i = 0;
+        while (i < len(text)) {
+            c = strSub(text, i, i + 1);
+            if (c == Term.esc) {
+                i += 2;
+                while (i < len(text) && !Term.isFinal(strSub(text, i, i + 1))) { i += 1; }
+            } else {
+                n += 1;
+            }
+            i += 1;
+        }
+        return n;
+    }
+
+    static def isFinal(c) {
+        return strFind('ABCDEFGHJKSTfhlm', c, 0) >= 0;
+    }
 }
 Term.esc = strChar(27);

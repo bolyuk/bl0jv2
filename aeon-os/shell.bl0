@@ -86,7 +86,7 @@ Log.write('shell: started');
 
 // --- built-in commands ---
 def cmdHelp() {
-    say('built in: help, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
+    say('built in: help, clear, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
     say('          hexdump df mkdir rmdir edit sleep yes ps kill wait - and any program you put there, run by its name');
@@ -163,8 +163,8 @@ def here(path) {
 }
 
 def prompt() {
-    if (ShellState.cwd == '') { return '$ '; }
-    return '/' + ShellState.cwd + ' $ ';
+    if (ShellState.cwd == '') { return Term.paintBold(2, '$') + ' '; }
+    return Term.paintBold(4, '/' + ShellState.cwd) + ' ' + Term.paintBold(2, '$') + ' ';
 }
 
 def cmdPwd() {
@@ -286,6 +286,7 @@ def guarded(command, words) {
 def runStage(words) {
     cmd = words[0];
     if (cmd == 'help') { cmdHelp(); return nil; }
+    if (cmd == 'clear') { consoleWrite(Term.clearScreen()); return nil; }
     if (cmd == 'uptime') { cmdUptime(); return nil; }
     if (cmd == 'whoami') { cmdWhoami(); return nil; }
     if (cmd == 'reboot') { cmdReboot(); return nil; }
@@ -521,7 +522,7 @@ def histSave(line) {
 }
 
 def shellBuiltins() {
-    return ['help', 'echo', 'uptime', 'whoami', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec'];
+    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec'];
 }
 
 // Tab: what could replace the word under the cursor. The first word is a command
@@ -581,7 +582,8 @@ consoleWriteLine('=== aeon-os shell booting ===');
 
 dropToUserMode();
 
-consoleWriteLine('aeon-shell ready - type a command, press enter (try: help)');
+consoleWriteLine(Term.paintBold(6, '  aeon-os') + Term.paint(7, ' - ' + coreCount() + ' core(s)'));
+consoleWriteLine('aeon-shell ready - type a command, press enter (try: ' + Term.paint(3, 'help') + ')');
 
 commandsRun = 0;
 // The line editor sleeps in kbWait() while there is no input: the keyboard handler

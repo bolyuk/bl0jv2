@@ -95,9 +95,10 @@ public final class AeonSession {
         return s;
     }
 
+    /** what the guest wrote, without the colour/attribute sequences (SGR): tests look at the text, not at how it is painted */
     public String output() {
         synchronized (out.getBuffer()) {
-            return out.toString();
+            return out.toString().replaceAll("\u001b\\[[0-9;]*m", "");
         }
     }
 

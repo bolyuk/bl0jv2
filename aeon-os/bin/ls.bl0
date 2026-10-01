@@ -12,9 +12,11 @@ def main(words) {
     i = 0;
     while (i < len(entries)) {
         if (entries[i][2]) {
-            say(Fmt.format('   <dir>  {}/', [entries[i][0]]));
+            say('   <dir>  ' + paintBold(4, entries[i][0] + '/'));
         } else {
-            say(Fmt.format('{:>8}  {}', [entries[i][1], entries[i][0]]));
+            name = entries[i][0];
+            if (Affix.endsWith(name, '.bl0c')) { name = paint(2, name); }
+            say(Fmt.format('{:>8}  ', [entries[i][1]]) + name);
         }
         i += 1;
     }

@@ -15,6 +15,7 @@
 
 import '../kernel.bl0';
 import 'pipe.bl0';
+import 'term.bl0';
 import '../../stdlib/fs/dirs.bl0';
 import '../../stdlib/str/split.bl0';
 import '../../stdlib/str/fmt.bl0';
@@ -181,7 +182,25 @@ def say(text) {
     sayRaw(text + '\n');
 }
 
+// is the output going to the terminal (so colours are for a person), not into a pipe or a file
+def toTerminal() {
+    c = Ctx.me();
+    return c.pipeOut == nil && c.outPath == '';
+}
+
+// 'text' in colour n (see Term.colour) - plain when the output is a pipe or a file, so data stays data
+def paint(n, text) {
+    if (!toTerminal()) { return text; }
+    return Term.paint(n, text);
+}
+
+def paintBold(n, text) {
+    if (!toTerminal()) { return text; }
+    return Term.paintBold(n, text);
+}
+
 def sayErr(text) {
+    text = Term.paint(1, text);
     if (Ctx.me().background) {
         consoleAsync(text + '\n');
     } else {
