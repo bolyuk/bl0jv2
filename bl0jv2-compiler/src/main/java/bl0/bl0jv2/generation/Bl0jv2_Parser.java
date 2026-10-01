@@ -131,6 +131,12 @@ public final class Bl0jv2_Parser {
         // stale ';' instead of the real next token
         while (consume_if(SemicolonToken.class));
 
+        // a 'def' reaching statement() is NESTED - a top-level one is routed
+        // to define_function_or_class() by classStatement() before ever
+        // getting here - so it is a closure, not a global function
+        if(peek_t() instanceof DefToken)
+            return nested_function();
+
         if(peek_t() instanceof NativeCallToken)
            return native_call_statement(); // self-consumes its trailing ';'
 
@@ -192,6 +198,24 @@ public final class Bl0jv2_Parser {
             return define_class();
 
         throw new Bl0j_ParserException(t.line, t.line_index, "unexpected 'def' token");
+    }
+
+    // 'def name(params) { body }' inside another function, lambda or block:
+    // sugar for 'name = (params) -> { body }'. That is what gives it closure
+    // semantics (it captures the enclosing function's variables by cell,
+    // exactly like a lambda does) and lets it call itself by name. Unlike a
+    // top-level 'def', it is NOT hoisted - the name exists from this
+    // statement on, so it can only call itself and functions defined above it.
+    private Node nested_function(){
+        Token defToken = peek_t();
+        consume_or_throw(DefToken.class, "'def' token expected");
+
+        if (peek_t() instanceof ClassToken)
+            throw new Bl0j_ParserException(defToken.line, defToken.line_index, "'def class' is only allowed at the top level");
+
+        String name = consume_or_throw(IdentityToken.class, "'IDENTITY' token expected for Function definition").name;
+        PARAMS_N params = define_function_params_body();
+        return new BinaryNode(new IdentityNode(name), Operator.ASSIGNMENT, new LambdaNode(params, block()));
     }
 
     private Node define_function(){
