@@ -11,8 +11,13 @@
 //                       sector of a file, otherwise (next data sector + 1)
 //   directory           64-byte entries, 8 per sector: name (UTF-8, zero
 //                       padded, at most 47 bytes) at 0, first data sector + 1
-//                       at 48 (0 = empty file), size in bytes at 52. An entry
-//                       whose first name byte is 0 is free.
+//                       at 48 (0 = empty file), size in bytes at 52, owner
+//                       user id (16 bits) at 56, group id at 58, mode at 60 (bit
+//                       15 set = the mode is recorded, bits 0-8 rwxrwxrwx; an
+//                       entry written before these existed has all zero there
+//                       and counts as owner 0, group 0, mode 0644 for a file and
+//                       0755 for a folder). An entry whose first name byte is 0
+//                       is free.
 //   data                the rest
 //
 // The namespace is flat: a name may contain '/', which is just a character -
@@ -51,6 +56,10 @@ def class Fs {
     static field dataSectors;
     static field hint;        // where the next free-sector search starts
     static field freeSlot;    // set by lookup(): first empty directory entry, -1 if none
+    static field curUid;      // who the operation in progress is for (see runAs): owner of what it creates
+    static field curGid;
+    static field umask;       // permission bits a new file or folder does not get
+    static field gate;        // the system call that user-mode callers go through, or nil (see run)
 
     // ---- sector buffer helpers ----
 
@@ -210,7 +219,20 @@ def class Fs {
         return peek32(Fs.entryAddr(e) + 52);
     }
 
-    static def setEntry(e, nameBytes, first, size) {
+    // owner, group and mode as recorded in entry e: [uid, gid, mode] with mode as stored (bit 15 = recorded)
+    static def entryMeta(e) {
+        Fs.readSector(Fs.entrySector(e));
+        addr = Fs.entryAddr(e);
+        return [(peek8(addr + 56) << 8) | peek8(addr + 57), (peek8(addr + 58) << 8) | peek8(addr + 59), (peek8(addr + 60) << 8) | peek8(addr + 61)];
+    }
+
+    // the meta of a file or folder that is being created now
+    static def newMeta(folder) {
+        base = folder ? 0x1FF : 0x1B6;          // 0777 / 0666, less the umask
+        return [Fs.curUid, Fs.curGid, 0x8000 | (base & ~Fs.umask)];
+    }
+
+    static def setEntry(e, nameBytes, first, size, meta) {
         Fs.readSector(Fs.entrySector(e));
         addr = Fs.entryAddr(e);
         i = 0;
@@ -225,6 +247,12 @@ def class Fs {
         }
         poke32(addr + 48, first);
         poke32(addr + 52, size);
+        poke8(addr + 56, (meta[0] >> 8) & 255);
+        poke8(addr + 57, meta[0] & 255);
+        poke8(addr + 58, (meta[1] >> 8) & 255);
+        poke8(addr + 59, meta[1] & 255);
+        poke8(addr + 60, (meta[2] >> 8) & 255);
+        poke8(addr + 61, meta[2] & 255);
         Fs.writeSector(Fs.entrySector(e));
     }
 
@@ -311,7 +339,9 @@ def class Fs {
         first = 0;
         if (n > 0) { first = sectors[0] + 1; }
         target = e < 0 ? slot : e;
-        Fs.setEntry(target, nameBytes, first, size);
+        // an existing file keeps its owner and mode; a new one gets the caller's
+        meta = e >= 0 ? Fs.entryMeta(e) : Fs.newMeta(nameBytes[len(nameBytes) - 1] == 47);
+        Fs.setEntry(target, nameBytes, first, size, meta);
         Fs.freeChain(old);
         free(sectors);
     }
@@ -540,7 +570,7 @@ def class Fs {
             Fs.fatSet(last, sectors[0] + 1);
             free(sectors);
         }
-        Fs.setEntry(e, nb, first, size + n);
+        Fs.setEntry(e, nb, first, size + n, Fs.entryMeta(e));
         free(extra);
         free(nb);
     }
@@ -641,7 +671,7 @@ def class Fs {
         }
         first = Fs.entryFirst(e);
         size = Fs.entrySize(e);
-        Fs.setEntry(e, tb, first, size);
+        Fs.setEntry(e, tb, first, size, Fs.entryMeta(e));
         free(fb);
         free(tb);
         return true;
@@ -733,10 +763,113 @@ def class Fs {
         return [Fs.total, Fs.dataSectors, Fs.freeCount(), files];
     }
 
+    // ---- owners and modes ----
+
+    // overwrites the owner, group and mode of entry e
+    static def writeMeta(e, meta) {
+        Fs.readSector(Fs.entrySector(e));
+        addr = Fs.entryAddr(e);
+        poke8(addr + 56, (meta[0] >> 8) & 255);
+        poke8(addr + 57, meta[0] & 255);
+        poke8(addr + 58, (meta[1] >> 8) & 255);
+        poke8(addr + 59, meta[1] & 255);
+        poke8(addr + 60, (meta[2] >> 8) & 255);
+        poke8(addr + 61, meta[2] & 255);
+        Fs.writeSector(Fs.entrySector(e));
+    }
+
+    // [owner, group, permission bits 0-511, size, kind] for a file (kind 0) or a folder (kind 1), nil if
+    // there is none. A folder is its marker entry 'name/' when it has one, otherwise it only exists as long
+    // as something is below it (owner 0, group 0, 0755). The shared host folder has no owners: 0777.
+    static def doStat(name) {
+        if (name == '') { return [0, 0, 0x1ED, 0, 1]; }
+        rel = Fs.host(name);
+        if (rel != nil) {
+            n = rel == '' ? -2 : Hfs.size(rel);
+            if (n == -1) { return nil; }
+            return [0, 0, 0x1FF, n < 0 ? 0 : n, n < 0 ? 1 : 0];
+        }
+        Fs.need();
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        free(nb);
+        folder = false;
+        if (e < 0) {
+            mb = Fs.encodeName(name + '/');
+            e = Fs.lookup(mb);
+            free(mb);
+            folder = true;
+        }
+        if (e >= 0) {
+            meta = Fs.entryMeta(e);
+            perm = (meta[2] & 0x8000) != 0 ? (meta[2] & 0x1FF) : (folder ? 0x1ED : 0x1A4);
+            return [meta[0], meta[1], perm, folder ? 0 : Fs.entrySize(e), folder ? 1 : 0];
+        }
+        inside = Fs.doList(name + '/');
+        if (len(inside) > 0) { return [0, 0, 0x1ED, 0, 1]; }
+        return nil;
+    }
+
+    // the entry index holding the meta of 'name' (a file, or the marker of a folder, which is made when
+    // the folder has none yet); -1 for something that is not on the disk
+    static def metaEntry(name) {
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        free(nb);
+        if (e >= 0) { return e; }
+        mb = Fs.encodeName(name + '/');
+        e = Fs.lookup(mb);
+        if (e < 0) {
+            if (len(Fs.doList(name + '/')) == 0) { free(mb); return -1; }
+            Fs.store(mb, []);
+            e = Fs.lookup(mb);
+        }
+        free(mb);
+        return e;
+    }
+
+    // false if there is no such file or folder
+    static def doChmod(name, mode) {
+        if (Fs.host(name) != nil) { throw('fs: the shared host folder has no modes'); }
+        Fs.need();
+        e = Fs.metaEntry(name);
+        if (e < 0) { return false; }
+        meta = Fs.entryMeta(e);
+        meta[2] = 0x8000 | (mode & 0x1FF);
+        Fs.writeMeta(e, meta);
+        return true;
+    }
+
+    // who = [uid, gid]; false if there is no such file or folder
+    static def doChown(name, who) {
+        if (Fs.host(name) != nil) { throw('fs: the shared host folder has no owners'); }
+        Fs.need();
+        e = Fs.metaEntry(name);
+        if (e < 0) { return false; }
+        st = Fs.doStat(name);
+        meta = Fs.entryMeta(e);
+        meta[2] = 0x8000 | st[2];                   // an entry from before modes were recorded keeps what it counted as
+        meta[0] = who[0];
+        meta[1] = who[1];
+        Fs.writeMeta(e, meta);
+        return true;
+    }
+
     // ---- public API: one lock around every operation ----
 
+    // Every file-system call comes through here. A caller in user mode does not touch the disk: it asks the
+    // kernel (the 'gate', a system call the kernel registers with Fs.gate = vector), which checks who may do
+    // what and calls runAs() for them. Kernel code, and anything before the gate exists, runs directly.
     static def run(op, a, b) {
+        if (Fs.gate != nil && !isPrivileged()) { return syscall(Fs.gate, [op, a, b]); }
+        return Fs.runAs(0, 0, op, a, b);
+    }
+
+    // the operation for user 'uid', group 'gid': what it creates is theirs
+    static def runAs(uid, gid, op, a, b) {
         lock(Fs.lock);
+        Fs.curUid = uid;
+        Fs.curGid = gid;
         result = nil;
         try {
             if (op == 1) { Fs.doWrite(a, b); }
@@ -751,6 +884,9 @@ def class Fs {
             else if (op == 10) { Fs.doAppend(a, b); }
             else if (op == 11) { result = Fs.doReadData(a); }
             else if (op == 12) { Fs.doWriteData(a, b); }
+            else if (op == 13) { result = Fs.doStat(a); }
+            else if (op == 14) { result = Fs.doChmod(a, b); }
+            else if (op == 15) { result = Fs.doChown(a, b); }
         } catch (err) {
             unlock(Fs.lock);
             throw(err);
@@ -779,7 +915,15 @@ def class Fs {
     static def list(prefix) { return Fs.run(4, prefix, nil); }
     // [total sectors, data sectors, free data sectors, files]
     static def info() { return Fs.run(7, nil, nil); }
+    // [owner, group, permission bits (0-511: rwxrwxrwx), size, kind (0 file, 1 folder)], nil if there is none
+    static def stat(name) { return Fs.run(13, name, nil); }
+    static def chmod(name, mode) { return Fs.run(14, name, mode); }
+    static def chown(name, uid, gid) { return Fs.run(15, name, [uid, gid]); }
 }
 Fs.magic = 0x424C3046; // 'BL0F'
 Fs.mounted = false;
 Fs.lock = newMutex();
+Fs.curUid = 0;
+Fs.curGid = 0;
+Fs.umask = 0x12;     // 022
+Fs.gate = nil;

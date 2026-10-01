@@ -189,4 +189,41 @@ class Bl0jv2_FsTest {
                 "s.feed(0xF0) + s.feed(0x9F) + s.feed(0x98) + s.feed(0x80) + '|' + " +
                 "s.feed(0xE2) + s.feed(98) + '|' + s.feed(0xFF);"));
     }
+
+    @Test
+    void aNewFileBelongsToWhoMadeItWithTheUmaskApplied(@TempDir Path dir) throws IOException {
+        // [owner, group, mode, size, kind]; 420 = 0644, 493 = 0755
+        assertEquals("1000,100,420,2,0|1000,100,493,0,1|0,0,493,0,1", run(dir, 64,
+                "Fs.format(); Fs.runAs(1000, 100, 1, 'a.txt', 'hi'); Fs.runAs(1000, 100, 1, 'd/', ''); Fs.write('d/x', 'y'); " +
+                "s1 = Fs.stat('a.txt'); s2 = Fs.stat('d'); s3 = Fs.stat('');" +
+                "print str(s1[0]) + ',' + str(s1[1]) + ',' + str(s1[2]) + ',' + str(s1[3]) + ',' + str(s1[4]) + '|' + " +
+                "str(s2[0]) + ',' + str(s2[1]) + ',' + str(s2[2]) + ',' + str(s2[3]) + ',' + str(s2[4]) + '|' + " +
+                "str(s3[0]) + ',' + str(s3[1]) + ',' + str(s3[2]) + ',' + str(s3[3]) + ',' + str(s3[4]);"));
+    }
+
+    @Test
+    void chmodAndChownChangeTheEntryAndSurviveRewritesAndRenames(@TempDir Path dir) throws IOException {
+        assertEquals("384|7|8|8|true|false|nil", run(dir, 64,
+                "Fs.format(); Fs.write('a', 'one'); Fs.chmod('a', 384); Fs.chown('a', 7, 8); " +
+                "s = Fs.stat('a'); print str(s[2]) + '|' + str(s[0]) + '|' + str(s[1]); " +
+                "Fs.write('a', 'longer text'); Fs.append('a', '!'); Fs.rename('a', 'b'); " +
+                "t = Fs.stat('b'); print '|' + str(t[1]) + '|' + str(Fs.chmod('b', 0)) + '|' + str(Fs.chmod('nosuch', 1)) + '|' + str(Fs.stat('a'));"));
+    }
+
+    @Test
+    void aFolderWithoutAMarkerCanStillBeGivenAnOwner(@TempDir Path dir) throws IOException {
+        assertEquals("493,0|448,5|true", run(dir, 64,
+                "Fs.format(); Fs.write('docs/a.txt', 'x'); s = Fs.stat('docs'); print str(s[2]) + ',' + str(s[0]); " +
+                "Fs.chown('docs', 5, 5); Fs.chmod('docs', 448); t = Fs.stat('docs'); print '|' + str(t[2]) + ',' + str(t[0]) + '|' + str(Fs.exists('docs/a.txt'));"));
+    }
+
+    @Test
+    void anEntryFromBeforeModesExistedCountsAsRootOwned(@TempDir Path dir) throws IOException {
+        // entries written by the old code have zeros where the owner and mode now live: 0644 file, 0755 folder
+        assertEquals("420,0|493,0", run(dir, 64,
+                "Fs.format(); Fs.write('old', 'x'); Fs.write('d/', ''); " +
+                "e = Fs.lookup(Fs.encodeName('old')); m = Fs.entryMeta(e); Fs.writeMeta(e, [0, 0, 0]); " +
+                "f = Fs.lookup(Fs.encodeName('d/')); Fs.writeMeta(f, [0, 0, 0]); " +
+                "a = Fs.stat('old'); b = Fs.stat('d'); print str(a[2]) + ',' + str(a[0]) + '|' + str(b[2]) + ',' + str(b[0]);"));
+    }
 }
