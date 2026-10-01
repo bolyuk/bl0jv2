@@ -66,12 +66,38 @@ public final class Bl0jv2_Linker {
      * a library: whatever it needs is a library too).
      */
     public static PROGRAM_N resolveImports(PROGRAM_N entryProgram, Path entryPath, List<Path> searchPaths, Set<String> shared) {
+        return resolveImports(entryProgram, entryPath, searchPaths, shared, true);
+    }
+
+    /**
+     * 'shake' removes the imported functions and classes nothing uses (see {@link Bl0jv2_Shaker}):
+     * the entry file's own definitions are always kept, so a library built as an entry file exports
+     * all it declares, and an imported file that has {@code @library} in a comment among its first
+     * lines is never thinned.
+     */
+    public static PROGRAM_N resolveImports(PROGRAM_N entryProgram, Path entryPath, List<Path> searchPaths, Set<String> shared,
+                                           boolean shake) {
         Set<Path> visited = new HashSet<>();
         visited.add(entryPath.toAbsolutePath().normalize());
 
         List<Node> resolved = new ArrayList<>();
-        resolveInto(entryProgram, entryPath.toAbsolutePath().getParent(), searchPaths, shared, false, visited, resolved);
-        return new PROGRAM_N(resolved);
+        Set<Node> candidates = Bl0jv2_Shaker.identitySet();
+        resolveInto(entryProgram, entryPath.toAbsolutePath().getParent(), searchPaths, shared, false, false, visited, resolved, candidates);
+        PROGRAM_N linked = new PROGRAM_N(resolved);
+        return shake ? Bl0jv2_Shaker.shake(linked, candidates) : linked;
+    }
+
+    // a file declares that it is a library - its definitions are all kept - with a comment among its
+    // first lines: // @library
+    private static boolean isMarkedLibrary(String source) {
+        int checked = 0;
+        for (String line : source.split("\n", 12)) {
+            if (checked++ >= 10) break;
+            String t = line.strip();
+            if (t.startsWith("//") && t.contains("@library"))
+                return true;
+        }
+        return false;
     }
 
     /**
@@ -86,11 +112,13 @@ public final class Bl0jv2_Linker {
     }
 
     private static void resolveInto(PROGRAM_N program, Path baseDir, List<Path> searchPaths, Set<String> shared,
-                                    boolean declaringOnly, Set<Path> visited, List<Node> out) {
+                                    boolean declaringOnly, boolean thinnable, Set<Path> visited, List<Node> out, Set<Node> candidates) {
         for (Node node : program.nodes) {
             if (!(node instanceof ImportNode importNode)) {
                 if (!declaringOnly) {
                     out.add(node);
+                    if (thinnable && (node instanceof FunNode || node instanceof ClassNode))
+                        candidates.add(node);
                 } else if (node instanceof FunNode f) {
                     f.external = true;
                     out.add(f);
@@ -129,7 +157,7 @@ public final class Bl0jv2_Linker {
             if (!(importedAst instanceof PROGRAM_N importedProgram))
                 throw new Bl0j_CompilerException("imported file did not parse to a program: " + importNode.path);
 
-            resolveInto(importedProgram, resolvedPath.getParent(), searchPaths, shared, isShared, visited, out);
+            resolveInto(importedProgram, resolvedPath.getParent(), searchPaths, shared, isShared, !isMarkedLibrary(source), visited, out, candidates);
         }
     }
 

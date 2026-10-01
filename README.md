@@ -47,6 +47,7 @@ bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
       --disk-put HOSTFILE[:NAME]  copy a host file or folder onto the --disk image first
                          (a .bl0 is compiled and stored as .bl0c); repeatable
   -I, --include DIR  look an import up in DIR when it is not next to the importing file
+      --no-shake     keep every imported function and class (see below)
 ```
 
 ```
@@ -199,6 +200,17 @@ x, y = (1, 2)            // destructuring
 `stdlib/...` falls back to the copy bundled in the jar). The linker follows
 imports by itself, so the CLI needs no list of files; `-I` only adds places to
 look. It works at the `-t` prompt too.
+
+### Leaving out what is not used
+
+An import splices a whole file in, so the linker then removes the imported functions, classes and
+class methods that nothing reachable uses (`Bl0jv2_Shaker`). The entry file's own definitions are
+always kept - so a library compiled as an entry file exports everything it declares - and so is every
+top-level statement. Use is by name: a function or class stays when its name occurs in kept code, a
+static method when `Class.name` does, an instance method when `.name` does anywhere (methods are found
+by name at run time; `init`, `toString` and `equals` are called by the VM). An imported file that has
+`@library` in a comment among its first lines is never thinned, and `--no-shake` turns it all off.
+On aeon-os this takes a quarter to a third off every program (`ls` 49 KB to 33 KB).
 
 ### Shared libraries
 

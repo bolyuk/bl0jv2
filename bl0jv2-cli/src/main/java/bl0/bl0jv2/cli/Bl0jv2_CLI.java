@@ -56,6 +56,7 @@ public class Bl0jv2_CLI {
     // than just answering whoever already knows to connect to a chosen
     // local port, worth requiring explicitly.
     private boolean bridgeOutbound = false;
+    private boolean shake = true;
     // -I: extra directories an import is looked up in when it is not found next to the importing file
     private final java.util.List<Path> includeDirs = new java.util.ArrayList<>();
     // --disk: a host file presented to the program as a block device (see DiskController)
@@ -126,6 +127,7 @@ public class Bl0jv2_CLI {
                     }
                 }
                 case "--bridge-outbound" -> bridgeOutbound = true;
+                case "--no-shake" -> shake = false;
                 case "-I", "--include" -> {
                     if (i + 1 >= args.length) {
                         System.err.println("--include requires a directory");
@@ -244,6 +246,9 @@ public class Bl0jv2_CLI {
         System.out.println("                  names, and stdlib/net/dns.bl0's Dns.resolve() answers for");
         System.out.println("                  real too. The reverse of -b/--bridge-tcp above (a real");
         System.out.println("                  peer reaching IN); only meaningful together with -e");
+        System.out.println("      --no-shake  keep every imported function and class; by default what");
+        System.out.println("                  nothing uses is left out (an imported file with @library in a");
+        System.out.println("                  comment among its first lines is never thinned)");
         System.out.println("  -I, --include DIR  look an import up in DIR when it is not found next to");
         System.out.println("                  the file that names it (repeatable)");
         System.out.println("      --disk FILE  present FILE to the program as a block device (512-byte");
@@ -407,7 +412,7 @@ public class Bl0jv2_CLI {
 
             if (!(ast instanceof PROGRAM_N program))
                 throw new IllegalStateException("parser did not produce a program");
-            var linked = Bl0jv2_Linker.resolveImports(program, source, includeDirs);
+            var linked = Bl0jv2_Linker.resolveImports(program, source, includeDirs, java.util.Set.of(), shake);
 
             bytes = compiler.compile(linked);
             timer.mark("compiler");
