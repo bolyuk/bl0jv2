@@ -595,6 +595,15 @@ public final class Bl0jv2_jVM {
         return new Bl0j_VM_Exception("class " + cls.name + " has no " + kind + " '" + unbox(consts[nameConst]) + "'");
     }
 
+    // one permanent heap entry per distinct word ("int", "true", "nil", ...),
+    // shared by every call that wants it - see TO_STRING/TYPE_OF. Cleared when a
+    // new program replaces the heap.
+    private final Map<String, Long> internedStrings = new HashMap<>();
+
+    private synchronized long internedString(String text) {
+        return internedStrings.computeIfAbsent(text, this::boxRef);
+    }
+
     private static Bl0jEvent requireEvent(Object value) {
         if (value instanceof Bl0jEvent e)
             return e;
@@ -706,6 +715,9 @@ public final class Bl0jv2_jVM {
         CoreContext ctx = currentContext();
         ctx.callStack.clear();
         heap.clear();
+        synchronized (this) {
+            internedStrings.clear();
+        }
         ctx.handlerStack.clear();
         ctx.callStack.add(new Frame(newRegisters(registers_length), -1, -1));
         consts = new long[constants_length];
@@ -1405,8 +1417,19 @@ public final class Bl0jv2_jVM {
 
                     case OpCodes.TO_INT -> reg[a] = box(toInt(unbox(reg[a])));
                     case OpCodes.TO_FLOAT -> reg[a] = box(toFloat(unbox(reg[a])));
-                    case OpCodes.TO_STRING -> reg[a] = boxRef(unbox(reg[a]).toString());
-                    case OpCodes.TYPE_OF -> reg[a] = boxRef(typeName(unbox(reg[a])));
+                    // str() and typeOf() used to take a fresh heap slot on every
+                    // call, even though a string stays the same string and typeOf()
+                    // only ever answers with one of a dozen words
+                    case OpCodes.TO_STRING -> {
+                        Object value = unbox(reg[a]);
+                        if (value instanceof String)
+                            ; // already a string: the register keeps referring to it
+                        else if (value instanceof Boolean || value == NIL_OBJECT)
+                            reg[a] = internedString(value.toString());
+                        else
+                            reg[a] = boxRef(value.toString());
+                    }
+                    case OpCodes.TYPE_OF -> reg[a] = internedString(typeName(unbox(reg[a])));
 
                     // b holds the catch block's address (patched by the
                     // compiler), a the register the caught error lands in
