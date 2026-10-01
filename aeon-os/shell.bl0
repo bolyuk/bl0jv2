@@ -31,10 +31,10 @@
 // the outermost poll-eligible execute() loop - and a syscall trap has
 // already left that loop by the time its own handler body runs. Blocking
 // there waits for a delivery that can only happen after the block ends,
-// which never happens. This is why the REPL loop below busy-polls
-// kbHasInput() directly instead of trying to wrap it in a "blocking read"
-// syscall - a design this file's author tried first, and which hangs for
-// exactly the reason above.
+// which never happens. This is why the REPL loop below checks kbHasInput()
+// itself (sleeping in kbWait() when there is nothing) instead of trying to
+// wrap it in a "blocking read" syscall - a design this file's author tried
+// first, and which hangs for exactly the reason above.
 
 import '../stdlib/mathlib.bl0';
 import 'kernel.bl0';
@@ -117,18 +117,12 @@ print '$ ';
 
 line = '';
 commandsRun = 0;
-// busy-polls kbHasInput() - no haltCore() (privileged, and see this
-// file's own header comment on why it wouldn't help here even if it
-// weren't), same accepted trade-off as smp_boot.bl0's own completion wait.
-// The wait(5) in the empty branch is what keeps this from pegging a real
-// CPU core at 100% for as long as the shell sits idle at its prompt -
-// wait() is just Thread.sleep() under the hood (see its own doc), plain
-// and unprivileged, so it's fine to call from here even after
-// dropToUserMode(). 5ms is well under any human's actual keystroke rate,
-// so it costs no perceptible input latency - and since -k sets the
-// interrupt poll interval to 1 (see Bl0jv2_CLI's own doc), a keypress that
-// arrives mid-sleep is still delivered on the very next instruction this
-// core executes once the sleep returns, not delayed any further than that
+// sleeps in kbWait() while there is no input: the keyboard ISR signals an
+// event on every key, so the shell costs no CPU while idle and reacts to a key
+// the moment the ISR has run (waitEvent also returns early when an interrupt
+// this core can take is pending, which is what lets a single core run its own
+// keyboard ISR while it sits here). waitEvent is unprivileged, so this is fine
+// after dropToUserMode().
 while (ShellState.running) {
     if (kbHasInput()) {
         b = kbReadChar();
@@ -146,7 +140,7 @@ while (ShellState.running) {
             print ch;
         }
     } else {
-        wait(5);
+        kbWait(1000); // sleeps until a key arrives - see kernel.bl0's kbWait()
     }
 }
 

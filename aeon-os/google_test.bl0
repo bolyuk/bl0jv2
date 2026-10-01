@@ -5,9 +5,9 @@
 // help text) - without it, Udp.send()/TcpConn.connect() never leave the VM
 // at all, loopback only.
 
-import 'D:/IdeaProjects/bl0jv2/bl0jv2-compiler/src/main/resources/stdlib/net/dns.bl0';
-import 'D:/IdeaProjects/bl0jv2/bl0jv2-compiler/src/main/resources/stdlib/net/http.bl0';
-import 'D:/IdeaProjects/bl0jv2/bl0jv2-compiler/src/main/resources/stdlib/mathlib.bl0';
+import '../stdlib/net/dns.bl0';
+import '../stdlib/net/http.bl0';
+import '../stdlib/mathlib.bl0';
 
 Nic.initWithHostBridge();
 

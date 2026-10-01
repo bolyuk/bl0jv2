@@ -78,6 +78,7 @@ def class Keyboard {
                           // be visible there at all
     static field bufferAddr;
     static field bufferSize;
+    static field event; // signalled by the ISR on every key, so a reader can sleep in kbWait()
     static field head; // next slot the ISR writes to
     static field tail; // next slot a reader consumes from
 }
@@ -98,6 +99,7 @@ def onKeyboardIRQ(vector) {
     }
     poke8(Keyboard.bufferAddr + Keyboard.head, in8(Keyboard.dataPort));
     Keyboard.head = nextHead;
+    signalEvent(Keyboard.event);
 }
 
 // call once, after the importer has reserved whatever fixed regions it
@@ -110,7 +112,20 @@ def onKeyboardIRQ(vector) {
 // "imports always run last" rule to lean on instead)
 def initKeyboard() {
     Keyboard.bufferAddr = kalloc(Keyboard.bufferSize);
+    Keyboard.event = newEvent();
     registerHandler(onKeyboardIRQ, Keyboard.vector, 50);
+}
+
+// sleeps until a key is available or timeoutMs passes; true if one is. No
+// privilege needed (waitEvent is not a device access), so user-mode code
+// like the shell can block here instead of polling kbHasInput() in a
+// wait() loop. The generation is read before the buffer is checked, so a key
+// that arrives in between is not slept through.
+def kbWait(timeoutMs) {
+    gen = eventGen(Keyboard.event);
+    if (Keyboard.head != Keyboard.tail) { return true; }
+    waitEvent(Keyboard.event, gen, timeoutMs);
+    return Keyboard.head != Keyboard.tail;
 }
 
 def kbHasInput() {

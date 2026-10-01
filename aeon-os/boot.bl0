@@ -26,6 +26,7 @@
 // keyboard handler just sees it.
 
 import '../stdlib/mathlib.bl0';
+import '../stdlib/arrlib.bl0';
 import 'kernel.bl0';
 
 // --- raw memory layout: kernel.bl0's heap counter owns address 0 (see its
@@ -124,11 +125,7 @@ def class Scheduler {
     // scheduling order doesn't depend on queue order anyway (pickIndex()
     // rescans by priority every time)
     def removeAt(i) {
-        last = len(this.tasks) - 1;
-        if (i != last) {
-            this.tasks[i] = this.tasks[last];
-        }
-        pop(this.tasks);
+        Arr.removeAt(this.tasks, i);
     }
 
     // runs the highest-priority task once. Mutating the run queue
@@ -236,7 +233,7 @@ journalExec('child_crash', 'aeon-os/child_crash.bl0c');
 
 // the interactive shell - a real child process now, not inlined code.
 // With -k, real stdin reaches it directly (see this file's own header
-// comment); without it, the shell's own busy-poll loop just never sees
+// comment); without it, the shell's own idle loop just never sees
 // any input and exits only if something else raises its 'exit' path -
 // running boot.bl0 non-interactively will make this journal entry hang
 // until killed, exactly like launching an interactive shell with no
