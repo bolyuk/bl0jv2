@@ -27,19 +27,24 @@ def class Jobs {
 
     // starts the line; '' when it is running, else why it could not be
     static def start(line, cwd, who, defaultOut) {
+        return Jobs.launch(line, cwd, who, defaultOut)[0];
+    }
+
+    // the same, and the processes it started: [problem, [Process, ...]]
+    static def launch(line, cwd, who, defaultOut) {
         stages = nil;
         try {
             stages = Cmdline.parse(line);
         } catch (e) {
-            return str(e);
+            return [str(e), []];
         }
         n = len(stages);
-        if (n == 0) { return 'nothing to run'; }
+        if (n == 0) { return ['nothing to run', []]; }
         paths = [];
         i = 0;
         while (i < n) {
             found = Jobs.program(stages[i].words[0], cwd);
-            if (found == nil) { return stages[i].words[0] + ': command not found'; }
+            if (found == nil) { return [stages[i].words[0] + ': command not found', []]; }
             push(paths, found);
             i += 1;
         }
@@ -92,7 +97,8 @@ def class Jobs {
                 pipes[i].closeRead();
                 i += 1;
             }
+            spawned = [];
         }
-        return problem;
+        return [problem, spawned];
     }
 }

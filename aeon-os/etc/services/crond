@@ -1,0 +1,4 @@
+# aeon-os service: run by 'service crond start' (and at boot once enabled: 'service crond enable')
+description = Run scheduled jobs (etc/crontab and the users' crontabs)
+command = crond
+user = root

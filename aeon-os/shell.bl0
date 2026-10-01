@@ -94,7 +94,7 @@ def cmdHelp() {
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
+    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo service mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
 }
@@ -395,6 +395,7 @@ def ensureSystemDirs() {
         Fs.chmod('root', 0x1C0);             // 0700
     }
     if (!Fs.exists('home/')) { Fs.write('home/', ''); }
+    if (!Fs.exists('var/run/')) { Fs.write('var/run/', ''); }
     // users' own cron tables: anyone may make theirs here, only they (and root) may remove it
     if (!Fs.exists('var/cron/')) { Fs.write('var/cron/', ''); }
     if (Fs.stat('var/cron')[2] != 0x3FF) { Fs.chmod('var/cron', 0x3FF); }
@@ -1109,6 +1110,9 @@ dropToUserMode();
 
 consoleWriteLine(Term.paintBold(6, '  aeon-os') + Term.paint(7, ' - ' + coreCount() + ' core(s)'));
 consoleWriteLine('aeon-shell ready - type a command, press enter (try: ' + Term.paint(3, 'help') + ')');
+
+// the machine's own start-up: etc/rc is run as root before anybody logs in (service boot is there)
+if (Fs.mounted && Fs.exists('etc/rc')) { cmdSh(['sh', 'etc/rc']); }
 
 // who is at the keyboard: root straight away, unless root has a password
 loginIfNeeded();

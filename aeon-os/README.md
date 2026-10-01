@@ -164,6 +164,15 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   - On a fresh disk the shell starts as root without asking. Once root has a password it asks `login:` and starts the
     user in their home folder. The prompt shows the user's name when it is not root. History, `tmp/` for pipes and the
     system log are per-user, world-writable and kernel-written respectively.
+* **Start-up and services** (`etc/rc`, `service`): when the machine starts the shell runs `etc/rc` as root, a script like
+  `etc/profile`, before the login prompt. Its default line is `service boot`, which starts every service listed in
+  `etc/services.enabled`. A service is a definition `etc/services/<name>` (`description`, `command`, optionally `user`, default
+  root, and `log`, default `var/log/<name>.log`) and a process on a worker core, started like a cron job - no terminal, its
+  output appended to the log file, how it ended in the system log - with its number in `var/run/<name>.pid`. `service list`
+  shows them all; `service <name> start|stop|restart|status|enable|disable` manages one (enable = start at boot; the others
+  than `status` are root's). Nothing is enabled out of the box: a service takes a worker core, so `service crond enable`
+  is your choice. `stop` is a stop request, honoured at the program's next checkpoint, as for `kill`; a pid file left from
+  an earlier run is not a running service. `kill` now refuses a process that is not yours (root may).
 * **Cron** (`crond`, `crontab`, `date`; syntax in `lib/cron.bl0`): `crond &` is the scheduler - a process on a worker core that,
   once a minute by the real-time clock (UTC, ports 0x0F70-0x0F77, read through `stdlib/time/clock.bl0`), starts the jobs whose
   time has come. Lines are `minute hour day month weekday command` (stars, numbers, ranges, lists, steps; `@reboot`,

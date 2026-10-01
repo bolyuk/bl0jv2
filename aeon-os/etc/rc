@@ -1,0 +1,3 @@
+# aeon-os: run by the shell as root when the machine starts, before the login prompt
+# (one command per line, # for comments). The services you enabled with 'service <name> enable' start here.
+service boot

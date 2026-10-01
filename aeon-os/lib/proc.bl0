@@ -26,6 +26,7 @@ def class Process {
     field ended;
     field reported;    // the shell has told the user it ended
     field background;
+    field uid;         // who it runs for
     field quiet;       // a job started by crond: no notice on the terminal when it ends, a line in the log instead
     field system;      // the shell: listed by ps, but not something to wait for or stop
 
@@ -42,6 +43,7 @@ def class Process {
         this.background = false;
         this.system = false;
         this.quiet = false;
+        this.uid = 0;
     }
 }
 
@@ -129,6 +131,7 @@ def class Proc {
             c.gid = who[1];
             c.groups = who[2];
         }
+        p.uid = c.uid;
         c.words = words;
         c.cwd = cwd;
         c.inPath = io[0];
