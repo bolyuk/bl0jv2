@@ -605,3 +605,4 @@ while (ShellState.running) {
 
 Log.write('shell: exiting after ' + commandsRun + ' commands');
 consoleWriteLine('=== aeon-shell exiting after ' + commandsRun + ' commands ===');
+consoleFlush();

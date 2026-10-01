@@ -5,6 +5,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -189,5 +190,12 @@ class MultitaskTest {
         while (System.currentTimeMillis() < deadline && !s.screen().screenText().contains("[2] sleep")) Thread.sleep(50);
         assertTrue(s.screen().screenText().contains("aeon-shell ready"), s.screen().screenText());   // the normal screen is back
         expect(s, "kill 2", "$ ");
+    }
+
+    @Test
+    void outputLargerThanTheTransmitRingArrivesWhole(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir, 4);
+        String out = run(s, "yes abcdefghij | head -n 1000");      // 11 KB, the ring holds 4 KB
+        assertEquals(1000, out.lines().filter(l -> l.equals("abcdefghij")).count(), "lines that arrived");
     }
 }
