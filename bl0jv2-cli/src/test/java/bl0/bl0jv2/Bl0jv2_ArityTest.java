@@ -4,6 +4,9 @@ import org.junit.jupiter.api.Test;
 
 import static bl0.bl0jv2.Bl0jv2_TestRunner.run;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import bl0.bl0jv2.exceptions.Bl0j_CompilerException;
 
 // CALL carries its argument count; the VM refuses a call whose count doesn't
 // match the callee instead of reading stray registers (too few) or silently
@@ -27,16 +30,20 @@ class Bl0jv2_ArityTest {
         assertEquals("3", run("def add(a, b) { return a + b; } g = add; print g(1, 2);"));
     }
 
+    // a receiver of unknown class can only be checked by the VM: another
+    // class declares inc() with a different count, so the compiler lets
+    // the call through
     @Test
     void methodArityDoesNotCountThis() {
         assertEquals("function A.inc expects 0 arguments, got 1", run(
-                "def class A { def inc() { return 1; } } a = new A(); try { a.inc(5); } catch (e) { print e; }"));
+                "def class A { def inc() { return 1; } } def class B { def inc(by) { return by; } } " +
+                "def pick(o) { return o; } a = pick(new A()); try { a.inc(5); } catch (e) { print e; }"));
     }
 
     @Test
-    void constructorArityIsChecked() {
-        assertEquals("function A.init expects 1 argument, got 0", run(
-                "def class A { field x; def init(v) { this.x = v; } } try { a = new A(); } catch (e) { print e; }"));
+    void constructorArityIsCheckedAtCompileTime() {
+        assertThrows(Bl0j_CompilerException.class, () -> run(
+                "def class A { field x; def init(v) { this.x = v; } } a = new A();"));
     }
 
     @Test

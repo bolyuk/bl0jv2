@@ -39,33 +39,37 @@ class Bl0jv2_ClassStorageTest {
                 "def call(o) { return o.who(); } print call(new A()) + '|' + call(new B());"));
     }
 
+    // another class declares zzz/nope, so the compiler cannot reject the
+    // access on a Counter and the VM has to
+    private static final String ELSEWHERE = "def class Elsewhere { field zzz; def nope() { return 1; } } ";
+
     @Test
     void unknownFieldNamesTheFieldAndTheClass() {
-        assertEquals("class Counter has no field 'zzz'", run(COUNTER +
+        assertEquals("class Counter has no field 'zzz'", run(COUNTER + ELSEWHERE +
                 "c = new Counter(); try { print c.zzz; } catch (e) { print e; }"));
     }
 
     @Test
     void unknownMethodNamesTheMethodAndTheClass() {
-        assertEquals("class Counter has no method 'nope'", run(COUNTER +
+        assertEquals("class Counter has no method 'nope'", run(COUNTER + ELSEWHERE +
                 "c = new Counter(); try { c.nope(); } catch (e) { print e; }"));
     }
 
     @Test
     void readingAFieldOfNilIsACleanError() {
-        assertEquals("cannot read field 'n' on nil", run(
+        assertEquals("cannot read field 'n' on nil", run(COUNTER +
                 "x = nil; try { print x.n; } catch (e) { print e; }"));
     }
 
     @Test
     void callingAMethodOnANonInstanceIsACleanError() {
-        assertEquals("cannot call method 'inc' on int", run(
+        assertEquals("cannot call method 'inc' on int", run(COUNTER +
                 "x = 5; try { x.inc(); } catch (e) { print e; }"));
     }
 
     @Test
     void settingAFieldOnNilIsACleanError() {
-        assertEquals("cannot set field 'n' on nil", run(
+        assertEquals("cannot set field 'n' on nil", run(COUNTER +
                 "x = nil; try { x.n = 1; } catch (e) { print e; }"));
     }
 
