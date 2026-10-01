@@ -279,6 +279,20 @@ else of the host is reachable, and without the flag there is no device at all.
 To port to another machine, replace `fs/disk.bl0` (`Disk.read/write/sectors`)
 and nothing else. The aeon-os shell has `ls cat write append rm mv cp df format` and more (aeon-os/README.md).
 
+### The terminal
+
+The console is a serial line, two devices on ports (the host emulates what a UART
+and a keyboard controller would be): **transmit** - the guest writes bytes to port
+`0x0F40`, UTF-8 text with ANSI escape sequences for cursor and screen control, and
+the host decodes them (a character may arrive in pieces); `in16(0x0F44)` and
+`in16(0x0F46)` are the screen's columns and rows. **Receive** - the host puts what the
+terminal sent (UTF-8, escape sequences for the arrow keys) into a FIFO and raises
+interrupt vector 2; the guest drains it with `in8(0x0F49)` (1 = a byte is waiting) and
+`in8(0x0F48)` (the next byte). The FIFO holds 4096 bytes, so nothing needs pacing.
+`-k` connects the host terminal (raw mode via `stty` where there is one). Keys,
+editing and screen handling are the guest's job: see aeon-os/README.md.
+`Utf8Stream` (stdlib/str/utf8.bl0) decodes a byte stream one byte at a time.
+
 ### Network stack
 
 `Nic.init()` (or `Nic.initWithHostBridge()`), then `Udp.send/receive`,

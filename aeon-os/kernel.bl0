@@ -83,7 +83,9 @@ def class Keyboard {
 Keyboard.dataPort = 0x0F48;
 Keyboard.statusPort = 0x0F49;
 Keyboard.vector = 2;
-Keyboard.size = 256;
+// as large as the device's FIFO (4096 bytes), so the ring can always take what the FIFO holds:
+// pasting a long line must not lose its tail
+Keyboard.size = 8192;
 
 def onKeyboardIRQ(vector) {
     while (in8(Keyboard.statusPort) == 1) {
@@ -168,13 +170,41 @@ Console.rows = 24;
 // runs ELEVATED (syscall()'s trap gate - see invokeAsTrap), regardless of which
 // ring the caller was in
 def sysConsoleWrite(text) {
-    bytes = Utf8.encode(text);
+    port = Console.port;
+    n = len(text);
     i = 0;
-    while (i < len(bytes)) {
-        out8(Console.port, bytes[i]);
+    while (i < n) {
+        c = int(text[i]);
         i += 1;
+        if (c < 0x80) {
+            out8(port, c);
+        } else {
+            // UTF-8 for a code point, a UTF-16 surrogate pair counting as one; a lone surrogate is U+FFFD
+            if (c >= 0xD800 && c <= 0xDBFF) {
+                if (i < n && int(text[i]) >= 0xDC00 && int(text[i]) <= 0xDFFF) {
+                    c = 0x10000 + ((c - 0xD800) << 10) + (int(text[i]) - 0xDC00);
+                    i += 1;
+                } else {
+                    c = 0xFFFD;
+                }
+            } else if (c >= 0xDC00 && c <= 0xDFFF) {
+                c = 0xFFFD;
+            }
+            if (c < 0x800) {
+                out8(port, 0xC0 | (c >> 6));
+                out8(port, 0x80 | (c & 0x3F));
+            } else if (c < 0x10000) {
+                out8(port, 0xE0 | (c >> 12));
+                out8(port, 0x80 | ((c >> 6) & 0x3F));
+                out8(port, 0x80 | (c & 0x3F));
+            } else {
+                out8(port, 0xF0 | (c >> 18));
+                out8(port, 0x80 | ((c >> 12) & 0x3F));
+                out8(port, 0x80 | ((c >> 6) & 0x3F));
+                out8(port, 0x80 | (c & 0x3F));
+            }
+        }
     }
-    free(bytes);
 }
 
 // call once, privileged: the write syscall, and the screen size the device reports

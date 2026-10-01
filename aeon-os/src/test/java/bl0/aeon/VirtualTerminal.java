@@ -15,7 +15,9 @@ import java.util.List;
 final class VirtualTerminal {
     private final int columns;
     private final int rows;
-    private final List<StringBuilder> screen = new ArrayList<>();
+    private List<StringBuilder> screen = new ArrayList<>();
+    private List<StringBuilder> mainScreen;   // saved while the alternate screen is shown
+    private int savedRow, savedCol;
     private int row;
     private int col;
     private boolean pendingWrap;
@@ -79,7 +81,7 @@ final class VirtualTerminal {
 
     private void csi(char fin, String params) {
         String[] parts = params.isEmpty() ? new String[0] : params.split(";", -1);
-        int n = parts.length > 0 && !parts[0].isEmpty() ? Integer.parseInt(parts[0]) : -1;
+        int n = parts.length > 0 && parts[0].matches("\\d+") ? Integer.parseInt(parts[0]) : -1;
         pendingWrap = false;
         switch (fin) {
             case 'A' -> row = Math.max(0, row - Math.max(n, 1));
@@ -88,7 +90,7 @@ final class VirtualTerminal {
             case 'D' -> col = Math.max(0, col - Math.max(n, 1));
             case 'H' -> {
                 int r = n < 1 ? 1 : n;
-                int c = parts.length > 1 && !parts[1].isEmpty() ? Integer.parseInt(parts[1]) : 1;
+                int c = parts.length > 1 && parts[1].matches("\\d+") ? Integer.parseInt(parts[1]) : 1;
                 row = Math.min(rows, r) - 1;
                 col = Math.min(columns, c) - 1;
             }
@@ -106,6 +108,18 @@ final class VirtualTerminal {
                     for (int r = row + 1; r < rows; r++) screen.get(r).setLength(0);
                 } else if (mode == 2) {
                     for (StringBuilder l : screen) l.setLength(0);
+                }
+            }
+            case 'h', 'l' -> {
+                // ?1049h / ?1049l: the alternate screen, which a full-screen program uses and then leaves
+                if (params.equals("?1049")) {
+                    if (fin == 'h' && mainScreen == null) {
+                        mainScreen = screen; savedRow = row; savedCol = col;
+                        screen = new ArrayList<>();
+                        for (int i = 0; i < rows; i++) screen.add(new StringBuilder());
+                    } else if (fin == 'l' && mainScreen != null) {
+                        screen = mainScreen; mainScreen = null; row = savedRow; col = savedCol;
+                    }
                 }
             }
             default -> { } // m and the rest: no effect on the text

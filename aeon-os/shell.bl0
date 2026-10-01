@@ -17,7 +17,7 @@
 // the device directly, and gets blocked, the same enforcement pattern
 // smp_boot.bl0's taskRogue demonstrates.
 //
-// Reading the keyboard needs no syscall at all: kbHasInput()/kbReadChar()
+// Reading the keyboard needs no syscall at all: kbHasInput()/kbReadByte()
 // only ever peek8() a ring buffer in raw memory (never gated - see
 // requirePrivileged's own doc on why) - it's a read-only, kernel-populated
 // buffer userspace polls directly, the same shape a real io_uring/vDSO

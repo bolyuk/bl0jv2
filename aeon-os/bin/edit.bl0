@@ -1,0 +1,330 @@
+// aeon-os program: a text editor, full screen. edit <file>
+//
+// Keys: arrows, Home/End, PgUp/PgDn move; typing inserts; Enter splits a line;
+// Backspace/Delete join lines at their ends; Tab inserts spaces; Ctrl-S saves;
+// Ctrl-K cuts the line, Ctrl-Y pastes it; Ctrl-F searches; Ctrl-L redraws; Ctrl-X
+// exits (twice to leave without saving).
+//
+// It draws on the terminal's alternate screen with ANSI sequences, sized from the
+// console device (Console.columns/rows), and redraws only the rows that changed. A file
+// is a list of lines; tabs in a loaded file become four spaces, and the file is
+// written with a newline at the end. It works on any path the filesystem knows,
+// host/ included. Lines are as wide as the screen shows them: one cell per character.
+
+import '../lib/userland.bl0';
+import '../lib/term.bl0';
+import '../lib/keys.bl0';
+
+def class Ed {
+    static field lines;
+    static field row;
+    static field col;
+    static field top;       // first line shown
+    static field left;      // first column shown
+    static field wantCol;   // the column Up/Down try to keep
+    static field path;
+    static field modified;
+    static field message;
+    static field clip;
+    static field shown;     // what each screen row last showed
+    static field quitArmed;
+    static field done;
+    static field columns;
+    static field rows;
+}
+
+def edRowsOfText() {
+    return Ed.rows - 2;
+}
+
+def edLoad(path) {
+    text = Fs.read(path);
+    Ed.lines = [''];
+    if (text == nil) {
+        Ed.message = 'new file';
+        return nil;
+    }
+    parts = Split.split(text, strChar(10));
+    if (len(parts) > 1 && parts[len(parts) - 1] == '') { pop(parts); }
+    Ed.lines = [];
+    i = 0;
+    while (i < len(parts)) {
+        line = parts[i];
+        if (len(line) > 0 && strSub(line, len(line) - 1, len(line)) == strChar(13)) { line = strSub(line, 0, len(line) - 1); }
+        push(Ed.lines, strJoin(Split.split(line, '\t'), '    '));
+        i += 1;
+    }
+}
+
+def edSave() {
+    text = strJoin(Ed.lines, strChar(10)) + strChar(10);
+    try {
+        Fs.write(Ed.path, text);
+        Ed.modified = false;
+        Ed.message = 'saved ' + len(Ed.lines) + ' lines';
+    } catch (e) {
+        Ed.message = 'cannot save: ' + str(e);
+    }
+}
+
+// the lines without line i, order kept (Arr.removeAt moves the last element into the gap)
+def edWithout(i) {
+    return Arr.concat(Arr.slice(Ed.lines, 0, i), Arr.slice(Ed.lines, i + 1, len(Ed.lines)));
+}
+
+def edLine() {
+    return Ed.lines[Ed.row];
+}
+
+def edClamp() {
+    if (Ed.row < 0) { Ed.row = 0; }
+    if (Ed.row >= len(Ed.lines)) { Ed.row = len(Ed.lines) - 1; }
+    if (Ed.col < 0) { Ed.col = 0; }
+    if (Ed.col > len(edLine())) { Ed.col = len(edLine()); }
+}
+
+def edScroll() {
+    text = edRowsOfText();
+    if (Ed.row < Ed.top) { Ed.top = Ed.row; }
+    if (Ed.row >= Ed.top + text) { Ed.top = Ed.row - text + 1; }
+    if (Ed.col < Ed.left) { Ed.left = Ed.col; }
+    if (Ed.col >= Ed.left + Ed.columns) { Ed.left = Ed.col - Ed.columns + 1; }
+}
+
+def edPad(text, width) {
+    while (len(text) < width) { text = text + ' '; }
+    return strSub(text, 0, width);
+}
+
+// draws the rows that differ from what is on the screen, then puts the cursor
+def edDraw() {
+    edClamp();
+    edScroll();
+    out = '';
+    textRows = edRowsOfText();
+    r = 0;
+    while (r < Ed.rows) {
+        content = '';
+        isStatus = false;
+        if (r < textRows) {
+            idx = Ed.top + r;
+            if (idx < len(Ed.lines)) {
+                line = Ed.lines[idx];
+                from = Ed.left < len(line) ? Ed.left : len(line);
+                to = Ed.left + Ed.columns < len(line) ? Ed.left + Ed.columns : len(line);
+                content = strSub(line, from, to);
+            } else {
+                content = '~';
+            }
+        } else if (r == textRows) {
+            isStatus = true;
+            right = (Ed.row + 1) + ':' + (Ed.col + 1);
+            name = Ed.path + (Ed.modified ? ' [modified]' : '');
+            content = edPad(name, Ed.columns - len(right) - 1) + ' ' + right;
+        } else {
+            content = Ed.message;
+        }
+        if (content != Ed.shown[r]) {
+            Ed.shown[r] = content;
+            out = out + Term.moveTo(r + 1, 1);
+            if (isStatus) { out = out + Term.invert() + edPad(content, Ed.columns) + Term.normal(); }
+            else { out = out + content + Term.clearToEndOfLine(); }
+        }
+        r += 1;
+    }
+    out = out + Term.moveTo(Ed.row - Ed.top + 1, Ed.col - Ed.left + 1);
+    consoleWrite(out);
+}
+
+def edInsert(text) {
+    line = edLine();
+    Ed.lines[Ed.row] = strSub(line, 0, Ed.col) + text + strSub(line, Ed.col, len(line));
+    Ed.col += len(text);
+    Ed.wantCol = Ed.col;
+    Ed.modified = true;
+}
+
+def edNewline() {
+    line = edLine();
+    Ed.lines[Ed.row] = strSub(line, 0, Ed.col);
+    Ed.lines = Arr.concat(Arr.slice(Ed.lines, 0, Ed.row + 1), Arr.concat([strSub(line, Ed.col, len(line))], Arr.slice(Ed.lines, Ed.row + 1, len(Ed.lines))));
+    Ed.row += 1;
+    Ed.col = 0;
+    Ed.wantCol = 0;
+    Ed.modified = true;
+}
+
+def edBackspace() {
+    if (Ed.col > 0) {
+        line = edLine();
+        Ed.lines[Ed.row] = strSub(line, 0, Ed.col - 1) + strSub(line, Ed.col, len(line));
+        Ed.col -= 1;
+    } else if (Ed.row > 0) {
+        prev = Ed.lines[Ed.row - 1];
+        Ed.col = len(prev);
+        Ed.lines[Ed.row - 1] = prev + edLine();
+        Ed.lines = edWithout(Ed.row);
+        Ed.row -= 1;
+    } else {
+        return nil;
+    }
+    Ed.wantCol = Ed.col;
+    Ed.modified = true;
+}
+
+def edDelete() {
+    line = edLine();
+    if (Ed.col < len(line)) {
+        Ed.lines[Ed.row] = strSub(line, 0, Ed.col) + strSub(line, Ed.col + 1, len(line));
+    } else if (Ed.row + 1 < len(Ed.lines)) {
+        Ed.lines[Ed.row] = line + Ed.lines[Ed.row + 1];
+        Ed.lines = edWithout(Ed.row + 1);
+    } else {
+        return nil;
+    }
+    Ed.modified = true;
+}
+
+def edCutLine() {
+    Ed.clip = edLine();
+    if (len(Ed.lines) == 1) {
+        Ed.lines[0] = '';
+    } else {
+        Ed.lines = edWithout(Ed.row);
+    }
+    edClamp();
+    Ed.modified = true;
+    Ed.message = 'line cut';
+}
+
+def edPaste() {
+    if (Ed.clip == nil) { Ed.message = 'nothing to paste'; return nil; }
+    Ed.lines = Arr.concat(Arr.slice(Ed.lines, 0, Ed.row), Arr.concat([Ed.clip], Arr.slice(Ed.lines, Ed.row, len(Ed.lines))));
+    Ed.row += 1;
+    Ed.modified = true;
+}
+
+def edMoveVertical(delta) {
+    Ed.row += delta;
+    edClamp();
+    Ed.col = Ed.wantCol;
+    edClamp();
+}
+
+// reads a line on the message row; nil if cancelled with Esc
+def edPrompt(label) {
+    text = '';
+    while (true) {
+        Ed.message = label + text;
+        edDraw();
+        consoleWrite(Term.moveTo(Ed.rows, len(Ed.message) + 1));
+        key = Keys.read(1000);
+        if (key == nil) { continue; }
+        if (key.name == nil) { text = text + key.text; }
+        else if (key.name == 'ENTER') { Ed.message = ''; return text; }
+        else if (key.name == 'ESC' || key.name == 'CTRL-C') { Ed.message = ''; return nil; }
+        else if (key.name == 'BACKSPACE' && len(text) > 0) { text = strSub(text, 0, len(text) - 1); }
+    }
+}
+
+def edFind() {
+    needle = edPrompt('search: ');
+    if (needle == nil || needle == '') { return nil; }
+    n = len(Ed.lines);
+    i = 0;
+    while (i <= n) {
+        r = (Ed.row + i) % n;
+        from = i == 0 ? Ed.col + 1 : 0;
+        line = Ed.lines[r];
+        if (from <= len(line)) {
+            at = strFind(line, needle, from);
+            if (at >= 0) {
+                Ed.row = r;
+                Ed.col = at;
+                Ed.wantCol = at;
+                Ed.message = '';
+                return nil;
+            }
+        }
+        i += 1;
+    }
+    Ed.message = needle + ': not found';
+}
+
+def edQuit() {
+    if (Ed.modified && !Ed.quitArmed) {
+        Ed.quitArmed = true;
+        Ed.message = 'unsaved changes: Ctrl-S saves, Ctrl-X again leaves without saving';
+        return nil;
+    }
+    Ed.done = true;
+}
+
+def edKey(key) {
+    name = key.name;
+    if (name != 'CTRL-X') { Ed.quitArmed = false; }
+    if (name == nil) { edInsert(key.text); Ed.message = ''; }
+    else if (name == 'ENTER') { edNewline(); }
+    else if (name == 'TAB') { edInsert('    '); }
+    else if (name == 'BACKSPACE') { edBackspace(); }
+    else if (name == 'DEL') { edDelete(); }
+    else if (name == 'LEFT') {
+        if (Ed.col > 0) { Ed.col -= 1; } else if (Ed.row > 0) { Ed.row -= 1; Ed.col = len(edLine()); }
+        Ed.wantCol = Ed.col;
+    }
+    else if (name == 'RIGHT') {
+        if (Ed.col < len(edLine())) { Ed.col += 1; } else if (Ed.row + 1 < len(Ed.lines)) { Ed.row += 1; Ed.col = 0; }
+        Ed.wantCol = Ed.col;
+    }
+    else if (name == 'UP') { edMoveVertical(-1); }
+    else if (name == 'DOWN') { edMoveVertical(1); }
+    else if (name == 'PGUP') { edMoveVertical(-edRowsOfText()); }
+    else if (name == 'PGDN') { edMoveVertical(edRowsOfText()); }
+    else if (name == 'HOME' || name == 'CTRL-A') { Ed.col = 0; Ed.wantCol = 0; }
+    else if (name == 'END' || name == 'CTRL-E') { Ed.col = len(edLine()); Ed.wantCol = Ed.col; }
+    else if (name == 'CTRL-S') { edSave(); }
+    else if (name == 'CTRL-K') { edCutLine(); }
+    else if (name == 'CTRL-Y') { edPaste(); }
+    else if (name == 'CTRL-F') { edFind(); }
+    else if (name == 'CTRL-L') { Ed.shown = edBlankScreen(); consoleWrite(Term.clearScreen()); }
+    else if (name == 'CTRL-X') { edQuit(); }
+}
+
+def edBlankScreen() {
+    shown = [];
+    i = 0;
+    while (i < Ed.rows) {
+        push(shown, nil);
+        i += 1;
+    }
+    return shown;
+}
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: edit <file>'); return nil; }
+    Ed.path = inCwd(words[1]);
+    Ed.columns = Console.columns > 20 ? Console.columns : 80;
+    Ed.rows = Console.rows > 6 ? Console.rows : 24;
+    Ed.row = 0;
+    Ed.col = 0;
+    Ed.top = 0;
+    Ed.left = 0;
+    Ed.wantCol = 0;
+    Ed.modified = false;
+    Ed.quitArmed = false;
+    Ed.done = false;
+    Ed.clip = nil;
+    Ed.message = '';
+    edLoad(Ed.path);
+    if (Ed.message == '') { Ed.message = 'Ctrl-S save   Ctrl-X exit   Ctrl-K cut line   Ctrl-Y paste   Ctrl-F find'; }
+    Ed.shown = edBlankScreen();
+    consoleWrite(Term.esc + '[?1049h' + Term.clearScreen());
+    while (!Ed.done) {
+        edDraw();
+        key = Keys.read(1000);
+        if (key != nil) { edKey(key); }
+    }
+    consoleWrite(Term.esc + '[?1049l');
+}
+
+programMain(main);

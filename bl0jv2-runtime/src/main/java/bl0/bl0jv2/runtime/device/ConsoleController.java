@@ -32,6 +32,7 @@ public final class ConsoleController implements PortDevice {
             .onMalformedInput(CodingErrorAction.REPLACE)
             .onUnmappableCharacter(CodingErrorAction.REPLACE);
     private final ByteBuffer pending = ByteBuffer.allocate(8);
+    private final CharBuffer chars = CharBuffer.allocate(8);
     private volatile int columns = 80;
     private volatile int rows = 24;
 
@@ -57,12 +58,18 @@ public final class ConsoleController implements PortDevice {
     @Override
     public synchronized void onWrite(int port, long value) {
         if (port != TX_PORT) return;
-        pending.put((byte) value);
+        byte b = (byte) value;
+        // a plain ASCII byte with nothing half-decoded is the common case: no decoder needed
+        if (b >= 0 && pending.position() == 0) {
+            sink.accept(String.valueOf((char) b));
+            return;
+        }
+        pending.put(b);
         pending.flip();
-        CharBuffer out = CharBuffer.allocate(8);
-        decoder.decode(pending, out, false);
+        chars.clear();
+        decoder.decode(pending, chars, false);
         pending.compact();
-        out.flip();
-        if (out.hasRemaining()) sink.accept(out.toString());
+        chars.flip();
+        if (chars.hasRemaining()) sink.accept(chars.toString());
     }
 }

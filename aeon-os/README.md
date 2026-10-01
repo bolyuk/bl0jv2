@@ -11,8 +11,9 @@ aeon-os/
   smp_boot.bl0      the same on several cores
   shell.bl0         the shell: built-ins, the network commands, program launcher
   child_*.bl0       small programs boot starts
-  lib/              sys (system page), log, loader, userland (what a program imports)
-  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir
+  lib/              sys (system page), log, loader, userland (what a program imports), input (stdin),
+                    term/keys/lineedit (terminal output, key parsing, the line editor), cmdline (parser)
+  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir edit
 ```
 
 ## There is no host filesystem
@@ -46,6 +47,33 @@ aeon-os/aeon.sh                 # builds aeon.img from the sources and boots it
 (`--disk-put aeon-os/bin:bin` copies a folder, compiling every `.bl0` to a
 `.bl0c`). The image keeps its files between runs; `--disk-put` rewrites what it
 names.
+
+## The terminal
+
+The console is a serial terminal, modelled as two devices (see the main README): the
+guest writes UTF-8 bytes - with ANSI escape sequences for the cursor and the screen -
+to a port, and reads the bytes the terminal sends from a FIFO behind another. So the
+OS needs nothing from the host but a terminal: `-k` puts the host terminal in raw mode
+(Unix: via `stty`; elsewhere it stays in line mode and shows its own echo too) and
+passes size and keys through.
+
+* **Line editor** (`lib/lineedit.bl0`): any Unicode, Backspace/Delete, arrows, Home/End,
+  Ctrl-A/E/U/K/W, Ctrl-Left/Right and Alt-B/F by word, Ctrl-L, history (Up/Down, kept in
+  `var/history`), Tab completion of commands and paths (a second Tab lists), Ctrl-C,
+  Ctrl-D. A line longer than the screen wraps and edits correctly.
+* **Quoting, pipes, redirection**: `'literal'`, `"with \n \t \" \\"`, `\` before a
+  character; `a | b | c`, `< in`, `> out`, `>> out`. A pipe is a temporary file
+  (`var/tmp/pipe<N>`): stages run one after another, the output of one is the input of
+  the next. Programs write with `say()`, read with `inputText()` (`cat`, `grep`, `wc`,
+  `head`, `tail`, `hexdump` are filters; with no file and no redirection they read the
+  terminal until Ctrl-D) and report problems with `sayErr()`, which is always the
+  terminal.
+* **`edit <file>`**: a full-screen editor on the alternate screen: arrows, PgUp/PgDn,
+  Home/End, typing, Enter, Backspace/Delete, Ctrl-S save, Ctrl-X exit (twice to discard),
+  Ctrl-K/Ctrl-Y cut and paste a line, Ctrl-F find. Works on `host/` paths too.
+
+Limits: one terminal cell per character (no double-width or combining marks), no job
+control, stages of a pipeline do not run concurrently.
 
 ## Moving files in and out
 
