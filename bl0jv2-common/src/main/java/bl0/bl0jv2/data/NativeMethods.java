@@ -35,4 +35,6 @@ public final class NativeMethods {
     public static final byte SIGNAL_EVENT = 0x13;
     public static final byte WAIT_EVENT = 0x14;
     public static final byte EVENT_GEN = 0x15;
+    // inter-processor interrupt: raises a vector on ONE specific core
+    public static final byte RAISE_INTERRUPT_ON = 0x16;
 }

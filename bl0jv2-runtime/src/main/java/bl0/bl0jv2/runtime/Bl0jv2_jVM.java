@@ -175,6 +175,20 @@ public final class Bl0jv2_jVM {
             interrupts.raiseInterrupt((int) v);
             return null;
         });
+        // raiseInterruptOn(core, vector): arrives as a 2-element array [core,
+        // vector] (see Bl0jv2_Compiler's compileRaiseInterruptOn). An IPI -
+        // only that core's own poll will ever deliver it. Ungated, same as
+        // raiseInterrupt().
+        nativeMethods.put(NativeMethods.RAISE_INTERRUPT_ON, (arg) -> {
+            if (!(arg instanceof Bl0jArray args) || args.length() != 2)
+                throw new Bl0j_VM_Exception("raiseInterruptOn: expected (core, vector)");
+            if (!(unbox(args.getRaw(0)) instanceof Integer core) || !(unbox(args.getRaw(1)) instanceof Integer vector))
+                throw new Bl0j_VM_Exception("raiseInterruptOn: core and vector must be ints");
+            if (core < 0 || core >= coreCount)
+                throw new Bl0j_VM_Exception("raiseInterruptOn: no such core " + core + " (core count " + coreCount + ")");
+            interrupts.raiseInterruptOn(core, vector);
+            return null;
+        });
         // masking is per-core state (see CoreContext.disableDepth's own
         // comment) - a counter, not a flag, so nested disable/enable pairs
         // nest safely; an unbalanced enableInterrupts() is a permissive
@@ -257,7 +271,7 @@ public final class Bl0jv2_jVM {
             CoreContext ctx = currentContext();
             try {
                 return event.await(seenGen,
-                        timeout, () -> panicked || (ctx.disableDepth == 0 && interrupts.hasPending()));
+                        timeout, () -> panicked || (ctx.disableDepth == 0 && interrupts.hasPending(ctx.coreId)));
             } catch (InterruptedException e) {
                 return false;
             }
@@ -287,7 +301,7 @@ public final class Bl0jv2_jVM {
         nativeMethods.put(NativeMethods.HALT_CORE, (ignored) -> {
             CoreContext ctx = currentContext();
             requirePrivileged(ctx, "haltCore");
-            while (!interrupts.hasPending() && !panicked) {
+            while (!interrupts.hasPending(ctx.coreId) && !panicked) {
                 try {
                     Thread.sleep(1);
                 } catch (InterruptedException e) {
@@ -1042,7 +1056,7 @@ public final class Bl0jv2_jVM {
                     // skipped while this core is masked, so a pending
                     // interrupt stays queued rather than being dropped
                     if (ctx.disableDepth == 0) {
-                        InterruptController.Fired fired = interrupts.pollNext();
+                        InterruptController.Fired fired = interrupts.pollNext(ctx.coreId);
                         if (fired != null)
                             invokeAsTrap(fired.handlerFn(), NanBox.ofInt(fired.vector()));
                     }

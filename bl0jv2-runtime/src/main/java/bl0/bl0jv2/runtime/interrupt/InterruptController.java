@@ -2,9 +2,10 @@ package bl0.bl0jv2.runtime.interrupt;
 
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -34,12 +35,12 @@ public final class InterruptController {
 
     private record HandlerEntry(Object fn, int priority) {}
 
-    private record PendingInterrupt(int vector, int priority) implements Comparable<PendingInterrupt> {
-        @Override
-        public int compareTo(PendingInterrupt other) {
-            return Integer.compare(other.priority, priority); // higher priority first
-        }
-    }
+    // target == ANY_CORE: whichever core polls first takes it (every
+    // ordinary device IRQ); otherwise only that core ever will (an IPI -
+    // see raiseInterruptOn)
+    public static final int ANY_CORE = -1;
+
+    private record PendingInterrupt(int vector, int priority, int target) {}
 
     // 256 entries, matching a real x86 IDT's fixed size - registerHandler/
     // raiseInterrupt/handlerFor all reject anything outside this range, so
@@ -47,7 +48,10 @@ public final class InterruptController {
     private static final int VECTOR_COUNT = 256;
 
     private final Map<Integer, HandlerEntry> handlers = new ConcurrentHashMap<>();
-    private final PriorityBlockingQueue<PendingInterrupt> pending = new PriorityBlockingQueue<>();
+    // guarded by its own monitor; highest priority wins, ties go to the
+    // one raised first. A plain list (not a PriorityBlockingQueue) because
+    // a core has to skip entries addressed to a different core.
+    private final List<PendingInterrupt> pending = new ArrayList<>();
     private int pollInterval = 5;
 
     // one monitor shared by every blocking waiter (Bl0jEvent.await) and by
@@ -83,10 +87,23 @@ public final class InterruptController {
     }
 
     public void raiseInterrupt(int vector) {
+        raiseInterruptOn(ANY_CORE, vector);
+    }
+
+    /**
+     * Inter-processor interrupt: only core {@code targetCore} will ever take
+     * this one (ANY_CORE = the ordinary "first core to poll" behaviour).
+     * The target must be a real core - the caller range-checks it against
+     * the core count, this class doesn't know it.
+     */
+    public void raiseInterruptOn(int targetCore, int vector) {
         checkVector(vector);
         HandlerEntry entry = handlers.get(vector);
-        if (entry != null)
-            pending.offer(new PendingInterrupt(vector, entry.priority()));
+        if (entry != null) {
+            synchronized (pending) {
+                pending.add(new PendingInterrupt(vector, entry.priority(), targetCore));
+            }
+        }
         wakeWaiters();
     }
 
@@ -108,21 +125,37 @@ public final class InterruptController {
     // interrupt staying asserted while masked. A vector unregistered
     // between raise and poll is treated as dropped, same as one that was
     // never registered.
-    public Fired pollNext() {
-        PendingInterrupt next = pending.poll();
-        if (next == null)
-            return null;
+    public Fired pollNext(int coreId) {
+        PendingInterrupt next = null;
+        synchronized (pending) {
+            for (PendingInterrupt p : pending) {
+                if (p.target() != ANY_CORE && p.target() != coreId)
+                    continue;
+                if (next == null || p.priority() > next.priority())
+                    next = p;
+            }
+            if (next == null)
+                return null;
+            pending.remove(next); // removes the first equal entry - same vector/priority/target, indistinguishable
+        }
         HandlerEntry entry = handlers.get(next.vector());
         if (entry == null)
             return null;
         return new Fired(next.vector(), entry.fn());
     }
 
-    // used by haltCore() to block a core until there's something worth
-    // waking up for, without actually consuming it (that's pollNext()'s
-    // job, respecting priority and the caller's own masking state)
-    public boolean hasPending() {
-        return !pending.isEmpty();
+    // used by haltCore()/waitEvent() to block a core until there's
+    // something worth waking up for, without actually consuming it
+    // (that's pollNext()'s job, respecting priority and the caller's own
+    // masking state). Per core: an IPI for another core is not worth
+    // waking this one up for.
+    public boolean hasPending(int coreId) {
+        synchronized (pending) {
+            for (PendingInterrupt p : pending)
+                if (p.target() == ANY_CORE || p.target() == coreId)
+                    return true;
+            return false;
+        }
     }
 
     public int pollInterval() {
@@ -135,6 +168,8 @@ public final class InterruptController {
 
     public void reset() {
         handlers.clear();
-        pending.clear();
+        synchronized (pending) {
+            pending.clear();
+        }
     }
 }

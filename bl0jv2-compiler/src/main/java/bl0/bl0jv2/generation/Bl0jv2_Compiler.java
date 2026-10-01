@@ -489,6 +489,32 @@ public final class Bl0jv2_Compiler {
         return result;
     }
 
+    // raiseInterruptOn(core, vector): packs (core, vector) into a 2-element
+    // array for the one-operand native, the same way waitEvent packs its
+    // three. Returns nil.
+    private Integer compileRaiseInterruptOn(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "raiseInterruptOn", 2))
+            return null;
+
+        int coreReg = compileInner(funCall.args.get(0));
+        int vectorReg = compileInner(funCall.args.get(1));
+
+        int startReg = regIndex++;
+        _emit(OpCodes.MOV, regIndex, coreReg);
+        regIndex++;
+        _emit(OpCodes.MOV, regIndex, vectorReg);
+        regIndex++;
+        _emit(OpCodes.NEW_ARRAY, startReg, 2);
+
+        int arrRef = regIndex++; // see compileWaitEvent on why the array is freed
+        _emit(OpCodes.MOV, arrRef, startReg);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.RAISE_INTERRUPT_ON, startReg);
+        _emit(OpCodes.FREE, arrRef);
+
+        _emit(OpCodes.LOAD_NIL, startReg);
+        return startReg;
+    }
+
     // eventGen(e): 1-arg, value-producing (the event's current generation) -
     // same shape as exec(path)
     private Integer compileEventGen(FunCall funCall) {
@@ -927,6 +953,7 @@ public final class Bl0jv2_Compiler {
         if ((r = compileUnlockMutex(funCall)) != null) return r;
         if ((r = compileNewEvent(funCall)) != null) return r;
         if ((r = compileSignalEvent(funCall)) != null) return r;
+        if ((r = compileRaiseInterruptOn(funCall)) != null) return r;
         if ((r = compileEventGen(funCall)) != null) return r;
         if ((r = compileWaitEvent(funCall)) != null) return r;
         if ((r = compileRaiseInterrupt(funCall)) != null) return r;
