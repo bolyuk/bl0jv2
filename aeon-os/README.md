@@ -12,8 +12,7 @@ aeon-os/
   shell.bl0         the shell: built-ins, the network commands, program launcher
   child_*.bl0       small programs boot starts
   lib/              sys (system page), log, loader, userland (what a program imports)
-  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir,
-                    and hls hcat hget hput hrm for the host folder shared with --bridge-fs
+  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir
 ```
 
 ## There is no host filesystem
@@ -50,9 +49,12 @@ names.
 
 ## Moving files in and out
 
-`aeon.sh` shares `./share` (override with `SHARE=dir`) with `--bridge-fs`. In the
-shell: `hls`, `hcat <name>`, `hget <name> [as]` (host -> disk), `hput <name> [as]`
-(disk -> host), `hrm <name>`. The host only ever exposes that one folder.
+`aeon.sh` shares `./share` (override with `SHARE=dir`) with `--bridge-fs`. It
+shows up as the directory `host/`, part of the same tree as the disk: `ls host`,
+`cat host/notes.txt`, `cp host/a.txt a.txt`, `cp report.txt host/`,
+`mv a.txt host/b.txt`, `mkdir host/out`, `rm host/old.txt` - the same programs,
+the same library calls (`Fs.read('host/x')`), no separate commands. The host
+exposes only that one folder.
 
 ## Adding a command
 

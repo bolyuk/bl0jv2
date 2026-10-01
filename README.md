@@ -269,8 +269,10 @@ old contents. Errors are `try/catch`-able messages starting `fs: `. After
 a syscall (vector 6), while the sector buffer is read with `peek`/`poke`.
 
 `--bridge-fs DIR` additionally shows ONE host folder through a second device
-(share ports `0x0F10`-`0x0F28`, DMA like the disk): `stdlib/fs/hostfs.bl0` offers
-`Hfs.list/size/read/write/remove/mkdir`. The host resolves every path against
+(share ports `0x0F10`-`0x0F28`, DMA like the disk): `stdlib/fs/hostfs.bl0` is its
+driver (`Hfs.list/size/read/write/remove/mkdir`), and `Fs` mounts the folder as
+the directory `host/` of its own namespace, so code uses the same `Fs`/`Dirs`
+calls, the same shell programs, for the disk and the host folder alike. The host resolves every path against
 that folder and refuses `..`, absolute paths and symlinks that lead out; nothing
 else of the host is reachable, and without the flag there is no device at all.
 

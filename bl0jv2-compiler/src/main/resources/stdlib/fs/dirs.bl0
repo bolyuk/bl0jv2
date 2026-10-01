@@ -10,6 +10,8 @@ import 'path.bl0';
 def class Dirs {
     static def isDir(dir) {
         if (dir == '') { return true; }
+        shared = Fs.hostIsDir(dir); // the shared host folder (host/...) knows its own folders
+        if (shared != nil) { return shared; }
         return len(Fs.list(dir + '/')) > 0;
     }
 

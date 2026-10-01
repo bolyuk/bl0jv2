@@ -23,12 +23,20 @@
 // only then does the directory entry switch to them, so a write that fails
 // halfway (disk full, power cut) leaves the old contents intact.
 //
+// The folder the host shares (--bridge-fs, see hostfs.bl0) appears as the
+// directory 'host/' of this same namespace, when one is attached: every call
+// below - read, write, append, remove, rename, size, list, mkdir via a name ending
+// in '/' - works on it exactly as on the disk, and rename/copy-by-readData can
+// cross between the two. Code never needs to know which one it is talking to.
+// (Disk-only limits - 47-byte names, the 128-entry directory - do not apply there.)
+//
 // Errors are exceptions whose message starts with "fs: " (catch them with
 // try/catch); "not found" is a nil/false return instead. Every public call
 // takes Fs.lock, so cores may share the filesystem.
 
 import 'disk.bl0';
 import '../str/utf8.bl0';
+import 'hostfs.bl0';
 
 def class Fs {
     static field lock;
@@ -365,6 +373,58 @@ def class Fs {
         Fs.doMount();
     }
 
+    // ---- the shared host folder, mounted at 'host/' ----
+
+    // the path inside the shared folder for a name under 'host/', nil if the name is
+    // on the disk (also when no folder is attached: then 'host' is an ordinary name)
+    static def host(name) {
+        if (!Hfs.present) { return nil; }
+        if (name == 'host' || name == 'host/') { return ''; }
+        if (strFind(name, 'host/', 0) != 0) { return nil; }
+        rel = strSub(name, 5, len(name));
+        if (len(rel) > 0 && strSub(rel, len(rel) - 1, len(rel)) == '/') { rel = strSub(rel, 0, len(rel) - 1); }
+        return rel;
+    }
+
+    // true/false for a name under 'host/', nil for a disk name
+    static def hostIsDir(name) {
+        rel = Fs.host(name);
+        if (rel == nil) { return nil; }
+        if (rel == '') { return true; }
+        return Hfs.size(rel) == -2;
+    }
+
+    static def hostList(prefix) {
+        rest = strSub(prefix, 5, len(prefix));
+        cut = -1;
+        i = len(rest) - 1;
+        while (i >= 0 && cut < 0) {
+            if (strSub(rest, i, i + 1) == '/') { cut = i; }
+            i -= 1;
+        }
+        dir = cut < 0 ? '' : strSub(rest, 0, cut);
+        start = strSub(rest, cut + 1, len(rest));
+        out = [];
+        names = [];
+        try {
+            names = Hfs.list(dir);
+        } catch (e) {
+            return out;
+        }
+        i = 0;
+        while (i < len(names)) {
+            n = names[i];
+            folder = strSub(n, len(n) - 1, len(n)) == '/';
+            base = folder ? strSub(n, 0, len(n) - 1) : n;
+            if (strFind(base, start, 0) == 0) {
+                full = dir == '' ? base : dir + '/' + base;
+                push(out, ['host/' + full + (folder ? '/' : ''), folder ? 0 : Hfs.size(full)]);
+            }
+            i += 1;
+        }
+        return out;
+    }
+
     // ---- operations (called with the lock held) ----
 
     static def need() {
@@ -372,6 +432,17 @@ def class Fs {
     }
 
     static def doWrite(name, text) {
+        rel = Fs.host(name);
+        if (rel != nil) {
+            if (strSub(name, len(name) - 1, len(name)) == '/') {
+                Hfs.mkdir(rel);
+            } else {
+                data = Utf8.encode(text);
+                Hfs.write(rel, data);
+                free(data);
+            }
+            return nil;
+        }
         Fs.need();
         nb = Fs.encodeName(name);
         data = Utf8.encode(text);
@@ -383,6 +454,20 @@ def class Fs {
     // adds to the end of a file: fills the last sector, then chains new ones, so
     // the cost does not grow with the file (a log can be appended to forever)
     static def doAppend(name, text) {
+        rel = Fs.host(name);
+        if (rel != nil) {
+            old = Hfs.size(rel) >= 0 ? Hfs.read(rel) : [];
+            extra = Utf8.encode(text);
+            i = 0;
+            while (i < len(extra)) {
+                push(old, extra[i]);
+                i += 1;
+            }
+            Hfs.write(rel, old);
+            free(extra);
+            free(old);
+            return nil;
+        }
         Fs.need();
         nb = Fs.encodeName(name);
         extra = Utf8.encode(text);
@@ -461,6 +546,14 @@ def class Fs {
     }
 
     static def doRead(name) {
+        rel = Fs.host(name);
+        if (rel != nil) {
+            bytes = Fs.hostBytes(rel);
+            if (bytes == nil) { return nil; }
+            text = Utf8.decode(bytes);
+            free(bytes);
+            return text;
+        }
         Fs.need();
         nb = Fs.encodeName(name);
         e = Fs.lookup(nb);
@@ -475,6 +568,8 @@ def class Fs {
 
     // the file as an array of bytes (nil if missing) - for binary data
     static def doReadData(name) {
+        rel = Fs.host(name);
+        if (rel != nil) { return Fs.hostBytes(rel); }
         Fs.need();
         nb = Fs.encodeName(name);
         e = Fs.lookup(nb);
@@ -485,6 +580,11 @@ def class Fs {
     }
 
     static def doWriteData(name, bytes) {
+        rel = Fs.host(name);
+        if (rel != nil) {
+            Hfs.write(rel, bytes);
+            return nil;
+        }
         Fs.need();
         nb = Fs.encodeName(name);
         Fs.store(nb, bytes);
@@ -492,6 +592,11 @@ def class Fs {
     }
 
     static def doSize(name) {
+        rel = Fs.host(name);
+        if (rel != nil) {
+            n = Hfs.size(rel);
+            return n < 0 ? -1 : n;
+        }
         Fs.need();
         nb = Fs.encodeName(name);
         e = Fs.lookup(nb);
@@ -501,6 +606,12 @@ def class Fs {
     }
 
     static def doRemove(name) {
+        rel = Fs.host(name);
+        if (rel != nil) {
+            if (rel == '' || Hfs.size(rel) == -1) { return false; }
+            Hfs.remove(rel);
+            return true;
+        }
         Fs.need();
         nb = Fs.encodeName(name);
         e = Fs.lookup(nb);
@@ -513,6 +624,7 @@ def class Fs {
     }
 
     static def doRename(from, to) {
+        if (Fs.host(from) != nil || Fs.host(to) != nil) { return Fs.moveAcross(from, to); }
         Fs.need();
         fb = Fs.encodeName(from);
         tb = Fs.encodeName(to);
@@ -535,8 +647,27 @@ def class Fs {
         return true;
     }
 
+    // rename where one side is the shared folder: copy, then delete the original
+    static def moveAcross(from, to) {
+        data = Fs.doReadData(from);
+        if (data == nil) { return false; }
+        if (Fs.doSize(to) >= 0) {
+            free(data);
+            throw('fs: ' + to + ' already exists');
+        }
+        Fs.doWriteData(to, data);
+        free(data);
+        Fs.doRemove(from);
+        return true;
+    }
+
     // array of [name, size], sorted by name, for the files whose name starts with 'prefix'
     static def doList(prefix) {
+        if (strFind(prefix, 'host/', 0) == 0 && Hfs.present) {
+            result = Fs.hostList(prefix);
+            Fs.sortEntries(result);
+            return result;
+        }
         Fs.need();
         result = [];
         count = Fs.dirSectors << 3;
@@ -559,7 +690,14 @@ def class Fs {
             }
             e += 1;
         }
-        // insertion sort: at most 128 entries
+        // the shared folder shows up as a directory of the root
+        if (Hfs.present && strFind('host/', prefix, 0) == 0) { push(result, ['host/', 0]); }
+        Fs.sortEntries(result);
+        return result;
+    }
+
+    // insertion sort by name
+    static def sortEntries(result) {
         i = 1;
         while (i < len(result)) {
             item = result[i];
@@ -571,7 +709,14 @@ def class Fs {
             result[j + 1] = item;
             i += 1;
         }
-        return result;
+    }
+
+    // a file under 'host/' as bytes; nil if missing
+    static def hostBytes(rel) {
+        n = Hfs.size(rel);
+        if (n == -1) { return nil; }
+        if (n == -2) { throw('fs: host/' + rel + ' is a folder'); }
+        return Hfs.read(rel);
     }
 
     // [total sectors, data sectors, free data sectors, files]

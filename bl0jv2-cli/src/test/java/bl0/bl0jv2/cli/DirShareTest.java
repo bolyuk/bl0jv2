@@ -86,4 +86,32 @@ class DirShareTest {
         Path share = Files.createDirectories(dir.resolve("share"));
         assertThrows(IOException.class, () -> new DirShare(share).delete(""));
     }
+
+    // the same Fs calls that work on the disk work on host/ - and across the two
+    @Test
+    void fsMountsTheSharedFolderAsTheDirectoryHost(@TempDir Path dir) throws IOException {
+        Path share = Files.createDirectories(dir.resolve("share"));
+        Files.writeString(share.resolve("a.txt"), "from host");
+        Path entry = dir.resolve("entry.bl0");
+        Files.writeString(entry, "import 'stdlib/fs/dirs.bl0'; Disk.init(8192); Hfs.init(20000, 21000); Fs.format(); " +
+                "print Fs.read('host/a.txt') + '|' + str(Fs.size('host/a.txt')) + '|' + str(Dirs.isDir('host')) + '|' + str(Fs.list('')[0][0]) + '|'; " +
+                "Fs.write('host/b.txt', 'to host'); Fs.append('host/b.txt', '!'); Dirs.mkdir('host/d'); Fs.write('host/d/c', 'deep'); " +
+                "Fs.write('disk.txt', 'on disk'); Fs.rename('disk.txt', 'host/moved.txt'); " +
+                "Fs.writeData('host/copy', Fs.readData('host/a.txt')); " +
+                "print str(Dirs.list('host')) + '|' + str(Fs.exists('disk.txt')) + '|'; " +
+                "try { Dirs.rmdir('host/d'); } catch (e) { print e; } Fs.remove('host/d/c'); print '|' + str(Dirs.rmdir('host/d')) + '|' + str(Fs.remove('host/zzz'));");
+        String out = Bl0jv2_TestRunner.runFile(entry, vm -> {
+            try {
+                vm.attach_disk(new bl0.bl0jv2.runtime.device.MemoryDisk(64));
+                vm.attach_share(new DirShare(share));
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        assertEquals("from host|9|true|host/|[[a.txt, 9, false], [b.txt, 8, false], [copy, 9, false], [d, 0, true], [moved.txt, 7, false]]|false|fs: host/d is not empty|true|false", out);
+        assertEquals("to host!", Files.readString(share.resolve("b.txt")));
+        assertEquals("on disk", Files.readString(share.resolve("moved.txt")));
+        assertEquals("from host", Files.readString(share.resolve("copy")));
+        assertEquals(false, Files.exists(share.resolve("d")));
+    }
 }

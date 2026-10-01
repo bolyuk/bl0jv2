@@ -23,39 +23,55 @@ class ShellHostFsTest {
     }
 
     @Test
-    void filesMoveBetweenTheHostFolderAndTheDisk(@TempDir Path dir) throws Exception {
+    void theHostFolderIsJustADirectoryOfTheTree(@TempDir Path dir) throws Exception {
         Path share = Files.createDirectories(dir.resolve("share"));
         Files.writeString(share.resolve("in.txt"), "from the host\nline two\n");
         var s = AeonSession.shellOn(dir.resolve("d.img"), true, share);
 
-        command(s, "hls", "in.txt");
-        command(s, "hcat in.txt", "line two");
-        command(s, "hget in.txt copy.txt", "23 bytes from host:in.txt to copy.txt");
+        command(s, "ls", "<dir>  host/");
+        command(s, "ls host", "in.txt");
+        command(s, "cat host/in.txt", "line two");
+        command(s, "grep two host/in.txt", "line two");
+        command(s, "cp host/in.txt copy.txt", "$ ");
         command(s, "cat copy.txt", "from the host");
 
         command(s, "echo made in aeon > out.txt", "$ ");
-        command(s, "hput out.txt", "bytes from out.txt to host:out.txt");
+        command(s, "cp out.txt host/out.txt", "$ ");
         assertEquals("made in aeon\n", Files.readString(share.resolve("out.txt")));
+        command(s, "mkdir host/sub", "$ ");
+        command(s, "mv out.txt host/sub/moved.txt", "$ ");
+        assertEquals("made in aeon\n", Files.readString(share.resolve("sub/moved.txt")));
+        command(s, "cd host/sub", "/host/sub $ ");
+        command(s, "ls", "moved.txt");
+        command(s, "cd /", "$ ");
+        command(s, "echo more >> host/in.txt", "$ ");
+        assertEquals("from the host\nline two\nmore\n", Files.readString(share.resolve("in.txt")));
 
-        command(s, "hrm in.txt", "$ ");
+        command(s, "rm host/in.txt", "$ ");
         assertTrue(!Files.exists(share.resolve("in.txt")));
-        command(s, "hcat in.txt", "no such file");
+        command(s, "cat host/in.txt", "no such file");
+        command(s, "rm host/sub/moved.txt", "$ ");
+        command(s, "rmdir host/sub", "$ ");
+        assertTrue(!Files.exists(share.resolve("sub")));
         command(s, "whoami", "user");
     }
 
     @Test
-    void theHostRefusesToLeaveTheFolder(@TempDir Path dir) throws Exception {
+    void theHostFolderCannotBeEscapedFromTheShell(@TempDir Path dir) throws Exception {
         Path share = Files.createDirectories(dir.resolve("share"));
         Files.writeString(dir.resolve("secret.txt"), "top secret");
         var s = AeonSession.shellOn(dir.resolve("d.img"), true, share);
-        command(s, "hcat ../secret.txt", "refused by the host");
-        command(s, "hget ../secret.txt", "refused by the host");
+        // the shell folds ".." away before anything reaches the host, so this names a DISK file
+        command(s, "cat host/../secret.txt", "no such file");
+        command(s, "cp host/../../secret.txt x", "no such file");
         assertTrue(!s.output().contains("top secret"), s.output());
     }
 
     @Test
-    void withoutTheBridgeTheCommandsExplain(@TempDir Path dir) throws Exception {
+    void withoutTheBridgeThereIsNoHostDirectory(@TempDir Path dir) throws Exception {
         var s = AeonSession.shellOnOsDisk(dir);
-        command(s, "hls", "no host folder attached");
+        command(s, "ls host", "no such folder");
+        command(s, "echo x > host", "$ "); // 'host' is then an ordinary disk name
+        command(s, "cat host", "x");
     }
 }
