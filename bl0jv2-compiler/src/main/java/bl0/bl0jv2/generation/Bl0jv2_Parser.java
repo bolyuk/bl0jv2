@@ -179,9 +179,29 @@ public final class Bl0jv2_Parser {
             return new ImportNode(path);
         }
 
+        Token startToken = peek_t();
         Node node = assign_evaluation();
+        if (hasNoEffect(node))
+            gen_exception(startToken, "this statement has no effect (its value is computed and thrown away) - a missing ';' or operator?");
         consume_if(SemicolonToken.class);
         return node;
+    }
+
+    // an expression statement that does nothing but compute a value: a bare
+    // literal or variable, or arithmetic/comparison between them. Calls,
+    // assignments, ++/--, ternaries and &&/|| (used as 'cond && f()') are
+    // all legitimate statements and are not flagged.
+    private static boolean hasNoEffect(Node node) {
+        if (node instanceof DataNode || node instanceof IdentityNode)
+            return true;
+        if (node instanceof BinaryNode b) {
+            return switch (b.op) {
+                case PLUS, MINUS, STAR, STAR_STAR, DIV, REMAINDER, EQUALS, NOT_EQUALS, LESS, GREATER,
+                     LESS_EQUALS, GREATER_EQUALS, BIT_AND, BIT_OR, BIT_XOR, SHIFT_LEFT, SHIFT_RIGHT, SHIFT_RIGHT_UNSIGNED -> true;
+                default -> false;
+            };
+        }
+        return false;
     }
 
     // --- DEFINITIONS ---
@@ -333,7 +353,7 @@ public final class Bl0jv2_Parser {
 
         if (t instanceof NumberToken numberToken) {
             pos++;
-            return parseNumberLiteral(numberToken.value);
+            return parseNumberLiteral(numberToken);
         }
         if (t instanceof StringToken stringToken) {
             pos++;
@@ -356,19 +376,32 @@ public final class Bl0jv2_Parser {
     // pattern like 0xFFFFFFFF is a valid literal even though it's negative
     // as a signed int - the whole reason to write one in hex in the first
     // place (kernel-style code: masks, addresses)
-    private Node parseNumberLiteral(String value) {
-        if (value.indexOf('.') >= 0)
-            return new FloatNode(Double.parseDouble(value));
+    private Node parseNumberLiteral(NumberToken token) {
+        String value = token.value;
 
         if (value.length() > 2 && value.charAt(0) == '0') {
             char prefix = value.charAt(1);
-            if (prefix == 'x' || prefix == 'X')
-                return new NumberNode(Integer.parseUnsignedInt(value.substring(2), 16));
-            if (prefix == 'b' || prefix == 'B')
-                return new NumberNode(Integer.parseUnsignedInt(value.substring(2), 2));
+            try {
+                if (prefix == 'x' || prefix == 'X')
+                    return new NumberNode(Integer.parseUnsignedInt(value.substring(2), 16));
+                if (prefix == 'b' || prefix == 'B')
+                    return new NumberNode(Integer.parseUnsignedInt(value.substring(2), 2));
+            } catch (NumberFormatException e) {
+                gen_exception(token, "integer literal " + value + " does not fit in 32 bits");
+            }
         }
 
-        return new NumberNode(Integer.parseInt(value));
+        // a '.' or an exponent makes it a float (checked after the 0x/0b
+        // prefixes: 0xE5 has an 'E' but is a hex integer)
+        if (value.indexOf('.') >= 0 || value.indexOf('e') >= 0 || value.indexOf('E') >= 0)
+            return new FloatNode(Double.parseDouble(value));
+
+        try {
+            return new NumberNode(Integer.parseInt(value));
+        } catch (NumberFormatException e) {
+            gen_exception(token, "integer literal " + value + " is out of range (int is 32-bit: -2147483648..2147483647) - write it as a float, e.g. " + value + ".0");
+            return null;
+        }
     }
 
     // --- STATEMENTS ---
@@ -938,7 +971,7 @@ public final class Bl0jv2_Parser {
 
         if (t instanceof NumberToken numberToken) {
             pos++;
-            return parseNumberLiteral(numberToken.value);
+            return parseNumberLiteral(numberToken);
         }
 
         if(t instanceof StringToken stringToken) {
@@ -972,12 +1005,12 @@ public final class Bl0jv2_Parser {
                     values.add(assign_evaluation());
                 }
                 if (!(peek_t() instanceof RParenToken))
-                    throw new Bl0j_ParserException(-1, -1, "expected ')'");
+                    gen_exception(peek_t(), "expected ')'");
                 pos++;
                 return new TupleNode(values);
             } else {
                 if (!(peek_t() instanceof RParenToken))
-                    throw new Bl0j_ParserException(-1, -1, "expected ')'");
+                    gen_exception(peek_t(), "expected ')'");
                 pos++;
                 return first;
             }
