@@ -1,0 +1,558 @@
+// A small filesystem for the block device behind stdlib/fs/disk.bl0.
+// Everything lives in bl0 and talks to the disk only through
+// Disk.read(sector) / Disk.write(sector) and the sector buffer, so it moves to
+// another machine with nothing but a new Disk driver.
+//
+// Layout (512-byte sectors, all integers 32-bit big-endian, the byte order of
+// peek32/poke32):
+//   sector 0            superblock: magic 'BL0F', version, total sectors,
+//                       fatStart, fatSectors, dirStart, dirSectors, dataStart
+//   FAT                 one 32-bit entry per data sector: 0 = free, -1 = last
+//                       sector of a file, otherwise (next data sector + 1)
+//   directory           64-byte entries, 8 per sector: name (UTF-8, zero
+//                       padded, at most 47 bytes) at 0, first data sector + 1
+//                       at 48 (0 = empty file), size in bytes at 52. An entry
+//                       whose first name byte is 0 is free.
+//   data                the rest
+//
+// The namespace is flat: a name may contain '/', which is just a character -
+// ls takes a prefix, so "docs/a.txt" behaves like a file in a folder, but
+// there are no directories to create or remove.
+//
+// A file's new contents are written to freshly allocated sectors first and
+// only then does the directory entry switch to them, so a write that fails
+// halfway (disk full, power cut) leaves the old contents intact.
+//
+// Errors are exceptions whose message starts with "fs: " (catch them with
+// try/catch); "not found" is a nil/false return instead. Every public call
+// takes Fs.lock, so cores may share the filesystem.
+
+import 'disk.bl0';
+import '../str/utf8.bl0';
+
+def class Fs {
+    static field lock;
+    static field mounted;
+    static field magic;
+    static field total;
+    static field fatStart;
+    static field fatSectors;
+    static field dirStart;
+    static field dirSectors;
+    static field dataStart;
+    static field dataSectors;
+    static field hint;        // where the next free-sector search starts
+    static field freeSlot;    // set by lookup(): first empty directory entry, -1 if none
+
+    // ---- sector buffer helpers ----
+
+    static def readSector(s) {
+        if (!Disk.read(s)) { throw('fs: cannot read sector ' + s); }
+    }
+
+    static def writeSector(s) {
+        if (!Disk.write(s)) { throw('fs: cannot write sector ' + s); }
+    }
+
+    static def zeroBuffer() {
+        i = 0;
+        while (i < 512) {
+            poke32(Disk.bufAddr + i, 0);
+            i += 4;
+        }
+    }
+
+    // ---- FAT ----
+
+    static def fatGet(d) {
+        Fs.readSector(Fs.fatStart + (d >> 7));
+        return peek32(Disk.bufAddr + ((d & 127) << 2));
+    }
+
+    static def fatSet(d, value) {
+        Fs.readSector(Fs.fatStart + (d >> 7));
+        poke32(Disk.bufAddr + ((d & 127) << 2), value);
+        Fs.writeSector(Fs.fatStart + (d >> 7));
+    }
+
+    // claims a free data sector as the end of a chain; -1 when the disk is full
+    static def allocate() {
+        n = Fs.dataSectors;
+        d = Fs.hint;
+        checked = 0;
+        while (checked < n) {
+            if (d >= n) { d = 0; }
+            sec = Fs.fatStart + (d >> 7);
+            first = (d >> 7) << 7;
+            Fs.readSector(sec);
+            idx = d - first;
+            while (idx < 128 && first + idx < n && checked < n) {
+                if (peek32(Disk.bufAddr + (idx << 2)) == 0) {
+                    poke32(Disk.bufAddr + (idx << 2), -1);
+                    Fs.writeSector(sec);
+                    Fs.hint = first + idx + 1;
+                    return first + idx;
+                }
+                idx += 1;
+                checked += 1;
+            }
+            d = first + 128;
+        }
+        return -1;
+    }
+
+    static def freeCount() {
+        n = Fs.dataSectors;
+        free = 0;
+        d = 0;
+        while (d < n) {
+            Fs.readSector(Fs.fatStart + (d >> 7));
+            idx = 0;
+            while (idx < 128 && d + idx < n) {
+                if (peek32(Disk.bufAddr + (idx << 2)) == 0) { free += 1; }
+                idx += 1;
+            }
+            d += 128;
+        }
+        return free;
+    }
+
+    // number of sectors in the chain starting at 'first' (a directory-entry value, 0 = none)
+    static def chainLength(first) {
+        count = 0;
+        v = first;
+        while (v > 0 && count <= Fs.dataSectors) {
+            count += 1;
+            v = Fs.fatGet(v - 1);
+        }
+        return count;
+    }
+
+    static def freeChain(first) {
+        v = first;
+        count = 0;
+        while (v > 0 && count <= Fs.dataSectors) {
+            next = Fs.fatGet(v - 1);
+            Fs.fatSet(v - 1, 0);
+            v = next;
+            count += 1;
+        }
+    }
+
+    // ---- directory ----
+
+    static def entrySector(e) {
+        return Fs.dirStart + (e >> 3);
+    }
+
+    static def entryAddr(e) {
+        return Disk.bufAddr + ((e & 7) << 6);
+    }
+
+    // a name as bytes, or an error if it cannot be stored
+    static def encodeName(name) {
+        bytes = Utf8.encode(name);
+        if (len(bytes) == 0 || len(bytes) > 47) {
+            free(bytes);
+            throw('fs: a file name must be 1 to 47 bytes');
+        }
+        i = 0;
+        while (i < len(bytes)) {
+            if (bytes[i] < 32) {
+                free(bytes);
+                throw('fs: a file name cannot contain control characters');
+            }
+            i += 1;
+        }
+        return bytes;
+    }
+
+    // directory entry index of the file called 'nameBytes', -1 if there is none;
+    // also sets Fs.freeSlot
+    static def lookup(nameBytes) {
+        Fs.freeSlot = -1;
+        count = Fs.dirSectors << 3;
+        e = 0;
+        while (e < count) {
+            if ((e & 7) == 0) { Fs.readSector(Fs.entrySector(e)); }
+            addr = Fs.entryAddr(e);
+            if (peek8(addr) == 0) {
+                if (Fs.freeSlot < 0) { Fs.freeSlot = e; }
+            } else {
+                same = true;
+                i = 0;
+                while (i < len(nameBytes)) {
+                    if (peek8(addr + i) != nameBytes[i]) { same = false; break; }
+                    i += 1;
+                }
+                if (same && peek8(addr + len(nameBytes)) == 0) { return e; }
+            }
+            e += 1;
+        }
+        return -1;
+    }
+
+    static def entryFirst(e) {
+        Fs.readSector(Fs.entrySector(e));
+        return peek32(Fs.entryAddr(e) + 48);
+    }
+
+    static def entrySize(e) {
+        Fs.readSector(Fs.entrySector(e));
+        return peek32(Fs.entryAddr(e) + 52);
+    }
+
+    static def setEntry(e, nameBytes, first, size) {
+        Fs.readSector(Fs.entrySector(e));
+        addr = Fs.entryAddr(e);
+        i = 0;
+        while (i < 64) {
+            poke8(addr + i, 0);
+            i += 1;
+        }
+        i = 0;
+        while (i < len(nameBytes)) {
+            poke8(addr + i, nameBytes[i]);
+            i += 1;
+        }
+        poke32(addr + 48, first);
+        poke32(addr + 52, size);
+        Fs.writeSector(Fs.entrySector(e));
+    }
+
+    static def clearEntry(e) {
+        Fs.readSector(Fs.entrySector(e));
+        addr = Fs.entryAddr(e);
+        i = 0;
+        while (i < 64) {
+            poke8(addr + i, 0);
+            i += 1;
+        }
+        Fs.writeSector(Fs.entrySector(e));
+    }
+
+    // ---- file contents ----
+
+    // the bytes of the file whose chain starts at 'first', as an array
+    static def readBytes(first, size) {
+        out = [];
+        v = first;
+        remaining = size;
+        while (v > 0 && remaining > 0) {
+            Fs.readSector(Fs.dataStart + v - 1);
+            k = remaining < 512 ? remaining : 512;
+            i = 0;
+            while (i < k) {
+                push(out, peek8(Disk.bufAddr + i));
+                i += 1;
+            }
+            remaining -= k;
+            v = Fs.fatGet(v - 1);
+        }
+        return out;
+    }
+
+    static def fillBuffer(data, pos) {
+        Fs.zeroBuffer();
+        k = len(data) - pos;
+        if (k > 512) { k = 512; }
+        i = 0;
+        while (i < k) {
+            poke8(Disk.bufAddr + i, data[pos + i]);
+            i += 1;
+        }
+    }
+
+    // makes the file 'nameBytes' contain 'data' (an array of bytes)
+    static def store(nameBytes, data) {
+        e = Fs.lookup(nameBytes);
+        slot = Fs.freeSlot;
+        if (e < 0 && slot < 0) { throw('fs: the directory is full'); }
+        old = 0;
+        if (e >= 0) { old = Fs.entryFirst(e); }
+
+        size = len(data);
+        n = (size + 511) >> 9;
+        if (Fs.freeCount() + Fs.chainLength(old) < n) { throw('fs: no space left on device'); }
+
+        sectors = [];
+        i = 0;
+        while (i < n) {
+            d = Fs.allocate();
+            if (d < 0) {
+                // only reachable if the disk changed under us: give back what was taken
+                j = 0;
+                while (j < len(sectors)) { Fs.fatSet(sectors[j], 0); j += 1; }
+                free(sectors);
+                throw('fs: no space left on device');
+            }
+            push(sectors, d);
+            i += 1;
+        }
+        i = 0;
+        while (i + 1 < n) {
+            Fs.fatSet(sectors[i], sectors[i + 1] + 1);
+            i += 1;
+        }
+        i = 0;
+        while (i < n) {
+            Fs.fillBuffer(data, i << 9);
+            Fs.writeSector(Fs.dataStart + sectors[i]);
+            i += 1;
+        }
+        first = 0;
+        if (n > 0) { first = sectors[0] + 1; }
+        target = e < 0 ? slot : e;
+        Fs.setEntry(target, nameBytes, first, size);
+        Fs.freeChain(old);
+        free(sectors);
+    }
+
+    // ---- mounting and formatting ----
+
+    static def doMount() {
+        Fs.mounted = false;
+        if (!Disk.present() || !Disk.read(0)) { return false; }
+        b = Disk.bufAddr;
+        if (peek32(b) != Fs.magic || peek32(b + 4) != 1) { return false; }
+        total = peek32(b + 8);
+        if (total != Disk.sectors) { return false; }
+        Fs.total = total;
+        Fs.fatStart = peek32(b + 12);
+        Fs.fatSectors = peek32(b + 16);
+        Fs.dirStart = peek32(b + 20);
+        Fs.dirSectors = peek32(b + 24);
+        Fs.dataStart = peek32(b + 28);
+        Fs.dataSectors = total - Fs.dataStart;
+        Fs.hint = 0;
+        Fs.mounted = true;
+        return true;
+    }
+
+    static def doFormat() {
+        if (!Disk.present()) { throw('fs: no disk'); }
+        total = Disk.sectors;
+        if (total < 16) { throw('fs: the disk is too small (16 sectors at least)'); }
+        dirSectors = total >> 5;
+        if (dirSectors < 1) { dirSectors = 1; }
+        if (dirSectors > 16) { dirSectors = 16; }
+        fat = 1;
+        while (true) {
+            need = (total - 1 - dirSectors - fat + 127) >> 7;
+            if (need <= fat) { break; }
+            fat = need;
+        }
+        fatStart = 1;
+        dirStart = fatStart + fat;
+        dataStart = dirStart + dirSectors;
+
+        Fs.zeroBuffer();
+        s = 1;
+        while (s < dataStart) {
+            Fs.writeSector(s);
+            s += 1;
+        }
+        b = Disk.bufAddr;
+        poke32(b, Fs.magic);
+        poke32(b + 4, 1);
+        poke32(b + 8, total);
+        poke32(b + 12, fatStart);
+        poke32(b + 16, fat);
+        poke32(b + 20, dirStart);
+        poke32(b + 24, dirSectors);
+        poke32(b + 28, dataStart);
+        Fs.writeSector(0);
+        Fs.doMount();
+    }
+
+    // ---- operations (called with the lock held) ----
+
+    static def need() {
+        if (!Fs.mounted) { throw('fs: no filesystem on the disk (format it first)'); }
+    }
+
+    static def doWrite(name, text) {
+        Fs.need();
+        nb = Fs.encodeName(name);
+        data = Utf8.encode(text);
+        Fs.store(nb, data);
+        free(data);
+        free(nb);
+    }
+
+    static def doAppend(name, text) {
+        Fs.need();
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        data = [];
+        if (e >= 0) {
+            first = Fs.entryFirst(e);
+            data = Fs.readBytes(first, Fs.entrySize(e));
+        }
+        extra = Utf8.encode(text);
+        i = 0;
+        while (i < len(extra)) {
+            push(data, extra[i]);
+            i += 1;
+        }
+        Fs.store(nb, data);
+        free(extra);
+        free(data);
+        free(nb);
+    }
+
+    static def doRead(name) {
+        Fs.need();
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        free(nb);
+        if (e < 0) { return nil; }
+        first = Fs.entryFirst(e);
+        bytes = Fs.readBytes(first, Fs.entrySize(e));
+        text = Utf8.decode(bytes);
+        free(bytes);
+        return text;
+    }
+
+    static def doSize(name) {
+        Fs.need();
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        free(nb);
+        if (e < 0) { return -1; }
+        return Fs.entrySize(e);
+    }
+
+    static def doRemove(name) {
+        Fs.need();
+        nb = Fs.encodeName(name);
+        e = Fs.lookup(nb);
+        free(nb);
+        if (e < 0) { return false; }
+        first = Fs.entryFirst(e);
+        Fs.clearEntry(e);
+        Fs.freeChain(first);
+        return true;
+    }
+
+    static def doRename(from, to) {
+        Fs.need();
+        fb = Fs.encodeName(from);
+        tb = Fs.encodeName(to);
+        e = Fs.lookup(fb);
+        if (e < 0) {
+            free(fb);
+            free(tb);
+            return false;
+        }
+        if (Fs.lookup(tb) >= 0) {
+            free(fb);
+            free(tb);
+            throw('fs: ' + to + ' already exists');
+        }
+        first = Fs.entryFirst(e);
+        size = Fs.entrySize(e);
+        Fs.setEntry(e, tb, first, size);
+        free(fb);
+        free(tb);
+        return true;
+    }
+
+    // array of [name, size], sorted by name, for the files whose name starts with 'prefix'
+    static def doList(prefix) {
+        Fs.need();
+        result = [];
+        count = Fs.dirSectors << 3;
+        e = 0;
+        while (e < count) {
+            if ((e & 7) == 0) { Fs.readSector(Fs.entrySector(e)); }
+            addr = Fs.entryAddr(e);
+            if (peek8(addr) != 0) {
+                bytes = [];
+                i = 0;
+                while (i < 47 && peek8(addr + i) != 0) {
+                    push(bytes, peek8(addr + i));
+                    i += 1;
+                }
+                name = Utf8.decode(bytes);
+                free(bytes);
+                if (strFind(name, prefix, 0) == 0) {
+                    push(result, [name, peek32(addr + 52)]);
+                }
+            }
+            e += 1;
+        }
+        // insertion sort: at most 128 entries
+        i = 1;
+        while (i < len(result)) {
+            item = result[i];
+            j = i - 1;
+            while (j >= 0 && result[j][0] > item[0]) {
+                result[j + 1] = result[j];
+                j -= 1;
+            }
+            result[j + 1] = item;
+            i += 1;
+        }
+        return result;
+    }
+
+    // [total sectors, data sectors, free data sectors, files]
+    static def doInfo() {
+        Fs.need();
+        files = 0;
+        count = Fs.dirSectors << 3;
+        e = 0;
+        while (e < count) {
+            if ((e & 7) == 0) { Fs.readSector(Fs.entrySector(e)); }
+            if (peek8(Fs.entryAddr(e)) != 0) { files += 1; }
+            e += 1;
+        }
+        return [Fs.total, Fs.dataSectors, Fs.freeCount(), files];
+    }
+
+    // ---- public API: one lock around every operation ----
+
+    static def run(op, a, b) {
+        lock(Fs.lock);
+        result = nil;
+        try {
+            if (op == 1) { Fs.doWrite(a, b); }
+            else if (op == 2) { result = Fs.doRead(a); }
+            else if (op == 3) { result = Fs.doRemove(a); }
+            else if (op == 4) { result = Fs.doList(a); }
+            else if (op == 5) { result = Fs.doRename(a, b); }
+            else if (op == 6) { result = Fs.doSize(a); }
+            else if (op == 7) { result = Fs.doInfo(); }
+            else if (op == 8) { Fs.doFormat(); }
+            else if (op == 9) { result = Fs.doMount(); }
+            else if (op == 10) { Fs.doAppend(a, b); }
+        } catch (err) {
+            unlock(Fs.lock);
+            throw(err);
+        }
+        unlock(Fs.lock);
+        return result;
+    }
+
+    // Disk.init() must have run. False when the disk holds no filesystem.
+    static def mount() { return Fs.run(9, nil, nil); }
+    static def format() { Fs.run(8, nil, nil); }
+    static def write(name, text) { Fs.run(1, name, text); }
+    static def append(name, text) { Fs.run(10, name, text); }
+    // the file's text, or nil if there is no such file
+    static def read(name) { return Fs.run(2, name, nil); }
+    // true if the file existed
+    static def remove(name) { return Fs.run(3, name, nil); }
+    static def rename(from, to) { return Fs.run(5, from, to); }
+    // size in bytes, -1 if there is no such file
+    static def size(name) { return Fs.run(6, name, nil); }
+    static def exists(name) { return Fs.run(6, name, nil) >= 0; }
+    // array of [name, size]
+    static def list(prefix) { return Fs.run(4, prefix, nil); }
+    // [total sectors, data sectors, free data sectors, files]
+    static def info() { return Fs.run(7, nil, nil); }
+}
+Fs.magic = 0x424C3046; // 'BL0F'
+Fs.mounted = false;
+Fs.lock = newMutex();
