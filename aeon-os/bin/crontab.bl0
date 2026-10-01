@@ -1,0 +1,36 @@
+// aeon-os program: your own cron table; crontab <file> | crontab -l | crontab -r
+// <file> replaces your table (it is checked first; nothing is installed if a line is wrong), -l shows it, -r removes
+// it. The table lives in var/cron/<your name>; crond runs it. Loaded from the virtual disk by the shell (bin/crontab.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/cron.bl0';
+import '../lib/perm.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: crontab <file> | crontab -l | crontab -r'); return nil; }
+    me = syscall(Sys.who, nil)[3];
+    table = 'var/cron/' + me;
+    if (words[1] == '-l') {
+        text = Fs.read(table);
+        if (text == nil) { sayErr('no crontab for ' + me); } else { sayRaw(text); }
+        return nil;
+    }
+    if (words[1] == '-r') {
+        if (!Fs.remove(table)) { sayErr('no crontab for ' + me); } else { say('crontab removed'); }
+        return nil;
+    }
+    text = Fs.read(inCwd(words[1]));
+    if (text == nil) { sayErr(words[1] + ': no such file'); return nil; }
+    parsed = Cron.parse(text, false, me);
+    if (len(parsed[1]) > 0) {
+        i = 0;
+        while (i < len(parsed[1])) { sayErr(words[1] + ' ' + parsed[1][i]); i += 1; }
+        sayErr('crontab not installed');
+        return nil;
+    }
+    Fs.write(table, text);
+    Fs.chmod(table, 0x180);                 // 0600
+    say('crontab installed: ' + len(parsed[0]) + ' jobs');
+}
+
+programMain(main);

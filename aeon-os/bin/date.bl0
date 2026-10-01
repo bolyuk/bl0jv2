@@ -1,0 +1,12 @@
+// aeon-os program: the date and time (UTC); date
+// Loaded from the virtual disk by the shell (bin/date.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+import '../../stdlib/time/clock.bl0';
+
+def main(words) {
+    t = Clock.now();
+    say(Clock.weekdayName(t) + ' ' + Clock.text(t) + ' UTC');
+}
+
+programMain(main);

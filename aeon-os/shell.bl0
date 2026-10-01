@@ -50,6 +50,7 @@ import 'lib/cmdline.bl0';
 import 'lib/proc.bl0';
 import 'lib/perm.bl0';
 import 'lib/users.bl0';
+import '../stdlib/time/clock.bl0';
 
 // when boot.bl0 exec()s this file, it already called kernel.bl0's
 // initHeap() with ITS OWN reserved regions accounted for (see its own
@@ -93,7 +94,7 @@ def cmdHelp() {
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
+    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
 }
@@ -294,12 +295,13 @@ registerHandler(sysExec, Exec.vector, 1);
 // the kernel half of starting a process on another core: [true, the Process] or [false, the error]
 def sysSpawn(request) {
     try {
-        return [true, Proc.spawn(request[0], request[1], request[2], request[3])];
+        return [true, Proc.spawn(request[0], request[1], request[2], request[3], len(request) > 4 ? request[4] : nil)];
     } catch (e) {
         return [false, str(e)];
     }
 }
 registerHandler(sysSpawn, Exec.spawnVector, 1);
+Clock.init();
 
 // ---- who may do what: the kernel's half (system calls, so they run privileged) ----
 
@@ -393,6 +395,9 @@ def ensureSystemDirs() {
         Fs.chmod('root', 0x1C0);             // 0700
     }
     if (!Fs.exists('home/')) { Fs.write('home/', ''); }
+    // users' own cron tables: anyone may make theirs here, only they (and root) may remove it
+    if (!Fs.exists('var/cron/')) { Fs.write('var/cron/', ''); }
+    if (Fs.stat('var/cron')[2] != 0x3FF) { Fs.chmod('var/cron', 0x3FF); }
 }
 
 // etc/fstab: one line per drive to mount at start, '<drive number> <folder>'; # starts a comment. A line that

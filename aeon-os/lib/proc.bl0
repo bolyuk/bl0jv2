@@ -26,6 +26,7 @@ def class Process {
     field ended;
     field reported;    // the shell has told the user it ended
     field background;
+    field quiet;       // a job started by crond: no notice on the terminal when it ends, a line in the log instead
     field system;      // the shell: listed by ps, but not something to wait for or stop
 
     def init(pid, name, path, core) {
@@ -40,6 +41,7 @@ def class Process {
         this.reported = false;
         this.background = false;
         this.system = false;
+        this.quiet = false;
     }
 }
 
@@ -93,8 +95,9 @@ def class Proc {
 
     // Starts 'path' with 'words' as its command line on a free worker core, and returns the Process.
     // Privileged (it dispatches): the shell calls it through a syscall. 'io' is [inPath, outPath, pipeIn,
-    // pipeOut, background].
-    static def spawn(path, words, cwd, io) {
+    // pipeOut, background] or [..., background, quiet]. 'who' - [uid, gid, groups] - is who it runs for when the
+    // caller is root; in every other case it runs for the caller.
+    static def spawn(path, words, cwd, io, who) {
         lock(Proc.mutex);
         core = -1;
         i = 1;
@@ -111,6 +114,7 @@ def class Proc {
         Proc.nextPid += 1;
         p = new Process(pid, words[0], path, core);
         p.background = io[4];
+        p.quiet = len(io) > 5 && io[5];
         push(Proc.table, p);
         unlock(Proc.mutex);
         Proc.trim();
@@ -120,6 +124,11 @@ def class Proc {
         c.uid = parent.uid;
         c.gid = parent.gid;
         c.groups = parent.groups;
+        if (who != nil && parent.uid == 0) {
+            c.uid = who[0];
+            c.gid = who[1];
+            c.groups = who[2];
+        }
         c.words = words;
         c.cwd = cwd;
         c.inPath = io[0];
@@ -165,13 +174,18 @@ def class Proc {
         unlock(Proc.mutex);
         signalEvent(Proc.changed);
         if (p.background) {
-            // tell the user, without breaking into what they are typing
             text = '[' + p.pid + '] ' + p.name + ' ';
             if (state == 'done') { text = text + 'done'; }
             else if (state == 'killed') { text = text + 'killed'; }
             else { text = text + 'failed: ' + message; }
             p.reported = true;
-            consoleAsync(text + '\n');
+            if (p.quiet) {
+                // a job nobody is watching: the log is where it says how it went
+                Log.write('job ' + text);
+            } else {
+                // tell the user, without breaking into what they are typing
+                consoleAsync(text + '\n');
+            }
         }
     }
 

@@ -164,6 +164,16 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   - On a fresh disk the shell starts as root without asking. Once root has a password it asks `login:` and starts the
     user in their home folder. The prompt shows the user's name when it is not root. History, `tmp/` for pipes and the
     system log are per-user, world-writable and kernel-written respectively.
+* **Cron** (`crond`, `crontab`, `date`; syntax in `lib/cron.bl0`): `crond &` is the scheduler - a process on a worker core that,
+  once a minute by the real-time clock (UTC, ports 0x0F70-0x0F77, read through `stdlib/time/clock.bl0`), starts the jobs whose
+  time has come. Lines are `minute hour day month weekday command` (stars, numbers, ranges, lists, steps; `@reboot`,
+  `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`), in `etc/crontab` with a user name before the command, and in each
+  user's own table, installed with `crontab file` (`-l` lists it, `-r` removes it; a table with a wrong line is refused whole)
+  and kept in `var/cron/<user>` (a sticky 1777 folder; crond only trusts a table owned by the user it is named for). A job
+  is a command line - pipes and redirections included, programs only, no built-ins (`echo` and `date` are programs too) - run
+  for its user, in their home, on a free worker core, with no terminal: what it prints is appended to `<home>/.cron.out`
+  unless the line redirects it, and how it ended goes to the log. Only a root crond runs other users' jobs. A job needs
+  free cores (a pipeline of three needs three), so start the machine with a high enough `-n`.
 * **Sticky bit and groups**: mode `1777` (or `chmod +t`) is the sticky bit: in such a folder - `tmp/` has it - only the
   owner of a file, or of the folder, may remove or rename it, whatever the folder's `w` bits say (`ls -l` shows a `t` at the end
   of the mode). `etc/group` (`name:gid:member,member`) lists the groups; a user's primary group is the gid in `etc/passwd`

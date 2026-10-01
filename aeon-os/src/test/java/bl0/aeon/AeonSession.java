@@ -90,6 +90,7 @@ public final class AeonSession {
                                java.util.List<bl0.bl0jv2.runtime.device.BlockDevice> drives) throws Exception {
         var s = new AeonSession();
         s.start(compile("init.bl0"), cores, vm -> {
+            vm.set_clock(s.clock::get);
             try {
                 if (share != null) vm.attach_share(new bl0.bl0jv2.cli.DirShare(share));
                 vm.attach_disk(fresh ? AeonImage.os(image) : new bl0.bl0jv2.cli.FileDisk(image, AeonImage.SECTORS));
@@ -103,6 +104,15 @@ public final class AeonSession {
     }
 
     /** what the guest wrote, without the colour/attribute sequences (SGR): tests look at the text, not at how it is painted */
+    /** the machine's real-time clock, in milliseconds since 1970 UTC: it starts at 2026-10-01 12:00:00 and only moves when a test moves it */
+    final java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(
+            java.time.LocalDateTime.of(2026, 10, 1, 12, 0, 0).toEpochSecond(java.time.ZoneOffset.UTC) * 1000);
+
+    /** sets the clock to a time of day on 2026-10-01 */
+    void clockAt(int hour, int minute, int second) {
+        clock.set(java.time.LocalDateTime.of(2026, 10, 1, hour, minute, second).toEpochSecond(java.time.ZoneOffset.UTC) * 1000);
+    }
+
     public String output() {
         synchronized (out.getBuffer()) {
             return out.toString().replaceAll("\u001b\\[[0-9;]*m", "");

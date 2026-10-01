@@ -1,0 +1,84 @@
+// aeon-os program: the scheduler; crond &
+// Once a minute (by the real-time clock, UTC) it runs the commands whose time has come, from etc/crontab (a user
+// name in each line) and from var/cron/<user> (a user's own table, made with crontab). Each job runs for its user
+// in their home folder on a free worker core, with no terminal: what it prints is appended to <home>/.cron.out
+// unless the line redirects it, and how it ended goes to the log. Only a crond running as root runs other users'
+// jobs; and a table in var/cron counts only when its owner is the user it is named for. @reboot jobs run when
+// crond starts. The tables are read again every minute. Stop it with kill. Loaded from the virtual disk by the
+// shell (bin/crond.bl0c); see lib/cron.bl0 for the syntax.
+
+import '../lib/userland.bl0';
+import '../lib/cron.bl0';
+import '../lib/jobs.bl0';
+import '../lib/users.bl0';
+import '../../stdlib/time/clock.bl0';
+
+// [entries] from etc/crontab and the users' tables; problems go to the log
+def loadTables() {
+    entries = [];
+    text = Fs.read('etc/crontab');
+    if (text != nil) {
+        parsed = Cron.parse(text, true, 'root');
+        entries = Arr.concat(entries, parsed[0]);
+        i = 0;
+        while (i < len(parsed[1])) { Log.write('cron: etc/crontab ' + parsed[1][i]); i += 1; }
+    }
+    if (Dirs.isDir('var/cron')) {
+        files = Dirs.list('var/cron');
+        i = 0;
+        while (i < len(files)) {
+            name = files[i][0];
+            user = Users.find(name);
+            st = Fs.stat('var/cron/' + name);
+            if (files[i][2] || user == nil || st == nil || st[0] != user[1]) {
+                if (!files[i][2]) { Log.write('cron: var/cron/' + name + ' ignored (not owned by a user of that name)'); }
+            } else {
+                body = Fs.read('var/cron/' + name);
+                parsed = Cron.parse(body == nil ? '' : body, false, name);
+                entries = Arr.concat(entries, parsed[0]);
+                j = 0;
+                while (j < len(parsed[1])) { Log.write('cron: var/cron/' + name + ' ' + parsed[1][j]); j += 1; }
+            }
+            i += 1;
+        }
+    }
+    return entries;
+}
+
+def runEntry(entry) {
+    user = Users.find(entry[1]);
+    if (user == nil) {
+        Log.write('cron: no such user ' + entry[1] + ' for: ' + entry[2]);
+        return nil;
+    }
+    home = user[3];
+    who = [user[1], user[2], Users.groupsOf(user[0])];
+    problem = Jobs.start(entry[2], Dirs.isDir(home) ? home : '', who, home + '/.cron.out');
+    if (problem == '') { Log.write('cron: ' + user[0] + ': ' + entry[2]); }
+    else { Log.write('cron: ' + user[0] + ': ' + entry[2] + ' not run: ' + problem); }
+}
+
+def main(words) {
+    if (len(words) != 1) { sayErr('usage: crond &'); return nil; }
+    last = nil;
+    Log.write('crond started');
+    while (true) {
+        checkAbort();
+        t = Clock.now();
+        stamp = Clock.minuteStamp(t);
+        if (stamp != last) {
+            first = last == nil;
+            last = stamp;
+            entries = loadTables();
+            i = 0;
+            while (i < len(entries)) {
+                e = entries[i];
+                if (e[3] ? first : Cron.matches(e, t)) { runEntry(e); }
+                i += 1;
+            }
+        }
+        wait(200);
+    }
+}
+
+programMain(main);
