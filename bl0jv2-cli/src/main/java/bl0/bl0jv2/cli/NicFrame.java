@@ -73,10 +73,17 @@ final class NicFrame {
     // injection (from another thread - UdpBridge's RX loop and a
     // TcpBridge connection's two relay threads can all call this -
     // or just the next real packet/segment) overwriting it first.
-    // synchronized on the class: correct even across different bridge
-    // instances, since they all share this one wire (see this class's
-    // own header comment).
-    static synchronized boolean injectRx(Bl0jv2_jVM vm, byte[] frame) {
+    // serialized per VM (not per class): every bridge of ONE VM shares its
+    // one RX slot, but a different VM has its own - a class-wide lock let a
+    // leftover bridge thread stuck waiting 2 s for an ack from a VM that had
+    // already finished hold up every other VM's injections.
+    static boolean injectRx(Bl0jv2_jVM vm, byte[] frame) {
+        synchronized (vm) {
+            return injectRxLocked(vm, frame);
+        }
+    }
+
+    private static boolean injectRxLocked(Bl0jv2_jVM vm, byte[] frame) {
         if (frame.length > MAX_FRAME_BYTES)
             return false; // toy safeguard - see nicHostSend()'s own doc on the same truncation choice, mirrored here
 
