@@ -1,0 +1,124 @@
+// array helpers. import 'stdlib/arrlib.bl0'; (path relative to the
+// importing file).
+//
+// static methods on a namespace class, not free top-level functions - same
+// collision-avoidance reasoning as mathlib.bl0's own Math class ('reverse'/
+// 'join'/'contains' are common names a caller's own code might want too).
+//
+// map/filter/reduce take any callable value - a plain function name, a
+// lambda literal, or a variable holding either; f(x) works the same way
+// regardless of where f came from (but note Arr.map/Arr.filter/Arr.reduce
+// THEMSELVES can only be called as Arr.map(...), never passed around as a
+// bare value - a static method has no first-class reference form in this
+// language, unlike a plain function).
+
+def class Arr {
+    static def contains(arr, x) {
+        i = 0;
+        while (i < len(arr)) {
+            if (arr[i] == x) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    static def indexOf(arr, x) {
+        i = 0;
+        while (i < len(arr)) {
+            if (arr[i] == x) { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    static def reverse(arr) {
+        result = [];
+        i = len(arr) - 1;
+        while (i >= 0) {
+            push(result, arr[i]);
+            i = i - 1;
+        }
+        return result;
+    }
+
+    // half-open range [from, to), same convention as every other index
+    // range in the language
+    static def slice(arr, from, to) {
+        result = [];
+        i = from;
+        while (i < to) {
+            push(result, arr[i]);
+            i = i + 1;
+        }
+        return result;
+    }
+
+    static def join(arr, sep) {
+        result = '';
+        i = 0;
+        while (i < len(arr)) {
+            if (i > 0) { result = result + sep; }
+            result = result + str(arr[i]);
+            i = i + 1;
+        }
+        return result;
+    }
+
+    static def map(arr, f) {
+        result = [];
+        i = 0;
+        while (i < len(arr)) {
+            push(result, f(arr[i]));
+            i = i + 1;
+        }
+        return result;
+    }
+
+    static def filter(arr, f) {
+        result = [];
+        i = 0;
+        while (i < len(arr)) {
+            if (f(arr[i])) { push(result, arr[i]); }
+            i = i + 1;
+        }
+        return result;
+    }
+
+    static def reduce(arr, f, initial) {
+        acc = initial;
+        i = 0;
+        while (i < len(arr)) {
+            acc = f(acc, arr[i]);
+            i = i + 1;
+        }
+        return acc;
+    }
+
+    // removes index i by swapping with the last element and popping - the
+    // same pattern aeon-os/boot.bl0, aeon-os/smp_boot.bl0 and
+    // aeon-os/os-text.bl0 each hand-rolled their own copy of (Bl0jArray
+    // itself only exposes push/pop, no arbitrary-index removal - see its
+    // own doc). O(1), but does NOT preserve order - fine for a run/ready
+    // queue that gets rescanned by priority anyway, wrong for anything
+    // that depends on element order
+    static def removeAt(arr, i) {
+        last = len(arr) - 1;
+        if (i != last) { arr[i] = arr[last]; }
+        pop(arr);
+    }
+
+    // a NEW array holding every element of a then every element of b, in
+    // order (unlike removeAt, order matters here and is preserved) -
+    // arrays have no concat/spread of their own, so building one by hand
+    // is the pattern stdlib/net/ip.bl0 and stdlib/net/tcp.bl0 both already
+    // repeat several times over when assembling a frame out of a header
+    // plus a payload
+    static def concat(a, b) {
+        result = [];
+        i = 0;
+        while (i < len(a)) { push(result, a[i]); i = i + 1; }
+        i = 0;
+        while (i < len(b)) { push(result, b[i]); i = i + 1; }
+        return result;
+    }
+}

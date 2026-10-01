@@ -44,7 +44,7 @@ poke32(SYS_INFO_BASE, SYS_MAGIC);
 initHeap(SYS_INFO_BASE + SYS_INFO_SIZE);
 
 println '=== aeon-os booting ===';
-println 'sys info magic: ' + toHex(peek32(SYS_INFO_BASE));
+println 'sys info magic: ' + Math.toHex(peek32(SYS_INFO_BASE));
 println 'uptime: ' + ticks() + 'ms';
 
 // --- kernel-global state lives on a class's static fields, not in a
@@ -175,7 +175,7 @@ def taskLogger() {
 def taskNetwork() {
     buf = kalloc(4);
     poke32(buf, 0xC0FFEE);
-    println '  [network] received packet: ' + toHex(peek32(buf));
+    println '  [network] received packet: ' + Math.toHex(peek32(buf));
     kfree(buf);
 }
 
@@ -260,8 +260,8 @@ poke32(SYS_INFO_BASE, 0);
 
 try {
     if (peek32(SYS_INFO_BASE) != SYS_MAGIC) {
-        panic('system info block corrupted - expected magic ' + toHex(SYS_MAGIC) +
-              ', found ' + toHex(peek32(SYS_INFO_BASE)));
+        panic('system info block corrupted - expected magic ' + Math.toHex(SYS_MAGIC) +
+              ', found ' + Math.toHex(peek32(SYS_INFO_BASE)));
     }
     println '=== aeon-os halted cleanly ===';
 } catch (e) {

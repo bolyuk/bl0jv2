@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>bl0jv2</groupId>
+        <artifactId>bl0jv2-parent</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>bl0jv2-ide</artifactId>
+    <packaging>jar</packaging>
+
+    <!-- skeleton for future IDE/editor tooling (language server, syntax
+         highlighting, diagnostics) built on top of the existing lexer/
+         parser/compiler - no real logic yet, see bl0.bl0jv2.ide's own
+         package-info.java -->
+
+    <dependencies>
+        <dependency>
+            <groupId>bl0jv2</groupId>
+            <artifactId>bl0jv2-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>bl0jv2</groupId>
+            <artifactId>bl0jv2-compiler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>bl0jv2</groupId>
+            <artifactId>bl0jv2-runtime</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

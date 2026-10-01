@@ -136,7 +136,7 @@ def kfree(addr) {
 // is restored automatically once this returns
 def sysPutc(byteValue) {
     out8(Kernel.portConsole, byteValue);
-    println '  [console] driver wrote 0x' + toHex(byteValue) + ' to port ' + Kernel.portConsole;
+    println '  [console] driver wrote 0x' + Math.toHex(byteValue) + ' to port ' + Kernel.portConsole;
 }
 
 // --- syscall ABI: registers sysPutc() on the same 0-255 vector table
@@ -267,7 +267,7 @@ def taskNetwork() {
     ensureUserMode();
     buf = kalloc(4);
     poke32(buf, 0xC0FFEE);
-    println '    [network] running on core ' + currentCore() + ', packet ' + toHex(peek32(buf));
+    println '    [network] running on core ' + currentCore() + ', packet ' + Math.toHex(peek32(buf));
     // out8() itself is privileged and this task is not - syscall() is the
     // only path left to the console device, handled by sysPutc() above.
     // buf+3: the packet's low byte (0xC0FFEE is big-endian, buf+0 is 0x00)

@@ -1,0 +1,11 @@
+def class ToArr {
+    static def toArr(s) {
+        result = [];
+        i = 0;
+        while (i < len(s)) {
+            push(result, s[i]);
+            i = i + 1;
+        }
+        return result;
+    }
+}

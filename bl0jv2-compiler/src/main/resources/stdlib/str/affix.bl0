@@ -1,0 +1,22 @@
+def class Affix {
+    static def startsWith(s, prefix) {
+        if (len(prefix) > len(s)) { return false; }
+        i = 0;
+        while (i < len(prefix)) {
+            if (s[i] != prefix[i]) { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    static def endsWith(s, suffix) {
+        if (len(suffix) > len(s)) { return false; }
+        offset = len(s) - len(suffix);
+        i = 0;
+        while (i < len(suffix)) {
+            if (s[offset + i] != suffix[i]) { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+}

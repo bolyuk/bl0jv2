@@ -1,0 +1,26 @@
+// byte -> single-character string, covering the FULL printable ASCII range
+// (space through tilde, 32-126) - not a hand-picked subset of letters/
+// digits/punctuation the way earlier ad-hoc byte->char lookups in this
+// project did (aeon-os/kernel.bl0 used to have its own, covering only
+// lowercase letters, digits and 7 symbols - any uppercase letter or most
+// punctuation silently rendered as '?' instead). Anything outside 32-126
+// has no drawable representation on a plain-text console anyway, so it
+// still maps to '?'.
+//
+// a static method on a namespace class, not a free top-level 'char' -
+// a one-letter-shorter name like that is exactly the kind a caller's own
+// code is likely to want for a local variable too.
+
+def class Char {
+    // table is a LOCAL variable inside the method, not a top-level one - a
+    // plain function can't see an enclosing top-level variable at all
+    // (only a lambda's own captured free variables can - see this
+    // project's own aeon-os files for where that's bitten before), so a
+    // function-local constant sidesteps the problem entirely instead of
+    // working around it with a static field
+    static def char(b) {
+        table = ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~';
+        if (b < 32 || b > 126) { return '?'; }
+        return table[b - 32];
+    }
+}

@@ -1,0 +1,13 @@
+import 'substr.bl0';
+
+def class Find {
+    static def find(s, sub) {
+        if (len(sub) == 0) { return 0; }
+        i = 0;
+        while (i <= len(s) - len(sub)) {
+            if (Substr.substr(s, i, i + len(sub)) == sub) { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+}

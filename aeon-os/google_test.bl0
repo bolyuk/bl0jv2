@@ -2,14 +2,14 @@
 // resolves google.com for real (stdlib/net/dns.bl0 - a real DNS-over-UDP
 // query, not a host-side shortcut), then does a real HTTP GET against
 // whatever IP came back. Needs --bridge-outbound (see Bl0jv2_CLI's own
-// help text) - without it, udpSend()/tcpConnect() never leave the VM at
-// all, loopback only.
+// help text) - without it, Udp.send()/TcpConn.connect() never leave the VM
+// at all, loopback only.
 
-import 'D:/IdeaProjects/bl0jv2/stdlib/net/dns.bl0';
-import 'D:/IdeaProjects/bl0jv2/stdlib/net/http.bl0';
-import 'D:/IdeaProjects/bl0jv2/stdlib/mathlib.bl0';
+import 'D:/IdeaProjects/bl0jv2/bl0jv2-compiler/src/main/resources/stdlib/net/dns.bl0';
+import 'D:/IdeaProjects/bl0jv2/bl0jv2-compiler/src/main/resources/stdlib/net/http.bl0';
+import 'D:/IdeaProjects/bl0jv2/bl0jv2-compiler/src/main/resources/stdlib/mathlib.bl0';
 
-initNicWithHostBridge();
+Nic.initWithHostBridge();
 
 // 8.8.8.8 is the default, but plenty of routers/ISPs intercept or drop
 // port-53 traffic addressed to a foreign resolver while leaving the
@@ -20,14 +20,14 @@ initNicWithHostBridge();
 Dns.serverIp = 0x0A000101; // 10.0.1.1
 
 println 'resolving google.com...';
-ip = dnsResolve('google.com');
-println 'google.com -> ' + toHex(ip) + ' = ' + ((ip >>> 24) & 0xFF) + '.' + ((ip >>> 16) & 0xFF) + '.' + ((ip >>> 8) & 0xFF) + '.' + (ip & 0xFF);
+ip = Dns.resolve('google.com');
+println 'google.com -> ' + Math.toHex(ip) + ' = ' + ((ip >>> 24) & 0xFF) + '.' + ((ip >>> 16) & 0xFF) + '.' + ((ip >>> 8) & 0xFF) + '.' + (ip & 0xFF);
 
 if (ip == 0) {
     println 'DNS resolution failed - no internet access, or the query timed out';
 } else {
     println 'connecting...';
-    response = httpGet(0x0A000002, 54000, ip, 80, '/');
+    response = Http.get(0x0A000002, 54000, ip, 80, '/');
     println 'response:';
     println response;
 }

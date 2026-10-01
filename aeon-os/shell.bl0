@@ -100,8 +100,8 @@ def runCommand(line) {
         ShellState.running = false;
         return nil;
     }
-    if (startsWith(line, 'echo ')) {
-        consoleWriteLine(substr(line, 5, len(line)));
+    if (Affix.startsWith(line, 'echo ')) {
+        consoleWriteLine(Substr.substr(line, 5, len(line)));
         return nil;
     }
     if (line == '') { return nil; }
@@ -141,7 +141,7 @@ while (ShellState.running) {
                 print '$ ';
             }
         } else {
-            ch = char(b);
+            ch = Char.char(b);
             line = line + ch;
             print ch;
         }

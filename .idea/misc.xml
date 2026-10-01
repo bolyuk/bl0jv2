@@ -11,10 +11,6 @@
     <option name="ignoredFiles">
       <set>
         <option value="$PROJECT_DIR$/bl0jv1-deprecated/pom.xml" />
-        <option value="$PROJECT_DIR$/bl0jv2-common/pom.xml" />
-        <option value="$PROJECT_DIR$/bl0jv2-terminal/pom.xml" />
-        <option value="$PROJECT_DIR$/bl0jv2-vm/pom.xml" />
-        <option value="$PROJECT_DIR$/test/pom.xml" />
       </set>
     </option>
   </component>

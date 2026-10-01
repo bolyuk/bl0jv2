@@ -1,0 +1,176 @@
+// a hash map, same spirit as arrlib.bl0's map/filter/reduce: the VM has no
+// dedicated map/dictionary value type (only Bl0jArray, Bl0jTuple and
+// instances - see this project's own value-type list), but nothing about a
+// hash table actually NEEDS VM support. The two primitives it's built from
+// are already there and already do the right thing: array indexing is O(1)
+// (Bl0jArray is a flat backing array, not a scan), and '==' already does
+// real structural equality - Integer/String compare by value, and a
+// Bl0jInstance with its own equals() method gets that called automatically
+// (see Bl0jv2_jVM.valuesEqual()) - so collision resolution within a bucket
+// is just '==', the same operator every other comparison in this language
+// already uses.
+//
+// Real instance methods, not free functions taking a Map as their first
+// argument the way tcp.bl0's tcpSend(conn, ...) does - TcpConn there has
+// no choice (methods didn't exist yet when that file was written), but a
+// brand new class has no reason to copy that shape instead of the one
+// aeon-os/boot.bl0's own Scheduler/Task classes already use (init()/
+// addTask()/etc as real def methods, called as sched.addTask(t)). bucket
+// count and current size are read directly as plain fields (m.bucketCount,
+// m.size) rather than through a getter - the same direct-field-access
+// convention this project already uses for conn.state, task.priority, etc.
+//
+// Fixed bucket count, chosen once at construction - no resize/rehash on
+// growth. The simplest policy that demonstrates the structure works, same
+// stance this project already takes with kalloc()'s bump allocator
+// (aeon-os/kernel.bl0) and nextWorkerCore()'s round-robin
+// (aeon-os/smp_boot.bl0): a real resizing policy is a straightforward
+// follow-up, not something this needs to get right on day one.
+// new Map(bucketCount) always takes an explicit count (no hidden default) -
+// the same convention every other constructor in this project already
+// follows (new Task(name, priority, remainingRuns, fn), etc); pick
+// something comfortably bigger than the entry count you expect.
+//
+// Keys can be anything '==' already compares meaningfully: int, float,
+// string, bool, or an instance with its own equals(). hashKey() special-
+// cases int and string (the two key types every actual use in this project
+// needs); anything else falls back to hashing its str() form, which is
+// correct (equal values still hash the same way) but means two instances
+// that compare equal via a custom equals() yet stringify differently would
+// land in different buckets and never be found as "the same key" - fine
+// for this project's own needs, worth knowing about before relying on it
+// for a key type that doesn't define its own toString() carefully.
+
+import 'arrlib.bl0';
+
+def class MapEntry {
+    field key;
+    field value;
+}
+
+def class Map {
+    field buckets;     // array of arrays of MapEntry
+    field bucketCount;
+    field size;        // number of entries, not number of buckets
+
+    def init(bucketCount) {
+        this.buckets = [];
+        i = 0;
+        while (i < bucketCount) {
+            push(this.buckets, []);
+            i = i + 1;
+        }
+        this.bucketCount = bucketCount;
+        this.size = 0;
+    }
+
+    // string hashing is the standard small-multiplier running hash (the
+    // same shape as java.lang.String's own hashCode - h = h*31 + nextChar)
+    // - good enough spread for the key sets this project actually has
+    // (hostnames, port/flag names, etc), not a cryptographic or DoS-
+    // resistant hash. '& 0x7FFFFFFF' clears the sign bit so the later '%'
+    // always lands in [0, bucketCount) - the same masking trick toHex()
+    // (mathlib.bl0) uses to treat a negative int as its raw bit pattern
+    // instead of fighting its sign.
+    def hashKey(key) {
+        t = typeOf(key);
+        h = 0;
+        if (t == 'int') {
+            h = key;
+        } else {
+            s = key;
+            if (t != 'string') { s = str(key); }
+            i = 0;
+            while (i < len(s)) {
+                h = h * 31 + int(s[i]);
+                i = i + 1;
+            }
+        }
+        h = h & 0x7FFFFFFF;
+        return h % this.bucketCount;
+    }
+
+    def set(key, value) {
+        bucket = this.buckets[this.hashKey(key)];
+        i = 0;
+        while (i < len(bucket)) {
+            if (bucket[i].key == key) {
+                bucket[i].value = value;
+                return nil;
+            }
+            i = i + 1;
+        }
+        e = new MapEntry();
+        e.key = key;
+        e.value = value;
+        push(bucket, e);
+        this.size = this.size + 1;
+        return nil;
+    }
+
+    def has(key) {
+        bucket = this.buckets[this.hashKey(key)];
+        i = 0;
+        while (i < len(bucket)) {
+            if (bucket[i].key == key) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    // nil for a missing key is indistinguishable from a key explicitly
+    // mapped to nil - check has() first if that distinction matters
+    def get(key) {
+        bucket = this.buckets[this.hashKey(key)];
+        i = 0;
+        while (i < len(bucket)) {
+            if (bucket[i].key == key) { return bucket[i].value; }
+            i = i + 1;
+        }
+        return nil;
+    }
+
+    def remove(key) {
+        bucket = this.buckets[this.hashKey(key)];
+        i = 0;
+        while (i < len(bucket)) {
+            if (bucket[i].key == key) {
+                Arr.removeAt(bucket, i);
+                this.size = this.size - 1;
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    def keys() {
+        result = [];
+        bi = 0;
+        while (bi < this.bucketCount) {
+            bucket = this.buckets[bi];
+            i = 0;
+            while (i < len(bucket)) {
+                push(result, bucket[i].key);
+                i = i + 1;
+            }
+            bi = bi + 1;
+        }
+        return result;
+    }
+
+    def values() {
+        result = [];
+        bi = 0;
+        while (bi < this.bucketCount) {
+            bucket = this.buckets[bi];
+            i = 0;
+            while (i < len(bucket)) {
+                push(result, bucket[i].value);
+                i = i + 1;
+            }
+            bi = bi + 1;
+        }
+        return result;
+    }
+}

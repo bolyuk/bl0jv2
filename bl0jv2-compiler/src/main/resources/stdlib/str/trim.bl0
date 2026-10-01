@@ -1,0 +1,19 @@
+import 'substr.bl0';
+
+def class Trim {
+    static def isSpaceChar(c) {
+        sp = ' ';
+        tab = '\t';
+        nl = '\n';
+        cr = '\r';
+        return c == sp[0] || c == tab[0] || c == nl[0] || c == cr[0];
+    }
+
+    static def trim(s) {
+        start = 0;
+        end = len(s);
+        while (start < end && Trim.isSpaceChar(s[start])) { start = start + 1; }
+        while (end > start && Trim.isSpaceChar(s[end - 1])) { end = end - 1; }
+        return Substr.substr(s, start, end);
+    }
+}

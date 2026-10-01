@@ -1,0 +1,436 @@
+import 'ip.bl0'; // brings in Ip.netByteToChar() too - see its own doc
+
+// a toy TCP over the IP/NIC layers below: real three-way handshake
+// (SYN / SYN+ACK / ACK), real sequence/ack numbers, a real four-way close
+// (FIN+ACK both directions), a real checksum over a pseudo-header - just
+// none of the loss-recovery machinery (retransmission timers, congestion
+// control, out-of-order reassembly) a lossless loopback link has no way to
+// ever need. One segment per TcpConn.send() call, no MSS-based
+// segmentation - a real stack splits a large write across multiple
+// segments; this one just sends whatever you handed it as a single
+// segment.
+//
+// header layout (byte offsets, 20 bytes, no options):
+//   0-1    source port
+//   2-3    destination port
+//   4-7    sequence number, big-endian u32
+//   8-11   acknowledgment number, big-endian u32
+//   12     data offset (top 4 bits, in 32-bit words) | reserved (0) -
+//          always 0x50 (5 words = 20 bytes) since options are never sent
+//   13     flags: FIN=0x01 SYN=0x02 RST=0x04 PSH=0x08 ACK=0x10 URG=0x20
+//   14-15  window size - fixed at 0xFFFF, no real flow control
+//   16-17  checksum (over a pseudo-header + this header + data)
+//   18-19  urgent pointer - always 0, urgent data isn't supported
+
+def class TcpFlags {
+    static field fin;
+    static field syn;
+    static field rst;
+    static field psh;
+    static field ack;
+    static field urg;
+
+    static def has(flags, flag) {
+        return (flags & flag) != 0;
+    }
+}
+TcpFlags.fin = 0x01;
+TcpFlags.syn = 0x02;
+TcpFlags.rst = 0x04;
+TcpFlags.psh = 0x08;
+TcpFlags.ack = 0x10;
+TcpFlags.urg = 0x20;
+
+// initial sequence numbers just need to be DIFFERENT per connection here,
+// not unpredictable - real TCP randomizes them to stop an off-path
+// attacker guessing a live connection's sequence space, which isn't a
+// threat model this closed loopback has to defend against
+def class TcpIsn {
+    static field counter;
+
+    static def next() {
+        isn = TcpIsn.counter;
+        TcpIsn.counter = TcpIsn.counter + 12345;
+        return isn;
+    }
+}
+TcpIsn.counter = 1000;
+
+// one live (or listening, or closing) connection. state is a plain string
+// ('LISTEN'/'SYN_SENT'/'SYN_RCVD'/'ESTABLISHED'/'FIN_WAIT'/'CLOSED') rather
+// than an enum - bl0jv2 has none, and a string prints usefully as-is while
+// debugging
+def class TcpConn {
+    field localIp;
+    field localPort;
+    field remoteIp;
+    field remotePort;
+    field state;
+    field sndNext;         // next sequence number WE will send
+    field rcvNext;         // next sequence number we EXPECT from the peer
+    field recvBuffer;      // in-order data received but not yet receive()'d
+    field peerFinReceived;
+
+    static def buildHeader(srcPort, dstPort, seq, ack, flags) {
+        return [
+            Ip.byteAt(srcPort, 8), Ip.byteAt(srcPort, 0),
+            Ip.byteAt(dstPort, 8), Ip.byteAt(dstPort, 0),
+            Ip.byteAt(seq, 24), Ip.byteAt(seq, 16), Ip.byteAt(seq, 8), Ip.byteAt(seq, 0),
+            Ip.byteAt(ack, 24), Ip.byteAt(ack, 16), Ip.byteAt(ack, 8), Ip.byteAt(ack, 0),
+            0x50, flags,
+            0xFF, 0xFF,
+            0, 0,
+            0, 0
+        ];
+    }
+
+    // real TCP checksums a pseudo-header (src/dst IP + zero byte +
+    // protocol + TCP length) ALONGSIDE the actual header+data, even though
+    // the pseudo-header itself is never transmitted - it's what ties the
+    // checksum to a specific src/dst pair, catching a segment silently
+    // misdelivered to the wrong IP that the TCP header alone (which only
+    // names ports) couldn't detect. Reuses Ip.checksum() - it's the same
+    // ones'-complement-sum algorithm regardless of what bytes are being
+    // summed.
+    static def applyChecksum(header, srcIp, dstIp, payloadBytes) {
+        tcpLen = len(header) + len(payloadBytes);
+        pseudo = [
+            Ip.byteAt(srcIp, 24), Ip.byteAt(srcIp, 16), Ip.byteAt(srcIp, 8), Ip.byteAt(srcIp, 0),
+            Ip.byteAt(dstIp, 24), Ip.byteAt(dstIp, 16), Ip.byteAt(dstIp, 8), Ip.byteAt(dstIp, 0),
+            0, Ip.protoTcp,
+            Ip.byteAt(tcpLen, 8), Ip.byteAt(tcpLen, 0)
+        ];
+
+        combined = [];
+        i = 0; while (i < len(pseudo)) { push(combined, pseudo[i]); i = i + 1; }
+        i = 0; while (i < len(header)) { push(combined, header[i]); i = i + 1; }
+        i = 0; while (i < len(payloadBytes)) { push(combined, payloadBytes[i]); i = i + 1; }
+
+        cs = Ip.checksum(combined);
+        header[16] = Ip.byteAt(cs, 8);
+        header[17] = Ip.byteAt(cs, 0);
+        return header;
+    }
+
+    // waits for an incoming connection - a SINGLE one: this conn object
+    // transitions LISTEN -> SYN_RCVD -> ESTABLISHED in place rather than
+    // spawning a separate connected socket per accept() the way a real
+    // listen()/accept() pair does, so this stack only ever supports one
+    // accepted connection per listen() call. Multiplexing several
+    // simultaneous inbound connections onto one listener is a natural
+    // extension, not implemented here.
+    static def listen(localIp, localPort) {
+        conn = new TcpConn();
+        conn.localIp = localIp;
+        conn.localPort = localPort;
+        conn.remoteIp = nil;
+        conn.remotePort = nil;
+        conn.state = 'LISTEN';
+        conn.sndNext = 0;
+        conn.rcvNext = 0;
+        conn.recvBuffer = '';
+        conn.peerFinReceived = false;
+        lock(TcpRegistry.lock);
+        push(TcpRegistry.conns, conn);
+        unlock(TcpRegistry.lock);
+        return conn;
+    }
+
+    // no SYN retransmission (see this file's own header comment on why a
+    // lossless loopback link has no need for it) - but that only holds
+    // once both ends are actually up. Call this BEFORE the peer's own
+    // listen() has run and the SYN just gets silently dropped as "no
+    // match" (see TcpRegistry.findMatch()'s own doc) with nothing to ever
+    // retry it: this then blocks here forever, waiting for a SYN-ACK
+    // that's never coming. A caller racing its own listen() against this
+    // (e.g. dispatch()ing the server right before calling this) needs its
+    // own readiness signal first - a flag the server sets right after
+    // listen() returns is enough.
+    static def connect(localIp, localPort, remoteIp, remotePort) {
+        conn = new TcpConn();
+        conn.localIp = localIp;
+        conn.localPort = localPort;
+        conn.remoteIp = remoteIp;
+        conn.remotePort = remotePort;
+        conn.state = 'SYN_SENT';
+        conn.sndNext = TcpIsn.next();
+        conn.rcvNext = 0;
+        conn.recvBuffer = '';
+        conn.peerFinReceived = false;
+        lock(TcpRegistry.lock);
+        push(TcpRegistry.conns, conn);
+        unlock(TcpRegistry.lock);
+
+        conn.sendSegment(TcpFlags.syn, '');
+        conn.sndNext = conn.sndNext + 1;
+
+        while (conn.state == 'SYN_SENT') {
+            TcpRegistry.pump();
+            wait(1);
+        }
+
+        return conn;
+    }
+
+    // builds and transmits one segment for this connection - seq/ack
+    // always come from the connection's own state, never passed in
+    // separately, so every call site of this stays consistent with
+    // whatever handleSegment() last observed. payload is a string, '' for
+    // a pure control segment (SYN/ACK/FIN carrying no data).
+    def sendSegment(flags, payload) {
+        payloadBytes = [];
+        i = 0;
+        while (i < len(payload)) {
+            push(payloadBytes, int(payload[i]));
+            i = i + 1;
+        }
+
+        header = TcpConn.buildHeader(this.localPort, this.remotePort, this.sndNext, this.rcvNext, flags);
+        header = TcpConn.applyChecksum(header, this.localIp, this.remoteIp, payloadBytes);
+
+        segment = [];
+        i = 0; while (i < len(header)) { push(segment, header[i]); i = i + 1; }
+        i = 0; while (i < len(payloadBytes)) { push(segment, payloadBytes[i]); i = i + 1; }
+
+        ipHeader = Ip.buildHeader(this.localIp, this.remoteIp, Ip.protoTcp, len(segment));
+
+        frame = [];
+        i = 0; while (i < len(ipHeader)) { push(frame, ipHeader[i]); i = i + 1; }
+        i = 0; while (i < len(segment)) { push(frame, segment[i]); i = i + 1; }
+
+        Nic.send(frame);
+    }
+
+    // advances this connection's state machine by exactly one segment
+    // already confirmed to belong to it (see TcpRegistry.findMatch()) -
+    // every branch below mirrors one real TCP state transition, just
+    // without retransmission on top of it
+    def handleSegment(ipHeader, seg) {
+        if (this.state == 'LISTEN') {
+            if (TcpFlags.has(seg.flags, TcpFlags.syn)) {
+                this.remoteIp = ipHeader.srcAddr;
+                this.remotePort = seg.srcPort;
+                this.rcvNext = seg.seq + 1;
+                this.sndNext = TcpIsn.next();
+                this.state = 'SYN_RCVD';
+                this.sendSegment(TcpFlags.syn | TcpFlags.ack, '');
+                this.sndNext = this.sndNext + 1;
+            }
+            return nil;
+        }
+
+        if (this.state == 'SYN_SENT') {
+            if (TcpFlags.has(seg.flags, TcpFlags.syn) && TcpFlags.has(seg.flags, TcpFlags.ack)) {
+                // sndNext already advanced past our own SYN's sequence
+                // number right after connect() sent it - not again here,
+                // or every byte we send after this would carry a sequence
+                // number one higher than the peer's own rcvNext actually
+                // expects, and its "in order" check (seg.seq ==
+                // this.rcvNext) would silently drop every single segment
+                // we ever send on this connection
+                this.rcvNext = seg.seq + 1;
+                this.state = 'ESTABLISHED';
+                this.sendSegment(TcpFlags.ack, '');
+            }
+            return nil;
+        }
+
+        if (this.state == 'SYN_RCVD') {
+            if (TcpFlags.has(seg.flags, TcpFlags.ack)) {
+                this.state = 'ESTABLISHED';
+            }
+            return nil;
+        }
+
+        // ESTABLISHED, and FIN_WAIT (our own close already sent, but the
+        // peer's FIN - or trailing data sent before it - can still arrive
+        // after)
+        if (TcpFlags.has(seg.flags, TcpFlags.fin)) {
+            this.rcvNext = seg.seq + 1;
+            this.peerFinReceived = true;
+            this.sendSegment(TcpFlags.ack, '');
+            return nil;
+        }
+
+        if (len(seg.payload) > 0 && seg.seq == this.rcvNext) {
+            this.recvBuffer = this.recvBuffer + seg.payload;
+            this.rcvNext = this.rcvNext + len(seg.payload);
+            this.sendSegment(TcpFlags.ack, '');
+        }
+    }
+
+    // busy-polls TcpRegistry.pump() with a wait(1) between checks, the
+    // same throttling this project's other idle-poll loops (aeon-os/
+    // shell.bl0's REPL, aeon-os/smp_boot.bl0's completion wait) already
+    // use to avoid pegging a CPU core at 100% while genuinely idle - see
+    // wait()'s own doc
+    def accept() {
+        while (this.state == 'LISTEN' || this.state == 'SYN_RCVD') {
+            TcpRegistry.pump();
+            wait(1);
+        }
+        return this;
+    }
+
+    // no window/unacked-byte tracking to wait on - see this file's own
+    // header comment on why a lossless loopback link has no real need for
+    // it
+    def send(message) {
+        this.sendSegment(TcpFlags.ack | TcpFlags.psh, message);
+        this.sndNext = this.sndNext + len(message);
+    }
+
+    def hasData() {
+        TcpRegistry.pump();
+        return len(this.recvBuffer) > 0;
+    }
+
+    // returns and clears whatever's arrived so far - TCP is a byte
+    // stream, not a message stream, so this makes no promise about lining
+    // up with the peer's own send() call boundaries, unlike
+    // UdpPacket.receive()'s one-packet-per-call contract
+    def receive() {
+        TcpRegistry.pump();
+        data = this.recvBuffer;
+        this.recvBuffer = '';
+        return data;
+    }
+
+    // sends our FIN and moves to FIN_WAIT - does NOT block waiting for the
+    // peer's own FIN. Real TCP's active closer doesn't block on that
+    // either: it moves through FIN_WAIT_1/FIN_WAIT_2 asynchronously as the
+    // peer's own ACK/FIN arrive on their own schedule, not by stalling the
+    // caller (a demo where one side closes while the other is still
+    // mid-conversation would otherwise deadlock the closing side forever).
+    // Call waitClosed() afterward if the caller specifically needs to
+    // confirm the peer closed too before moving on.
+    def close() {
+        this.sendSegment(TcpFlags.fin | TcpFlags.ack, '');
+        this.sndNext = this.sndNext + 1;
+        this.state = 'FIN_WAIT';
+    }
+
+    // blocks until the peer's own FIN has been seen (see close()'s own
+    // doc for why that's a separate, optional step) - the same
+    // wait(1)-throttled busy-poll every other blocking call in this file
+    // uses. Real TCP also tracks a TIME_WAIT state after this point,
+    // specifically to catch a duplicate late segment - collapsed away
+    // here since a lossless loopback link has nothing left to ever
+    // retransmit or duplicate.
+    def waitClosed() {
+        while (!this.peerFinReceived) {
+            TcpRegistry.pump();
+            wait(1);
+        }
+        this.state = 'CLOSED';
+    }
+}
+
+def class TcpSegment {
+    field srcPort;
+    field dstPort;
+    field seq;
+    field ack;
+    field flags;
+    field payload; // string
+
+    static def parse(frame, ipHeader) {
+        off = 20; // fixed IP header size, no options anywhere in this stack
+        s = new TcpSegment();
+        s.srcPort = Ip.u16From(frame, off);
+        s.dstPort = Ip.u16From(frame, off + 2);
+        s.seq = Ip.u32From(frame, off + 4);
+        s.ack = Ip.u32From(frame, off + 8);
+        s.flags = frame[off + 13];
+
+        dataOffsetWords = (frame[off + 12] >>> 4) & 0xF;
+        headerLen = dataOffsetWords * 4;
+        payloadLen = ipHeader.payloadLen - headerLen;
+
+        message = '';
+        i = 0;
+        while (i < payloadLen) {
+            message = message + Ip.netByteToChar(frame[off + headerLen + i]);
+            i = i + 1;
+        }
+        s.payload = message;
+        return s;
+    }
+}
+
+// every connection this process has created, LISTEN or otherwise - see
+// pump()'s own doc for why this has to be a registry, not a per-connection
+// poll. lock guards the list itself (registering a new connection while
+// pump() on another real core is iterating it - see nic.bl0's own doc on
+// why a shared compound structure across dispatch()'d cores needs a real
+// Mutex, not just discipline) - it does NOT protect an individual
+// TcpConn's own fields, which only the ONE side that owns that connection
+// ever mutates (a client and a server never touch the same TcpConn
+// instance).
+def class TcpRegistry {
+    static field conns;
+    static field lock;
+
+    // which of THIS process's own connections a just-arrived segment
+    // belongs to - an exact 4-tuple match (an already-connecting/connected
+    // socket) always wins over a bare listener on the same destination
+    // port, the same priority order a real TCP/IP stack's socket lookup
+    // uses. Returns nil if nothing matches (a stray/late segment -
+    // dropped).
+    static def findMatch(ipHeader, seg) {
+        lock(TcpRegistry.lock);
+        result = nil;
+        i = 0;
+        while (result == nil && i < len(TcpRegistry.conns)) {
+            c = TcpRegistry.conns[i];
+            if (c.state != 'LISTEN' && c.state != 'CLOSED' &&
+                    c.localIp == ipHeader.dstAddr && c.localPort == seg.dstPort &&
+                    c.remoteIp == ipHeader.srcAddr && c.remotePort == seg.srcPort) {
+                result = c;
+            }
+            i = i + 1;
+        }
+        i = 0;
+        while (result == nil && i < len(TcpRegistry.conns)) {
+            c = TcpRegistry.conns[i];
+            if (c.state == 'LISTEN' && c.localIp == ipHeader.dstAddr && c.localPort == seg.dstPort) {
+                result = c;
+            }
+            i = i + 1;
+        }
+        unlock(TcpRegistry.lock);
+        return result;
+    }
+
+    // drains every frame CURRENTLY queued on the NIC, routing each to
+    // whichever registered connection it belongs to. Has to be global
+    // across every connection this process owns, not a per-connection
+    // poll: Nic.tryRecv() is destructive (see nic.bl0's own doc), so if
+    // two connections in the same process each drained the shared queue
+    // looking only for their own traffic, whichever one polls second
+    // would never see a frame meant for it that the first one already
+    // discarded. Uses Nic.tryRecv() (not the hasFrame()+recv() pair)
+    // specifically because this runs from more than one real core once a
+    // client and a server are dispatch()'d onto different ones (see
+    // http.bl0's own demo) - see Nic.recv()'s own doc on why the two-call
+    // form isn't safe there. Every TcpConn method above calls this
+    // internally - a program using this stack never has to call it
+    // directly.
+    static def pump() {
+        while (true) {
+            frame = Nic.tryRecv();
+            if (frame == nil) { break; }
+
+            ipHeader = IpHeader.parse(frame);
+            if (ipHeader.proto != Ip.protoTcp) { continue; }
+
+            seg = TcpSegment.parse(frame, ipHeader);
+            target = TcpRegistry.findMatch(ipHeader, seg);
+            if (target != nil) {
+                target.handleSegment(ipHeader, seg);
+            }
+        }
+    }
+}
+TcpRegistry.conns = [];
+TcpRegistry.lock = newMutex();

@@ -1,0 +1,21 @@
+// sep is a single character - splitting on a multi-character separator
+// isn't supported.
+
+def class Split {
+    static def split(s, sep) {
+        result = [];
+        current = '';
+        i = 0;
+        while (i < len(s)) {
+            if (s[i] == sep[0]) {
+                push(result, current);
+                current = '';
+            } else {
+                current = current + s[i];
+            }
+            i = i + 1;
+        }
+        push(result, current);
+        return result;
+    }
+}

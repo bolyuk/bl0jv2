@@ -1,0 +1,82 @@
+// math helpers. import 'stdlib/mathlib.bl0'; (path relative to the
+// importing file) - not auto-included like the prelude, so a program that
+// never imports this pays nothing towards the per-program instruction
+// ceiling.
+//
+// static methods on a namespace class, not free top-level functions -
+// 'round'/'min'/'max'/etc are exactly the kind of short, generic names a
+// caller's own local variable is likely to want too (aeon-os/boot.bl0 had
+// to rename a loop variable away from 'round' for precisely this reason
+// before this existed) - Math.round(x) can't collide with a variable
+// named 'round' the way a bare round() reference could.
+
+def class Math {
+    static def abs(x) {
+        if (x < 0) { return -x; }
+        return x;
+    }
+
+    static def min(a, b) {
+        if (a < b) { return a; }
+        return b;
+    }
+
+    static def max(a, b) {
+        if (a > b) { return a; }
+        return b;
+    }
+
+    // int() truncates toward zero, not toward negative infinity, so
+    // floor(-2.5) needs an explicit correction that int(-2.5) alone
+    // doesn't give
+    static def floor(x) {
+        truncated = int(x);
+        if (float(truncated) > x) { return truncated - 1; }
+        return truncated;
+    }
+
+    static def ceil(x) {
+        truncated = int(x);
+        if (float(truncated) < x) { return truncated + 1; }
+        return truncated;
+    }
+
+    static def round(x) {
+        return Math.floor(x + 0.5);
+    }
+
+    // there's no dedicated sqrt opcode - ** already promotes to Math.pow
+    // for a fractional exponent, so x ** 0.5 covers it without needing one
+    static def sqrt(x) {
+        return x ** 0.5;
+    }
+
+    static def clamp(x, lo, hi) {
+        if (x < lo) { return lo; }
+        if (x > hi) { return hi; }
+        return x;
+    }
+
+    // prints an int's actual 32-bit bit pattern in hex, not its decimal
+    // value with a '-' sign - matters for debugging raw addresses/
+    // registers, where -1 should read as 'ffffffff', not '-1'. Uses >>>
+    // (not >>) for exactly that reason: peeling nibbles off a negative int
+    // with a sign-extending shift would never terminate.
+    static def toHex(n) {
+        digits = '0123456789abcdef';
+
+        if (n == 0) { return '0'; }
+
+        result = '';
+        remaining = n;
+        count = 0;
+        while (remaining != 0 && count < 8) {
+            nibble = remaining & 15;
+            result = digits[nibble] + result;
+            remaining = remaining >>> 4;
+            count = count + 1;
+        }
+
+        return result;
+    }
+}

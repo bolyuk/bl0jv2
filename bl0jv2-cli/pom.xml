@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>bl0jv2</groupId>
+        <artifactId>bl0jv2-parent</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>bl0jv2-cli</artifactId>
+    <packaging>jar</packaging>
+
+    <!-- the command-line entry point (Bl0jv2_CLI) - compiles and/or runs a
+         .bl0 program, so it needs both bl0jv2-compiler and bl0jv2-runtime.
+         Also holds the host-bridge networking (TcpBridge/UdpBridge/...) and
+         the bytecode disassembler (Bl0jv2_Utils) - neither the compiler nor
+         the runtime module needs either of those on its own. The bulk of
+         the test suite lives here too: almost every bl0jv2-level test
+         (Bl0jv2_TestRunner and everything built on it) exercises the full
+         compile -> link -> run pipeline, which only this module can see
+         both halves of. -->
+
+    <dependencies>
+        <dependency>
+            <groupId>bl0jv2</groupId>
+            <artifactId>bl0jv2-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>bl0jv2</groupId>
+            <artifactId>bl0jv2-runtime</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>bl0jv2</groupId>
+            <artifactId>bl0jv2-compiler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>bl0jv2-vm-lib</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.2</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>bl0.bl0jv2.cli.Bl0jv2_CLI</mainClass>
+                                </transformer>
+                            </transformers>
+                            <finalName>bl0jv2-vm</finalName>
+                            <shadedArtifactAttached>true</shadedArtifactAttached>
+                            <shadedClassifierName>fat</shadedClassifierName>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.graalvm.buildtools</groupId>
+                <artifactId>native-maven-plugin</artifactId>
+                <version>1.1.2</version>
+                <executions>
+                    <execution>
+                        <id>build-native</id>
+                        <goals><goal>compile-no-fork</goal></goals>
+                        <phase>package</phase>
+                    </execution>
+                </executions>
+                <configuration>
+                    <mainClass>bl0.bl0jv2.cli.Bl0jv2_CLI</mainClass>
+                    <imageName>bl0jv2</imageName>
+                    <buildArgs>
+                        <buildArg>--no-fallback</buildArg>
+                        <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+                    </buildArgs>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

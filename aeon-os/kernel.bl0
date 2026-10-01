@@ -18,11 +18,12 @@
 // them, the same way real physical memory works. Every OTHER program that
 // wants a heap has to agree on that address too (see initHeap()'s own doc).
 
-// char()/startsWith()/substr() used to be reimplemented right here instead
-// of imported - stdlib/str/char.bl0 in particular replaces an old
-// byteToChar() that only covered lowercase letters, digits and 7 symbols
-// (any uppercase letter or most punctuation silently rendered as '?'; the
-// stdlib version covers the full printable ASCII range instead)
+// Char.char()/Affix.startsWith()/Substr.substr() used to be reimplemented
+// right here instead of imported - stdlib/str/char.bl0 in particular
+// replaces an old byteToChar() that only covered lowercase letters, digits
+// and 7 symbols (any uppercase letter or most punctuation silently
+// rendered as '?'; the stdlib version covers the full printable ASCII
+// range instead)
 import '../stdlib/str/char.bl0';
 import '../stdlib/str/affix.bl0';
 import '../stdlib/str/substr.bl0';
@@ -141,7 +142,7 @@ Console.sysWriteVector = 1;
 // observable at all
 def sysConsoleWrite(byteValue) {
     out8(Console.port, byteValue);
-    print char(byteValue);
+    print Char.char(byteValue);
 }
 
 // call once - see initKeyboard()'s own doc on why this isn't done at

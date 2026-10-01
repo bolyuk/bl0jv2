@@ -1,0 +1,95 @@
+import 'tcp.bl0';
+import '../str/find.bl0';
+
+// minimal HTTP/1.0 over the TCP stack below - one request per connection,
+// GET only, no headers either side actually needs to send or parse
+// (Content-Length, Host, etc. are all skipped). The response has no
+// framing of its own: like real HTTP/1.0 without a Content-Length header,
+// the body simply ends when the server closes the connection - Http.get()
+// reads until it sees the peer's FIN, Http.serve() always closes right
+// after writing its one response. That's what makes this "HTTP/1.0", not
+// just "a text protocol over TCP": it's the actual convention that
+// version of the spec uses for framing a response.
+
+def class Http {
+    static field version;
+
+    // GETs 'path' from serverIp:serverPort, using localIp/localPort as
+    // this end's own address (TcpConn.connect() needs one - see its own
+    // doc). Blocks until the server closes its end - see this file's own
+    // header comment on why that's how a response ends here, not a length
+    // header. Returns the raw response text (status line + blank line +
+    // body) unparsed - see HttpResponse.parse() to split it into pieces.
+    static def get(localIp, localPort, serverIp, serverPort, path) {
+        conn = TcpConn.connect(localIp, localPort, serverIp, serverPort);
+        conn.send('GET ' + path + ' ' + Http.version + '\r\n\r\n');
+
+        response = '';
+        while (!conn.peerFinReceived) {
+            if (conn.hasData()) {
+                response = response + conn.receive();
+            } else {
+                wait(1);
+            }
+        }
+        response = response + conn.receive(); // whatever arrived alongside the FIN itself
+
+        conn.close();
+        return response;
+    }
+
+    // 'GET <path> HTTP/1.0\r\n\r\n' - only the request line, no headers to
+    // look past, so the path is just what's between the first two spaces
+    static def parsePath(request) {
+        afterMethod = len('GET ');
+        rest = Substr.substr(request, afterMethod, len(request));
+        pathLen = Find.find(rest, ' ');
+        return Substr.substr(rest, 0, pathLen);
+    }
+
+    // accepts exactly ONE request, hands its path to 'handler' (a plain
+    // bl0jv2 function: path -> response body string), writes the
+    // response, then closes - this stack's TcpConn.listen()/accept() pair
+    // only ever accepts one connection per call anyway (see listen()'s own
+    // doc), so a multi-request server would just call this again in a
+    // loop, each time with a fresh listen().
+    static def serve(localIp, localPort, handler) {
+        conn = TcpConn.listen(localIp, localPort);
+        conn.accept();
+
+        request = '';
+        while (Find.find(request, '\r\n\r\n') < 0) {
+            if (conn.hasData()) {
+                request = request + conn.receive();
+            } else {
+                wait(1);
+            }
+        }
+
+        path = Http.parsePath(request);
+        body = handler(path);
+
+        conn.send(Http.version + ' 200 OK\r\n\r\n' + body);
+        conn.close();
+        conn.waitClosed();
+    }
+}
+Http.version = 'HTTP/1.0';
+
+def class HttpResponse {
+    field statusLine;
+    field body;
+
+    static def parse(response) {
+        r = new HttpResponse();
+        sep = Find.find(response, '\r\n\r\n');
+        if (sep < 0) {
+            r.statusLine = response;
+            r.body = '';
+            return r;
+        }
+        r.statusLine = Substr.substr(response, 0, sep);
+        r.body = Substr.substr(response, sep + 4, len(response));
+        return r;
+    }
+}

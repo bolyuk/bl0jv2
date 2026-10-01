@@ -164,7 +164,7 @@ def sysPutc(byteValue) {
 
     println(
         '  [console] wrote 0x'
-        + toHex(byteValue)
+        + Math.toHex(byteValue)
         + ' to port '
         + Kernel.portConsole
     );
@@ -798,7 +798,7 @@ def taskNetwork() {
         '    [network] core '
         + currentCore()
         + ', packet=0x'
-        + toHex(peek32(buf))
+        + Math.toHex(peek32(buf))
     );
 
 
