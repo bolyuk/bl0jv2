@@ -1,0 +1,14 @@
+// aeon-os program: copy a file from the disk to the host's shared folder; hput <name> [hostpath]
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) < 2 || len(words) > 3) { consoleWriteLine('usage: hput <name> [hostpath]'); return nil; }
+    bytes = Fs.readData(inCwd(words[1]));
+    if (bytes == nil) { consoleWriteLine(words[1] + ': no such file'); return nil; }
+    target = len(words) == 3 ? words[2] : FsPath.base(inCwd(words[1]));
+    Hfs.write(target, bytes);
+    consoleWriteLine(Fmt.format('{} bytes from {} to host:{}', [len(bytes), words[1], target]));
+    free(bytes);
+}
+
+if (startProgram()) { main(Prog.words); }

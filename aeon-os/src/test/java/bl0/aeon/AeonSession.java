@@ -65,9 +65,15 @@ public final class AeonSession {
 
     /** a shell on the image at 'image'; fresh = start from a new copy of the OS disk, else keep what is there */
     static AeonSession shellOn(java.nio.file.Path image, boolean fresh) throws Exception {
+        return shellOn(image, fresh, null);
+    }
+
+    /** the same, with a host folder shared (--bridge-fs) when 'share' is not null */
+    static AeonSession shellOn(java.nio.file.Path image, boolean fresh, java.nio.file.Path share) throws Exception {
         var s = new AeonSession();
         s.start(compile("shell.bl0"), 1, vm -> {
             try {
+                if (share != null) vm.attach_share(new bl0.bl0jv2.cli.DirShare(share));
                 vm.attach_disk(fresh ? AeonImage.os(image) : new bl0.bl0jv2.cli.FileDisk(image, AeonImage.SECTORS));
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);

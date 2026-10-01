@@ -12,7 +12,8 @@ aeon-os/
   shell.bl0         the shell: built-ins, the network commands, program launcher
   child_*.bl0       small programs boot starts
   lib/              sys (system page), log, loader, userland (what a program imports)
-  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir
+  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir,
+                    and hls hcat hget hput hrm for the host folder shared with --bridge-fs
 ```
 
 ## There is no host filesystem
@@ -46,6 +47,12 @@ aeon-os/aeon.sh                 # builds aeon.img from the sources and boots it
 (`--disk-put aeon-os/bin:bin` copies a folder, compiling every `.bl0` to a
 `.bl0c`). The image keeps its files between runs; `--disk-put` rewrites what it
 names.
+
+## Moving files in and out
+
+`aeon.sh` shares `./share` (override with `SHARE=dir`) with `--bridge-fs`. In the
+shell: `hls`, `hcat <name>`, `hget <name> [as]` (host -> disk), `hput <name> [as]`
+(disk -> host), `hrm <name>`. The host only ever exposes that one folder.
 
 ## Adding a command
 

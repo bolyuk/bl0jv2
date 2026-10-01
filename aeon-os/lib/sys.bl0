@@ -10,6 +10,7 @@
 //   +12   syscall vector the disk driver uses from user mode
 //   +16   command line: 32-bit byte count, then UTF-8 bytes (at most 1000)
 //   +1024 working folder: the same shape
+//   +3072 host folder share (--bridge-fs): present, path buffer, data buffer, syscall vector
 //
 // The shell reserves the page once, privileged (reserve() is), and fills it
 // in; reading and writing it is peek/poke, which any ring may do.
@@ -71,3 +72,10 @@ def sysSetArgs(text) { sysPutText(Sys.base + 16, text); }
 def sysArgs() { return sysGetText(Sys.base + 16); }
 def sysSetCwd(text) { sysPutText(Sys.base + 1024, text); }
 def sysCwd() { return sysGetText(Sys.base + 1024); }
+
+def sysPublishHfs(present, pathBuffer, dataBuffer, vector) {
+    poke32(Sys.base + 3072, present ? 1 : 0);
+    poke32(Sys.base + 3076, pathBuffer);
+    poke32(Sys.base + 3080, dataBuffer);
+    poke32(Sys.base + 3084, vector);
+}

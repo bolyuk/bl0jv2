@@ -1,0 +1,9 @@
+// aeon-os program: delete a file (or an empty folder) in the host's shared folder; hrm <hostpath>
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: hrm <hostpath>'); return nil; }
+    Hfs.remove(words[1]);
+}
+
+if (startProgram()) { main(Prog.words); }

@@ -38,6 +38,7 @@ bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
       --bridge-tcp HOSTPORT:VMPORT  relay a real TCP socket to a Tcp listener
       --bridge-outbound          let VM code open real sockets (see below)
       --disk FILE [--disk-sectors N]  present FILE as a block device (created if missing)
+      --bridge-fs DIR    show the host folder DIR to the program (stdlib/fs/hostfs.bl0)
       --disk-put HOSTFILE[:NAME]  copy a host file or folder onto the --disk image first
                          (a .bl0 is compiled and stored as .bl0c); repeatable
   -I, --include DIR  look an import up in DIR when it is not next to the importing file
@@ -266,6 +267,12 @@ sectors first and only then switches the directory entry, so a failure keeps the
 old contents. Errors are `try/catch`-able messages starting `fs: `. After
 `dropToUserMode()` the same calls work: the privileged port writes go through
 a syscall (vector 6), while the sector buffer is read with `peek`/`poke`.
+
+`--bridge-fs DIR` additionally shows ONE host folder through a second device
+(share ports `0x0F10`-`0x0F28`, DMA like the disk): `stdlib/fs/hostfs.bl0` offers
+`Hfs.list/size/read/write/remove/mkdir`. The host resolves every path against
+that folder and refuses `..`, absolute paths and symlinks that lead out; nothing
+else of the host is reachable, and without the flag there is no device at all.
 
 To port to another machine, replace `fs/disk.bl0` (`Disk.read/write/sectors`)
 and nothing else. The aeon-os shell has `ls cat write append rm mv cp df format` and more (aeon-os/README.md).

@@ -1,0 +1,11 @@
+// aeon-os program: print a file of the host's shared folder; hcat <path>
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: hcat <hostpath>'); return nil; }
+    bytes = Hfs.read(words[1]);
+    printText(Utf8.decode(bytes));
+    free(bytes);
+}
+
+if (startProgram()) { main(Prog.words); }

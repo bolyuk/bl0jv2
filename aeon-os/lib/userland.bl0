@@ -18,6 +18,7 @@ import '../../stdlib/fs/dirs.bl0';
 import '../../stdlib/str/split.bl0';
 import '../../stdlib/str/fmt.bl0';
 import '../../stdlib/arrlib.bl0';
+import '../../stdlib/fs/hostfs.bl0';
 import 'sys.bl0';
 
 def class Prog {
@@ -94,6 +95,7 @@ def destination(from, to) {
 // call first thing in a program; false (after saying why) when there is no filesystem to use
 def startProgram() {
     Disk.attach(peek32(Sys.base + 8), peek32(Sys.base + 4), peek32(Sys.base + 12));
+    Hfs.attach(peek32(Sys.base + 3076), peek32(Sys.base + 3080), peek32(Sys.base + 3084), peek32(Sys.base + 3072) == 1);
     Prog.cwd = sysCwd();
     Prog.words = tokens(sysArgs());
     if (!Fs.mount()) {

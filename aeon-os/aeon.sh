@@ -12,11 +12,12 @@ JAR=${JAR:-bl0jv2-cli/target/bl0jv2-vm-lib.jar}
 IMG=${1:-aeon.img}
 BOOT=${2:-boot}
 CORES=1
+mkdir -p "${SHARE:-share}"
 [ "$BOOT" = smp_boot ] && CORES=4
 exec java -jar "$JAR" -c -e -k -n "$CORES" --disk "$IMG" --disk-sectors 2048 \
   --disk-put aeon-os/bin:bin \
   --disk-put aeon-os/shell.bl0:sbin/shell.bl0c \
   --disk-put aeon-os/child_hello.bl0:sbin/child_hello.bl0c \
   --disk-put aeon-os/child_crash.bl0:sbin/child_crash.bl0c \
-  --bridge-outbound \
+  --bridge-outbound --bridge-fs "${SHARE:-share}" \
   "aeon-os/$BOOT.bl0"

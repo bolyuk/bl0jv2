@@ -1,0 +1,15 @@
+// aeon-os program: list the folder the host shares (--bridge-fs); hls [path]
+import '../lib/userland.bl0';
+
+def main(words) {
+    path = len(words) > 1 ? words[1] : '';
+    names = Hfs.list(path);
+    i = 0;
+    while (i < len(names)) {
+        consoleWriteLine(names[i]);
+        i += 1;
+    }
+    if (len(names) == 0) { consoleWriteLine('(empty)'); }
+}
+
+if (startProgram()) { main(Prog.words); }

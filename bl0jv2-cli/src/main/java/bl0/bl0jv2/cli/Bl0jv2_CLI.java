@@ -60,6 +60,8 @@ public class Bl0jv2_CLI {
     private final java.util.List<Path> includeDirs = new java.util.ArrayList<>();
     // --disk: a host file presented to the program as a block device (see DiskController)
     private Path diskImage = null;
+    // --bridge-fs: one host folder shown to the program (see DirShare)
+    private Path bridgeFsDir = null;
     private final java.util.List<DiskImport.Spec> diskPuts = new java.util.ArrayList<>();
     private int diskSectors = 2048; // 1 MiB, used only when the image does not exist yet
 
@@ -124,6 +126,13 @@ public class Bl0jv2_CLI {
                         System.exit(1);
                     }
                     includeDirs.add(Path.of(args[++i]));
+                }
+                case "--bridge-fs" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--bridge-fs requires a folder");
+                        System.exit(1);
+                    }
+                    bridgeFsDir = Path.of(args[++i]);
                 }
                 case "--disk" -> {
                     if (i + 1 >= args.length) {
@@ -215,6 +224,8 @@ public class Bl0jv2_CLI {
         System.out.println("      --disk-put HOSTFILE[:NAME]  copy a host file onto the --disk image first");
         System.out.println("                  (formats a blank image); a .bl0 file is compiled and stored as");
         System.out.println("                  .bl0c, ready for the shell's exec (repeatable)");
+        System.out.println("      --bridge-fs DIR  show the host folder DIR to the program (read, write,");
+        System.out.println("                  list, delete inside it only; the guest's hls/hget/hput)");
         System.out.println("      --disk-sectors N  size of a newly created image (default 2048)");
         System.out.println("  -h, --help      show this help message and exit");
         System.out.println("  -V, --version   print version information and exit");
@@ -417,6 +428,14 @@ public class Bl0jv2_CLI {
                 // fine, this just keeps VM setup grouped together
                 vm.set_core_count(cores);
                 vm.feed_compiled_file(ByteBuffer.wrap(bytes));
+                if (bridgeFsDir != null) {
+                    try {
+                        vm.attach_share(new DirShare(bridgeFsDir));
+                    } catch (IOException e) {
+                        System.err.println("--bridge-fs " + bridgeFsDir + ": " + e.getMessage());
+                        return 1;
+                    }
+                }
                 if (diskImage == null && !diskPuts.isEmpty()) {
                     System.err.println("--disk-put needs --disk <image>");
                     return 1;

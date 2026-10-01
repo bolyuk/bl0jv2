@@ -8,6 +8,8 @@ import bl0.bl0jv2.runtime.interrupt.InterruptController;
 import bl0.bl0jv2.runtime.interrupt.TimerService;
 import bl0.bl0jv2.runtime.device.BlockDevice;
 import bl0.bl0jv2.runtime.device.DiskController;
+import bl0.bl0jv2.runtime.device.HostShare;
+import bl0.bl0jv2.runtime.device.ShareController;
 import bl0.bl0jv2.runtime.memory.PortIO;
 import bl0.bl0jv2.runtime.memory.RawMemory;
 import bl0.bl0jv2.runtime.values.*;
@@ -56,6 +58,7 @@ public final class Bl0jv2_jVM {
     // is deliberately separate from rawMemory
     private final PortIO portIO = new PortIO();
     private final DiskController disk = new DiskController(portIO, rawMemory);
+    private final ShareController share = new ShareController(portIO, rawMemory);
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
 
@@ -1061,6 +1064,11 @@ public final class Bl0jv2_jVM {
         disk.attach(device);
     }
 
+    // attaches a host folder behind the share ports (see ShareController); null detaches it
+    public void attach_share(HostShare folder) {
+        share.attach(folder);
+    }
+
     public long hostPortRead(int port, int widthBytes) {
         return portIO.read(port, widthBytes);
     }
@@ -1675,6 +1683,7 @@ public final class Bl0jv2_jVM {
                         int port = (int) unbox(reg[a]);
                         portIO.write(port, width / 8, value);
                         disk.onPortWrite(port, value);
+                        share.onPortWrite(port, value);
                     }
 
                     // vector in a, arg in b - synchronous, unlike

@@ -78,6 +78,9 @@ if (Disk.present()) { Fs.mount(); }
 // the page the programs on the disk read their environment from (lib/sys.bl0)
 sysReserve();
 sysPublish(Disk.bufAddr, Disk.sectors, Disk.vector);
+// the host folder, if the host shared one (--bridge-fs)
+Hfs.init(kalloc(260), kalloc(Hfs.chunk));
+sysPublishHfs(Hfs.present, Hfs.pathAddr, Hfs.dataAddr, Hfs.vector);
 Log.write('shell: started');
 
 // --- built-in commands ---
@@ -85,7 +88,7 @@ def cmdHelp() {
     consoleWriteLine('built in: help, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
     consoleWriteLine('          exec <file> [args]  (a text may hold \\n for a line break)');
     consoleWriteLine('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    consoleWriteLine('          hexdump df mkdir rmdir - and any program you put there, run by its name');
+    consoleWriteLine('          hexdump df mkdir rmdir hls hcat hget hput hrm (the --bridge-fs folder) - and any program you put there, run by its name');
     consoleWriteLine('network: net, netstat, setip <ip>, setdns <ip>, ping <host>, resolve <host>,');
     consoleWriteLine('         http <host[:port]> [path], tcp <host> <port> <text>, udp <host> <port> <text>, httpd <port>');
 }
