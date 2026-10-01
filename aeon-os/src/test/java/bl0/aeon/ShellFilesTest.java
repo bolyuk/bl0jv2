@@ -215,4 +215,22 @@ class ShellFilesTest {
         command(s, "format yes", "no disk attached");
         command(s, "ls", "ls: command not found");
     }
+
+    @Test
+    void variablesAndScripts(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "name=world", "$ ");
+        command(s, "echo hello $name", "hello world");
+        command(s, "echo '$name'", "$name");
+        command(s, "set", "name=world");
+        command(s, "unset name", "$ ");
+        command(s, "echo [$name]", "[]");
+        command(s, "echo '# a comment' > s.sh", "$ ");
+        command(s, "echo 'echo [$0] [$1] [$2]' >> s.sh", "$ ");
+        command(s, "echo 'x=set-in-script' >> s.sh", "$ ");
+        command(s, "echo 'echo $x' >> s.sh", "$ ");
+        command(s, "sh s.sh a b", "[s.sh] [a] [b]");
+        command(s, "echo [$1]", "[]");                           // the arguments are gone after the script
+        command(s, "sh nosuch.sh", "no such file");
+    }
 }

@@ -41,6 +41,7 @@ import 'kernel.bl0';
 import 'lib/drivers.bl0';
 import 'lib/netutil.bl0';
 import '../stdlib/str/split.bl0';
+import '../stdlib/str/trim.bl0';
 import '../stdlib/str/fmt.bl0';
 import 'lib/loader.bl0';
 import 'lib/userland.bl0';
@@ -87,6 +88,7 @@ Log.write('shell: started');
 // --- built-in commands ---
 def cmdHelp() {
     say('built in: help, clear, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
+    say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
     say('          hexdump df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
@@ -152,10 +154,14 @@ def class ShellState {
     static field running;
     static field cwd;
     static field pipeSeq;
+    static field vars;         // [[name, value], ...]: the shell's variables
+    static field depth;        // scripts running inside scripts
 }
 ShellState.running = true;
 ShellState.cwd = '';
 ShellState.pipeSeq = 0;
+ShellState.vars = [];
+ShellState.depth = 0;
 
 // a path as typed -> the stored name, relative to the current folder
 def here(path) {
@@ -299,6 +305,9 @@ def runStage(words) {
     if (cmd == 'pwd') { cmdPwd(); return nil; }
     if (cmd == 'cd') { guarded(cmdCd, words); return nil; }
     if (cmd == 'exec') { guarded(cmdExec, words); return nil; }
+    if (cmd == 'sh') { guarded(cmdSh, words); return nil; }
+    if (cmd == 'set') { cmdSet(words); return nil; }
+    if (cmd == 'unset') { guarded(cmdUnset, words); return nil; }
     if (cmd == 'format') { guarded(cmdFormat, words); return nil; }
     // anything else: a program on the disk
     runProgram(programPath(cmd), words, cmd);
@@ -477,12 +486,119 @@ def runCommand(line) {
     Log.write('shell: ' + line);
     stages = [];
     try {
-        stages = Cmdline.parse(line);
+        stages = Cmdline.parse(Cmdline.expand(line, varGet));
     } catch (e) {
         sayErr(str(e));
         return nil;
     }
+    if (len(stages) == 1 && isAssignments(stages[0])) {
+        i = 0;
+        while (i < len(stages[0].words)) {
+            eq = strFind(stages[0].words[i], '=', 0);
+            varSet(strSub(stages[0].words[i], 0, eq), strSub(stages[0].words[i], eq + 1, len(stages[0].words[i])));
+            i += 1;
+        }
+        return nil;
+    }
     if (len(stages) > 0) { runPipeline(stages); }
+}
+
+// --- variables and scripts ---
+
+def varGet(name) {
+    i = 0;
+    while (i < len(ShellState.vars)) {
+        if (ShellState.vars[i][0] == name) { return ShellState.vars[i][1]; }
+        i += 1;
+    }
+    return nil;
+}
+
+def varSet(name, value) {
+    i = 0;
+    while (i < len(ShellState.vars)) {
+        if (ShellState.vars[i][0] == name) { ShellState.vars[i][1] = value; return nil; }
+        i += 1;
+    }
+    push(ShellState.vars, [name, value]);
+}
+
+def varUnset(name) {
+    kept = [];
+    i = 0;
+    while (i < len(ShellState.vars)) {
+        if (ShellState.vars[i][0] != name) { push(kept, ShellState.vars[i]); }
+        i += 1;
+    }
+    ShellState.vars = kept;
+}
+
+// NAME=value (a letter or _ first, then letters, digits, _): the line only sets variables
+def isAssignments(stage) {
+    if (stage.inFile != nil || stage.outFile != nil || stage.background) { return false; }
+    i = 0;
+    while (i < len(stage.words)) {
+        w = stage.words[i];
+        eq = strFind(w, '=', 0);
+        if (eq < 1) { return false; }
+        j = 0;
+        while (j < eq) {
+            c = strSub(w, j, j + 1);
+            if (!Cmdline.isNameChar(c) || (j == 0 && strFind('0123456789', c, 0) >= 0)) { return false; }
+            j += 1;
+        }
+        i += 1;
+    }
+    return len(stage.words) > 0;
+}
+
+def cmdSet(words) {
+    i = 0;
+    while (i < len(ShellState.vars)) {
+        say(ShellState.vars[i][0] + '=' + ShellState.vars[i][1]);
+        i += 1;
+    }
+}
+
+def cmdUnset(words) {
+    if (len(words) < 2) { sayErr('usage: unset <name>...'); return nil; }
+    i = 1;
+    while (i < len(words)) {
+        varUnset(words[i]);
+        i += 1;
+    }
+}
+
+// sh <file> [arguments]: the lines of a text file, run as commands. Empty lines and lines starting with
+// # are skipped. The arguments are the variables $1, $2, ... and $0 is the file's name; they are what they
+// were before once the script has ended.
+def cmdSh(words) {
+    if (len(words) < 2) { sayErr('usage: sh <file> [arguments]'); return nil; }
+    if (!fsReady()) { return nil; }
+    if (ShellState.depth >= 8) { sayErr('sh: scripts nested too deeply'); return nil; }
+    text = Fs.read(here(words[1]));
+    if (text == nil) { sayErr(words[1] + ': no such file'); return nil; }
+    saved = [];
+    i = 0;
+    while (i < len(words) - 1 || i < 10) {
+        saved = Arr.concat(saved, [varGet('' + i)]);
+        if (i < len(words) - 1) { varSet('' + i, words[i + 1]); } else { varUnset('' + i); }
+        i += 1;
+    }
+    ShellState.depth += 1;
+    lines = Split.split(text, strChar(10));
+    n = 0;
+    while (n < len(lines) && ShellState.running) {
+        line = Trim.trim(lines[n]);
+        if (line != '' && strSub(line, 0, 1) != '#') { runCommand(line); }
+        n += 1;
+    }
+    ShellState.depth -= 1;
+    i = 0;
+    while (i < len(saved)) {
+        if (saved[i] == nil) { varUnset('' + i); } else { varSet('' + i, saved[i]); }
+        i += 1;
+    }
 }
 
 // --- command history and completion for the line editor ---
@@ -522,7 +638,7 @@ def histSave(line) {
 }
 
 def shellBuiltins() {
-    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec'];
+    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec', 'sh', 'set', 'unset'];
 }
 
 // Tab: what could replace the word under the cursor. The first word is a command

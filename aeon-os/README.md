@@ -142,6 +142,11 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   `head`, `tail`, `hexdump` are filters; with no file and no redirection they read the
   terminal until Ctrl-D) and report problems with `sayErr()`, which is always the
   terminal.
+* **Variables and scripts**: `name=value` sets a shell variable, `$name` / `${name}` use it (not inside
+  `'single quotes'`, nor after a backslash); `set` lists them, `unset name` removes one. Expansion happens
+  on the line before it is split, so a value is parsed like typed text. `sh file [args]` runs the lines of a
+  text file as commands (empty lines and `#` comments skipped); `$0`, `$1`... are the file's name and the
+  arguments while it runs.
 * **Colours**: the prompt, `ls` (folders, programs), `ps`, `df`, error messages and the banner use
   ANSI colours (`Term.paint`, `lib/term.bl0`). A program's `paint()` colours only when its output goes to the
   terminal - never into a pipe or a file. The line editor measures the prompt without its escape sequences.
