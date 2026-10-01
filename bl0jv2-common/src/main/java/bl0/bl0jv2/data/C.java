@@ -19,7 +19,10 @@ public final class C {
     // 10.02.26
     // binary operators are three-operand (reg[c] = reg[a] OP reg[b]) instead of
     // 'reg[a] = reg[a] OP reg[b]' after a MOV of the left operand
-    public static final int VERSION = 7;
+    // 10.03.26
+    // GET_FIELD / LOOKUP_METHOD write their result to c instead of overwriting
+    // the object register (no MOV of the object first)
+    public static final int VERSION = 8;
 
     public static final int MAGIC = 0x426C306A;
 

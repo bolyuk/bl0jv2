@@ -1534,7 +1534,7 @@ public final class Bl0jv2_jVM {
                         int slot = instance.cls.fieldSlot(constSymbols[b]);
                         if (slot < 0)
                             throw noSuchMember(instance.cls, "field", b);
-                        reg[a] = instance.getFieldRaw(slot);
+                        reg[c] = instance.getFieldRaw(slot);
                     }
 
                     // a = object, b = register holding the value, c = the
@@ -1567,7 +1567,7 @@ public final class Bl0jv2_jVM {
                         int method = instance.cls.methodIndex(constSymbols[b]);
                         if (method < 0)
                             throw noSuchMember(instance.cls, "method", b);
-                        reg[a] = instance.cls.methodRef(method);
+                        reg[c] = instance.cls.methodRef(method);
                     }
 
                     case OpCodes.MAKE_CELL -> reg[a] = boxRef(new Bl0jCell());

@@ -158,9 +158,9 @@ public final class Bl0jv2_Utils {
                 case OpCodes.TRY_EXIT -> writer.append("TRY_EXIT");
                 case OpCodes.MAKE_ERR -> writer.append(String.format("MAKE_ERR r%d = err(r%d)", a, a));
                 case OpCodes.NEW_INSTANCE -> writer.append(String.format("NEW_INSTANCE r%d = new(r%d)", a, a));
-                case OpCodes.GET_FIELD -> writer.append(String.format("GET_FIELD r%d = r%d.field[const %d]", a, a, b));
+                case OpCodes.GET_FIELD -> writer.append(String.format("GET_FIELD r%d = r%d.field[const %d]", c, a, b));
                 case OpCodes.SET_FIELD -> writer.append(String.format("SET_FIELD r%d.const[%d] = r%d", a, c, b));
-                case OpCodes.LOOKUP_METHOD -> writer.append(String.format("LOOKUP_METHOD r%d = r%d.method[const %d]", a, a, b));
+                case OpCodes.LOOKUP_METHOD -> writer.append(String.format("LOOKUP_METHOD r%d = r%d.method[const %d]", c, a, b));
                 case OpCodes.GET_STATIC_FIELD -> writer.append(String.format("GET_STATIC_FIELD r%d = r%d.staticField[%d]", a, a, b));
                 case OpCodes.SET_STATIC_FIELD -> writer.append(String.format("SET_STATIC_FIELD r%d.staticField[%d] = r%d", a, c, b));
                 case OpCodes.MAKE_CELL -> writer.append(String.format("MAKE_CELL r%d", a));

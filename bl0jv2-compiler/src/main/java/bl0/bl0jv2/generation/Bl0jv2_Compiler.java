@@ -1079,8 +1079,7 @@ public final class Bl0jv2_Compiler {
             valRegs[i] = compileInner(argNodes.get(i));
 
         int methodReg = regIndex++;
-        _emit(OpCodes.MOV, methodReg, objReg);
-        _emit(OpCodes.LOOKUP_METHOD, methodReg, constant(methodName));
+        _emit(OpCodes.LOOKUP_METHOD, objReg, constant(methodName), methodReg);
 
         int startReg = regIndex++;
         _emit(OpCodes.MOV, regIndex, objReg); // 'this'
@@ -1406,8 +1405,7 @@ public final class Bl0jv2_Compiler {
             checkFieldAccess(fieldAccess.target, fieldAccess.fieldName);
             int objReg = compileInner(fieldAccess.target);
             int result = regIndex++;
-            _emit(OpCodes.MOV, result, objReg);
-            _emit(OpCodes.GET_FIELD, result, constant(fieldAccess.fieldName));
+            _emit(OpCodes.GET_FIELD, objReg, constant(fieldAccess.fieldName), result);
             return result;
         }
 
