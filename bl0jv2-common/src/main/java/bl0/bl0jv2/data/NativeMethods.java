@@ -41,4 +41,12 @@ public final class NativeMethods {
     // periodic]) and cancel one by id
     public static final byte SET_TIMER = 0x17;
     public static final byte CANCEL_TIMER = 0x18;
+    // string helpers, so library code doesn't build strings a character at a
+    // time (each intermediate string is a heap entry): strSub(s, from, to),
+    // strFind(s, sub, from), strUpper(s), strLower(s), strJoin(array, sep)
+    public static final byte STR_SUB = 0x19;
+    public static final byte STR_FIND = 0x1A;
+    public static final byte STR_UPPER = 0x1B;
+    public static final byte STR_LOWER = 0x1C;
+    public static final byte STR_JOIN = 0x1D;
 }

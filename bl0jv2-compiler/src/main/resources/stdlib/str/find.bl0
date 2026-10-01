@@ -1,13 +1,13 @@
 import 'substr.bl0';
 
 def class Find {
+    // index of the first occurrence of sub in s, or -1; '' is found at 0
     static def find(s, sub) {
-        if (len(sub) == 0) { return 0; }
-        i = 0;
-        while (i <= len(s) - len(sub)) {
-            if (Substr.substr(s, i, i + len(sub)) == sub) { return i; }
-            i = i + 1;
-        }
-        return -1;
+        return strFind(s, sub, 0);
+    }
+
+    // same, but starting the search at index 'from'
+    static def findFrom(s, sub, from) {
+        return strFind(s, sub, from);
     }
 }

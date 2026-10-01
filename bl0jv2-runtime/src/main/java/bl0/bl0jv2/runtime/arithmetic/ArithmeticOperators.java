@@ -132,6 +132,10 @@ public final class ArithmeticOperators {
     // (and cannot be caught); now it is an ordinary error.
     private volatile int maxStringLength = 1 << 26; // 64M chars
 
+    public int maxStringLength() {
+        return maxStringLength;
+    }
+
     public void setMaxStringLength(int maxStringLength) {
         this.maxStringLength = maxStringLength;
     }

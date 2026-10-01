@@ -40,12 +40,12 @@ def class Fmt {
     }
 
     static def pad(text, width, left, zero) {
+        missing = width - len(text);
+        if (missing <= 0) { return text; }
         fill = ' ';
         if (zero) { fill = '0'; }
-        while (len(text) < width) {
-            if (left) { text = text + fill; } else { text = fill + text; }
-        }
-        return text;
+        if (left) { return text + fill * missing; }
+        return fill * missing + text;
     }
 
     // renders one value according to a spec string like '08x' or '>6'

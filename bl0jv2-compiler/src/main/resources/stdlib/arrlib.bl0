@@ -53,15 +53,11 @@ def class Arr {
         return result;
     }
 
+    // elements are shown the way str() shows them; built in one step by the
+    // strJoin builtin (a string appended per element used to leave every
+    // intermediate result on the heap)
     static def join(arr, sep) {
-        result = '';
-        i = 0;
-        while (i < len(arr)) {
-            if (i > 0) { result = result + sep; }
-            result = result + str(arr[i]);
-            i = i + 1;
-        }
-        return result;
+        return strJoin(arr, sep);
     }
 
     static def map(arr, f) {

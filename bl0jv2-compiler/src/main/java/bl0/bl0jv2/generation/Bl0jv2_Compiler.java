@@ -577,6 +577,40 @@ public final class Bl0jv2_Compiler {
         return startReg;
     }
 
+    // a builtin that is a native call taking 'argc' arguments and returning
+    // its result: one operand goes in directly, several are packed into a
+    // temporary array (a native has exactly one operand register), which is
+    // freed again right after the call
+    private Integer compileValueNative(FunCall funCall, String name, int argc, byte nativeId) {
+        if (!isBuiltinCall(funCall, name, argc))
+            return null;
+
+        if (argc == 1) {
+            int raw = compileInner(funCall.args.get(0));
+            int reg = regIndex++;
+            _emit(OpCodes.MOV, reg, raw);
+            _emit(OpCodes.CALL_NATIVE, nativeId, reg);
+            return reg;
+        }
+
+        int[] argRegs = new int[argc];
+        for (int i = 0; i < argc; i++)
+            argRegs[i] = compileInner(funCall.args.get(i));
+
+        int startReg = regIndex++;
+        for (int argReg : argRegs) {
+            _emit(OpCodes.MOV, regIndex, argReg);
+            regIndex++;
+        }
+        _emit(OpCodes.NEW_ARRAY, startReg, argc);
+
+        int arrRef = regIndex++; // see compileWaitEvent on why the array is freed
+        _emit(OpCodes.MOV, arrRef, startReg);
+        _emit(OpCodes.CALL_NATIVE, nativeId, startReg);
+        _emit(OpCodes.FREE, arrRef);
+        return startReg;
+    }
+
     // setTimer(ms, vector) / setInterval(ms, vector): value-producing (the
     // timer id). Both pack [ms, vector, periodic] into one array for the
     // one-operand native; the periodic flag is a compile-time constant.
@@ -1094,6 +1128,11 @@ public final class Bl0jv2_Compiler {
         if ((r = compileNewEvent(funCall)) != null) return r;
         if ((r = compileSignalEvent(funCall)) != null) return r;
         if ((r = compileRaiseInterruptOn(funCall)) != null) return r;
+        if ((r = compileValueNative(funCall, "strSub", 3, NativeMethods.STR_SUB)) != null) return r;
+        if ((r = compileValueNative(funCall, "strFind", 3, NativeMethods.STR_FIND)) != null) return r;
+        if ((r = compileValueNative(funCall, "strUpper", 1, NativeMethods.STR_UPPER)) != null) return r;
+        if ((r = compileValueNative(funCall, "strLower", 1, NativeMethods.STR_LOWER)) != null) return r;
+        if ((r = compileValueNative(funCall, "strJoin", 2, NativeMethods.STR_JOIN)) != null) return r;
         if ((r = compileSetTimer(funCall, "setTimer", 0)) != null) return r;
         if ((r = compileSetTimer(funCall, "setInterval", 1)) != null) return r;
         if ((r = compileCancelTimer(funCall)) != null) return r;

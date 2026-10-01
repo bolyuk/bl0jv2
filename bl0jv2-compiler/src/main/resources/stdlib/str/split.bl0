@@ -1,21 +1,28 @@
-// sep is a single character - splitting on a multi-character separator
-// isn't supported.
+// splits s at every occurrence of sep (any length, not just one character); the
+// pieces between and around separators are returned, so 'a,b,' split on ',' is
+// ['a', 'b', '']. An empty sep splits into single characters.
 
 def class Split {
     static def split(s, sep) {
         result = [];
-        current = '';
-        i = 0;
-        while (i < len(s)) {
-            if (s[i] == sep[0]) {
-                push(result, current);
-                current = '';
-            } else {
-                current = current + s[i];
+
+        if (len(sep) == 0) {
+            i = 0;
+            while (i < len(s)) {
+                push(result, strSub(s, i, i + 1));
+                i += 1;
             }
-            i = i + 1;
+            return result;
         }
-        push(result, current);
+
+        start = 0;
+        while (true) {
+            at = strFind(s, sep, start);
+            if (at < 0) { break; }
+            push(result, strSub(s, start, at));
+            start = at + len(sep);
+        }
+        push(result, strSub(s, start, len(s)));
         return result;
     }
 }

@@ -1,14 +1,10 @@
-// there's no substring opcode, so this builds one a character at a time.
-// shared dependency of find.bl0 and trim.bl0.
+// substring of s from index 'from' up to (not including) 'to'. A thin wrapper
+// over the strSub builtin, which builds the result in one step - this used to
+// append one character at a time, a heap entry per character. The range must
+// lie inside the string (0 <= from <= to <= len(s)), otherwise it is an error.
 
 def class Substr {
     static def substr(s, from, to) {
-        result = '';
-        i = from;
-        while (i < to) {
-            result = result + s[i];
-            i = i + 1;
-        }
-        return result;
+        return strSub(s, from, to);
     }
 }

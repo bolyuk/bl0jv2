@@ -176,6 +176,40 @@ public final class Bl0jv2_jVM {
             interrupts.raiseInterruptOn(core, vector);
             return null;
         });
+        // string helpers (see NativeMethods.STR_SUB) - one allocation for the
+        // result instead of one per character the bl0jv2 version built
+        nativeMethods.put(NativeMethods.STR_SUB, (arg) -> {
+            Object[] a = nativeArgs(arg, 3, "strSub(string, from, to)");
+            String s = requireString(a[0], "strSub");
+            int from = requireInt(a[1], "strSub"), to = requireInt(a[2], "strSub");
+            if (from < 0 || to > s.length() || from > to)
+                throw new Bl0j_VM_Exception("strSub: range [" + from + ", " + to + ") is outside the string (length " + s.length() + ")");
+            return s.substring(from, to);
+        });
+        nativeMethods.put(NativeMethods.STR_FIND, (arg) -> {
+            Object[] a = nativeArgs(arg, 3, "strFind(string, sub, from)");
+            String s = requireString(a[0], "strFind"), sub = requireString(a[1], "strFind");
+            int from = requireInt(a[2], "strFind");
+            if (from < 0 || from > s.length())
+                throw new Bl0j_VM_Exception("strFind: start " + from + " is outside the string (length " + s.length() + ")");
+            return s.indexOf(sub, from);
+        });
+        nativeMethods.put(NativeMethods.STR_UPPER, (arg) -> asciiCase(requireString(arg, "strUpper"), true));
+        nativeMethods.put(NativeMethods.STR_LOWER, (arg) -> asciiCase(requireString(arg, "strLower"), false));
+        nativeMethods.put(NativeMethods.STR_JOIN, (arg) -> {
+            Object[] a = nativeArgs(arg, 2, "strJoin(array, separator)");
+            if (!(a[0] instanceof Bl0jArray items))
+                throw new Bl0j_VM_Exception("strJoin: expected an array, got " + typeName(a[0]));
+            String sep = requireString(a[1], "strJoin");
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < items.length(); i++) {
+                if (i > 0) sb.append(sep);
+                sb.append(unbox(items.getRaw(i)));
+                if (sb.length() > ops.maxStringLength())
+                    throw new Bl0j_VM_Exception("string too long: strJoin would exceed " + ops.maxStringLength() + " characters");
+            }
+            return sb.toString();
+        });
         // setTimer/setInterval(ms, vector) -> timer id; cancelTimer(id) ->
         // true if it was still pending. Packed [ms, vector, periodic] -
         // see Bl0jv2_Compiler's compileSetTimer. The vector's handler runs
@@ -593,6 +627,43 @@ public final class Bl0jv2_jVM {
 
     private Bl0j_VM_Exception noSuchMember(Bl0jClass cls, String kind, int nameConst) {
         return new Bl0j_VM_Exception("class " + cls.name + " has no " + kind + " '" + unbox(consts[nameConst]) + "'");
+    }
+
+    // the packed argument array of a multi-argument native (see
+    // Bl0jv2_Compiler.compileValueNative), unboxed
+    private Object[] nativeArgs(Object arg, int count, String signature) {
+        if (!(arg instanceof Bl0jArray packed) || packed.length() != count)
+            throw new Bl0j_VM_Exception("expected " + signature);
+        Object[] values = new Object[count];
+        for (int i = 0; i < count; i++)
+            values[i] = unbox(packed.getRaw(i));
+        return values;
+    }
+
+    private static String requireString(Object value, String function) {
+        if (value instanceof String s)
+            return s;
+        if (value instanceof Character c)
+            return c.toString();
+        throw new Bl0j_VM_Exception(function + ": expected a string, got " + typeName(value));
+    }
+
+    private static int requireInt(Object value, String function) {
+        if (value instanceof Integer i)
+            return i;
+        throw new Bl0j_VM_Exception(function + ": expected an int, got " + typeName(value));
+    }
+
+    // only a-z / A-Z are changed - the same set the bl0jv2 Case library
+    // handled - so results don't depend on the JVM's locale or Unicode tables
+    private static String asciiCase(String s, boolean upper) {
+        char[] chars = s.toCharArray();
+        for (int i = 0; i < chars.length; i++) {
+            char c = chars[i];
+            if (upper && c >= 'a' && c <= 'z') chars[i] = (char) (c - 32);
+            else if (!upper && c >= 'A' && c <= 'Z') chars[i] = (char) (c + 32);
+        }
+        return new String(chars);
     }
 
     // one permanent heap entry per distinct word ("int", "true", "nil", ...),
@@ -1352,7 +1423,9 @@ public final class Bl0jv2_jVM {
                         if (nativeFun == null)
                             throw new Bl0j_VM_Exception("unknown native method: " + a);
                         Object result = nativeFun.apply(unbox(reg[b]));
-                        if (result instanceof Integer code && code == -1)
+                        // -1 is the generic error sentinel of the older natives (wait() on
+                        // interrupt...) - strFind legitimately answers -1 for 'not found'
+                        if (a != NativeMethods.STR_FIND && result instanceof Integer code && code == -1)
                             throw new Bl0j_VM_Exception("native method " + a + " returned error");
                         reg[b] = result == null ? NanBox.NIL : box(result);
                     }
