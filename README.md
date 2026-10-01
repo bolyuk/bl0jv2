@@ -281,17 +281,33 @@ and nothing else. The aeon-os shell has `ls cat write append rm mv cp df format`
 
 ### The terminal
 
-The console is a serial line, two devices on ports (the host emulates what a UART
-and a keyboard controller would be): **transmit** - the guest writes bytes to port
-`0x0F40`, UTF-8 text with ANSI escape sequences for cursor and screen control, and
-the host decodes them (a character may arrive in pieces); `in16(0x0F44)` and
-`in16(0x0F46)` are the screen's columns and rows. **Receive** - the host puts what the
-terminal sent (UTF-8, escape sequences for the arrow keys) into a FIFO and raises
-interrupt vector 2; the guest drains it with `in8(0x0F49)` (1 = a byte is waiting) and
-`in8(0x0F48)` (the next byte). The FIFO holds 4096 bytes, so nothing needs pacing.
-`-k` connects the host terminal (raw mode via `stty` where there is one). Keys,
-editing and screen handling are the guest's job: see aeon-os/README.md.
-`Utf8Stream` (stdlib/str/utf8.bl0) decodes a byte stream one byte at a time.
+The console is a serial line, and the host emulates the chip: a **16550-style UART**,
+eight byte-wide registers at `0x0F40` (offsets: 0 data / divisor low, 1 interrupt
+enable / divisor high, 2 interrupt cause (read) and FIFO control (write), 3 line
+control with the divisor-latch bit, 4 modem control, 5 line status, 6 modem status,
+7 scratch), laid out and behaving as a driver written for a real one expects:
+
+* both directions have **16-byte FIFOs** (one byte until the guest enables them in the
+  FIFO control register, as on a 16450), and the receive interrupt has the trigger
+  levels 1/4/8/14;
+* **line status** reports data ready, overrun (cleared by reading), transmit FIFO empty
+  and transmitter idle; the **interrupt cause** register names the highest-priority
+  pending cause - line status, received data, character timeout, transmitter empty -
+  and the guest reads it until it says none (the interrupt is vector 2);
+* with `--uart-baud N` the transmitter sends one character per ten bit times and its
+  FIFO stays full meanwhile: a driver that writes without looking at the line status
+  loses bytes, as on hardware; the default sends instantly. Received bytes wait outside
+  the chip while the FIFO is full (hardware flow control), so nothing a host pastes is
+  lost; the library switch `set_uart_flow_control(false)` makes them drop with the
+  overrun flag set instead.
+
+The bytes are UTF-8 text with ANSI escape sequences for cursor and screen control going
+out, and what a terminal sends (arrow keys as escape sequences) coming in; the host
+decodes the stream (a character may arrive in pieces). The screen's size is two read-only
+ports, `in16(0x0F50)` columns and `in16(0x0F52)` rows. `-k` connects the host terminal
+(raw mode via `stty` where there is one). Keys, editing and screen handling are the
+guest's job: see aeon-os/README.md. `Utf8Stream` (stdlib/str/utf8.bl0) decodes a byte
+stream one byte at a time.
 
 ### Network stack
 

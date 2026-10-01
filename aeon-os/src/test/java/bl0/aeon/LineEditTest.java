@@ -157,4 +157,24 @@ class LineEditTest {
         s.thread.join(10_000);
         assertTrue(s.finished && s.output().contains("aeon-shell exiting"), s.output());
     }
+
+    // at a real line speed the transmit FIFO is full most of the time: the driver has to look at the
+    // line status before writing, or characters would vanish
+    @Test
+    void theConsoleSurvivesALineSpeedSlowerThanTheGuest(@TempDir Path dir) throws Exception {
+        var s = new AeonSession();
+        s.start(AeonSession.compile("shell.bl0"), 1, vm -> {
+            try {
+                vm.set_uart_baud(115_200);
+                vm.attach_disk(AeonImage.os(dir.resolve("d.img")));
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        assertTrue(s.waitFor("aeon-shell ready", 30_000), s.output());
+        s.type("echo привет, мир" + ENTER);
+        assertTrue(s.waitFor("привет, мир\n", 20_000), s.output());
+        s.type("ls bin | wc" + ENTER);
+        assertTrue(s.waitFor("lines,", 20_000), s.output());
+    }
 }

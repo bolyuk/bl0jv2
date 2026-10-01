@@ -101,7 +101,7 @@ public final class AeonSession {
 
     /** what the terminal sends when the user types: these characters as UTF-8, escape sequences included */
     public void type(String text) throws InterruptedException {
-        vm.key_input(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        vm.uart_receive(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         Thread.sleep(30);
     }
 
