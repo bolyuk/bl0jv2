@@ -49,6 +49,9 @@ final class TcpBridge {
     TcpBridge(Bl0jv2_jVM vm, int hostTcpPort, int localFakeIp, int localFakePort, int remoteFakeIp) throws IOException {
         this.vm = vm;
         this.relay = new TcpRelay(vm);
+        // tell the guest a bridge is attached (Nic.initAuto reads it); a connection
+        // only subscribes to the TX window later, long after a shell has booted
+        TxDispatcher.of(vm);
         this.localFakeIp = localFakeIp;
         this.localFakePort = localFakePort;
         this.remoteFakeIp = remoteFakeIp;
