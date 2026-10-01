@@ -51,6 +51,7 @@ import 'lib/proc.bl0';
 import 'lib/perm.bl0';
 import 'lib/users.bl0';
 import 'lib/power.bl0';
+import 'lib/devfs.bl0';
 import '../stdlib/time/clock.bl0';
 
 // when boot.bl0 exec()s this file, it already called kernel.bl0's
@@ -1116,6 +1117,10 @@ mountFstab();
 
 
 consoleWriteLine('=== aeon-os shell booting ===');
+
+// devices and processes as files
+Fs.provide('dev', devProvider);
+Fs.provide('proc', procProvider);
 
 // from here on a program in user mode reaches the disk only through the kernel's gate
 Fs.gate = Sys.fsGate;

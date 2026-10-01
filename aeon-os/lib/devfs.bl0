@@ -1,0 +1,192 @@
+// aeon-os: devices and processes as files. Two virtual folders (see Fs.provide in stdlib/fs/fs.bl0), made by the
+// kernel; there is nothing on the disk behind them. A file is generated when it is read and does something when it
+// is written, and the usual permissions apply to it like to any other file, so who may use a device is decided
+// the way everything else is.
+//
+//   dev/null       0666   reads as empty, swallows what is written
+//   dev/zero       0444   reads as 64 NUL characters
+//   dev/random     0444   reads as 32 hex digits from a hash of the clock, the uptime and a counter - unpredictable
+//                         enough for a demo, not for a key
+//   dev/console    0222   what is written appears on the terminal (the way a program's own output would)
+//   dev/time       0444   the date and time, UTC          dev/uptime   milliseconds since the machine started
+//   dev/cpu        0444   the cores and what each runs
+//
+//   proc/<pid>/status  0444   name, state, core, user, start and run time of the process
+//   proc/<pid>/cmd     0444   what it is running
+//   proc/<pid>/ctl     0200   write 'kill' to ask it to stop (only its owner, or root, may write the file)
+//   proc/uptime        0444   as dev/uptime
+//
+// The owner of a process's files is the user it runs for. Names that exist are listed; a process that has ended
+// stays for a while (the last 32), as in ps.
+
+import 'userland.bl0';
+import 'proc.bl0';
+import '../../stdlib/time/clock.bl0';
+import '../../stdlib/crypto/sha256.bl0';
+import '../../stdlib/str/split.bl0';
+import '../../stdlib/str/trim.bl0';
+import 'users.bl0';
+
+def class Devfs {
+    static field counter;
+
+    static def file(mode, size) { return [0, 0, mode, size, 0]; }
+    static def folder() { return [0, 0, 0x16D, 0, 1]; }          // 0555
+
+    static def randomText() {
+        Devfs.counter += 1;
+        return strSub(Sha256.hex(ticks() + ':' + Clock.text(Clock.read()) + ':' + Devfs.counter + ':' + Devfs.counter * 7919), 0, 32);
+    }
+
+    static def cpuText() {
+        out = '';
+        i = 0;
+        while (i < coreCount()) {
+            p = nil;
+            j = 0;
+            while (j < len(Proc.table)) {
+                if (Proc.table[j].state == 'running' && Proc.table[j].core == i) { p = Proc.table[j]; }
+                j += 1;
+            }
+            out = out + 'core ' + i + ': ' + (p == nil ? 'idle' : p.name + ' (pid ' + p.pid + ')') + '\n';
+            i += 1;
+        }
+        return out;
+    }
+
+    // the answer for a file of dev/: nil when there is no such file
+    static def devText(name) {
+        if (name == 'null') { return ''; }
+        if (name == 'zero') { return strRepeatChar(0, 64); }
+        if (name == 'random') { return Devfs.randomText() + '\n'; }
+        if (name == 'time') { return Clock.text(Clock.read()) + '\n'; }
+        if (name == 'uptime') { return '' + ticks() + '\n'; }
+        if (name == 'cpu') { return Devfs.cpuText(); }
+        if (name == 'console') { return ''; }
+        return nil;
+    }
+
+    static def devStat(name) {
+        if (name == '') { return Devfs.folder(); }
+        if (name == 'null') { return Devfs.file(0x1B6, 0); }
+        if (name == 'console') { return Devfs.file(0x92, 0); }              // 0222
+        if (name == 'zero' || name == 'random' || name == 'time' || name == 'uptime' || name == 'cpu') { return Devfs.file(0x124, 0); }   // 0444
+        return nil;
+    }
+
+    static def devNames() {
+        return ['console', 'cpu', 'null', 'random', 'time', 'uptime', 'zero'];
+    }
+
+    // the process with number n, or nil
+    static def process(n) {
+        pid = unsignedNumber(n);
+        if (pid == nil) { return nil; }
+        return Proc.find(pid);
+    }
+
+    static def statusText(p) {
+        end = p.state == 'running' ? ticks() : p.ended;
+        return 'name: ' + p.name + '\nstate: ' + p.state + '\ncore: ' + p.core + '\nuser: ' + Users.nameOf(p.uid) + ' (' + p.uid + ')\nstarted: '
+            + p.started + 'ms\nran: ' + (end - p.started) + 'ms\n' + (p.message == '' ? '' : 'message: ' + p.message + '\n');
+    }
+
+    static def procStat(rel) {
+        if (rel == '') { return Devfs.folder(); }
+        if (rel == 'uptime') { return Devfs.file(0x124, 0); }
+        parts = Split.split(rel, '/');
+        p = Devfs.process(parts[0]);
+        if (p == nil) { return nil; }
+        if (len(parts) == 1) { return [p.uid, p.uid, 0x16D, 0, 1]; }
+        if (len(parts) != 2) { return nil; }
+        if (parts[1] == 'status' || parts[1] == 'cmd') { return [p.uid, p.uid, 0x124, 0, 0]; }
+        if (parts[1] == 'ctl') { return [p.uid, p.uid, 0x80, 0, 0]; }              // 0200
+        return nil;
+    }
+
+    static def procNames() {
+        out = [['uptime', 0]];
+        i = 0;
+        while (i < len(Proc.table)) {
+            pid = Proc.table[i].pid;
+            push(out, [pid + '/cmd', 0]);
+            push(out, [pid + '/ctl', 0]);
+            push(out, [pid + '/status', 0]);
+            i += 1;
+        }
+        return out;
+    }
+}
+Devfs.counter = 0;
+
+def strRepeatChar(code, n) {
+    c = strChar(code);
+    out = '';
+    i = 0;
+    while (i < n) { out = out + c; i += 1; }
+    return out;
+}
+
+// the entries of 'names' whose name starts with 'prefix'
+def startingWith(names, prefix) {
+    out = [];
+    i = 0;
+    while (i < len(names)) {
+        if (strFind(names[i][0], prefix, 0) == 0) { push(out, names[i]); }
+        i += 1;
+    }
+    return out;
+}
+
+// the provider of dev/
+def devProvider(op, rel, arg, uid, gid) {
+    if (op == 13) { return Devfs.devStat(rel); }
+    if (op == 4) {
+        names = [];
+        all = Devfs.devNames();
+        i = 0;
+        while (i < len(all)) { push(names, [all[i], 0]); i += 1; }
+        return startingWith(names, rel);
+    }
+    if (op == 2) { return Devfs.devText(rel); }
+    if (op == 1 || op == 10) {
+        if (rel == 'null') { return nil; }
+        if (rel == 'console') {
+            if (arg != '') { consoleAsync(arg); }
+            return nil;
+        }
+        if (Devfs.devStat(rel) == nil) { throw('fs: dev/' + rel + ': no such device'); }
+        throw('fs: dev/' + rel + ' cannot be written');
+    }
+    if (op == 3) { throw('fs: a device cannot be removed'); }
+    return nil;
+}
+
+// the provider of proc/
+def procProvider(op, rel, arg, uid, gid) {
+    if (op == 13) { return Devfs.procStat(rel); }
+    if (op == 4) { return startingWith(Devfs.procNames(), rel); }
+    parts = Split.split(rel, '/');
+    if (op == 2) {
+        if (rel == 'uptime') { return '' + ticks() + '\n'; }
+        if (len(parts) != 2) { return nil; }
+        p = Devfs.process(parts[0]);
+        if (p == nil) { return nil; }
+        if (parts[1] == 'status') { return Devfs.statusText(p); }
+        if (parts[1] == 'cmd') { return p.path + '\n'; }
+        return nil;
+    }
+    if (op == 1 || op == 10) {
+        if (len(parts) == 2 && parts[1] == 'ctl') {
+            p = Devfs.process(parts[0]);
+            if (p == nil) { throw('fs: proc/' + rel + ': no such process'); }
+            if (arg == '') { return nil; }
+            if (Trim.trim(arg) != 'kill') { throw('fs: proc/' + rel + ': the only command is kill'); }
+            if (p.system || !Proc.kill(p.pid)) { throw('fs: ' + p.name + ' is not a running process that can be stopped'); }
+            return nil;
+        }
+        throw('fs: proc/' + rel + ' cannot be written');
+    }
+    if (op == 3) { throw('fs: use proc/<pid>/ctl (write kill) to stop a process'); }
+    return nil;
+}
