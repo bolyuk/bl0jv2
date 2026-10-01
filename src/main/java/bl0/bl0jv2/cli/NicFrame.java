@@ -43,6 +43,17 @@ final class NicFrame {
     static final int HOST_TX_DATA_BASE = 2004;
     static final int HOST_TX_ACK_PORT = 3600;
 
+    // DNS (VM -> host -> VM): a request/response pair, not a frame at all
+    // (no IP/UDP wrapping - see stdlib/net/dns.bl0's own doc on why this
+    // is a separate, simpler mechanism than the NIC ports above). Name
+    // region is 4004 .. 4004+MAX_DNS_NAME_BYTES-1 (4259)
+    static final int MAX_DNS_NAME_BYTES = 255; // longest a real DNS name is ever allowed to be
+    static final int HOST_DNS_REQ_SEQ_PORT = 4000;
+    static final int HOST_DNS_REQ_LEN_PORT = 4002;
+    static final int HOST_DNS_REQ_DATA_BASE = 4004;
+    static final int HOST_DNS_RESP_ACK_PORT = 4300;
+    static final int HOST_DNS_RESP_IP_PORT = 4302;
+
     static final int IP_PROTO_UDP = 17;
     static final int IP_PROTO_TCP = 6;
 
@@ -149,6 +160,52 @@ final class NicFrame {
         writeU32(h, 16, dstAddr);
         writeU16(h, 10, ipChecksum(h, 0, 20));
         return h;
+    }
+
+    // builds a frame in this project's OWN fake IP/UDP format (see
+    // stdlib/net/ip.bl0 and udp.bl0's own header comments) - NOT a real
+    // Ethernet/IP frame, so this can be built with a plain UDP socket and
+    // no raw-socket privileges at all. Shared by UdpBridge (inbound: wraps
+    // a real datagram that just arrived) and UdpOutboundBridge (outbound:
+    // wraps a real reply on its way back in).
+    static byte[] buildUdpFrame(int srcAddr, int srcPort, int dstAddr, int dstPort,
+                                 byte[] payload, int payloadOffset, int payloadLen) {
+        int udpLen = 8 + payloadLen;
+        byte[] ipHeader = buildIpHeader(srcAddr, dstAddr, IP_PROTO_UDP, udpLen);
+
+        byte[] frame = new byte[20 + udpLen];
+        System.arraycopy(ipHeader, 0, frame, 0, 20);
+
+        writeU16(frame, 20, srcPort);
+        writeU16(frame, 22, dstPort);
+        writeU16(frame, 24, udpLen);
+        writeU16(frame, 26, 0); // UDP checksum - always 0, see udp.bl0's own doc
+
+        System.arraycopy(payload, payloadOffset, frame, 28, payloadLen);
+        return frame;
+    }
+
+    // the reverse of buildUdpFrame(): pulls the UDP payload back out of a
+    // frame the VM sent us via nicHostSend() - IP header (20 bytes, fixed,
+    // no options - see ip.bl0's own doc) then an 8-byte UDP header then
+    // the payload. null if the frame is malformed/truncated.
+    static byte[] parseUdpPayload(byte[] frame) {
+        int totalLen = ipTotalLen(frame);
+        int udpLen = readU16(frame, 24);
+        int payloadLen = udpLen - 8;
+        if (payloadLen < 0 || 20 + udpLen > totalLen || 28 + payloadLen > frame.length)
+            return null;
+        byte[] payload = new byte[payloadLen];
+        System.arraycopy(frame, 28, payload, 0, payloadLen);
+        return payload;
+    }
+
+    static int udpSrcPort(byte[] frame) {
+        return readU16(frame, 20);
+    }
+
+    static int udpDstPort(byte[] frame) {
+        return readU16(frame, 22);
     }
 
     static int ipProto(byte[] frame) {

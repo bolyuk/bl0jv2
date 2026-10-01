@@ -47,6 +47,15 @@ public class Bl0jv2_CLI {
     // own fake SYN, not just relay whatever arrives - see its own doc
     private int bridgeTcpPort = -1;
     private int bridgeTcpVmPort = -1;
+    // lets bl0jv2 code REACH OUT for real too (tcpConnect()/udpSend(), and
+    // stdlib/net/dns.bl0's own dnsResolve() on top of the latter - see
+    // TcpOutboundBridge/UdpOutboundBridge's own doc), the reverse of
+    // --bridge-udp/--bridge-tcp above (a real peer reaching IN). Separate
+    // flag rather than always-on together with those: opening real
+    // outbound connections on the VM's own say-so is a bigger trust step
+    // than just answering whoever already knows to connect to a chosen
+    // local port, worth requiring explicitly.
+    private boolean bridgeOutbound = false;
 
     private void parseArgs(String[] args) {
         for (int i = 0; i < args.length; i++) {
@@ -102,6 +111,7 @@ public class Bl0jv2_CLI {
                         System.exit(1);
                     }
                 }
+                case "--bridge-outbound" -> bridgeOutbound = true;
                 case "-h", "--help"    -> help    = true;
                 case "-V", "--version" -> version = true;
                 default -> {
@@ -153,6 +163,11 @@ public class Bl0jv2_CLI {
         System.out.println("                  connection at a time (see tcpListen()'s own doc); the");
         System.out.println("                  bl0jv2 program must call initNicWithHostBridge(), not");
         System.out.println("                  plain initNic(); only meaningful together with -e");
+        System.out.println("      --bridge-outbound  lets bl0jv2 code reach OUT for real - a program's");
+        System.out.println("                  own tcpConnect() opens a real socket to wherever it");
+        System.out.println("                  names, and stdlib/net/dns.bl0's dnsResolve() answers for");
+        System.out.println("                  real too. The reverse of -b/--bridge-tcp above (a real");
+        System.out.println("                  peer reaching IN); only meaningful together with -e");
         System.out.println("  -h, --help      show this help message and exit");
         System.out.println("  -V, --version   print version information and exit");
     }
@@ -356,7 +371,8 @@ public class Bl0jv2_CLI {
                 // until the user types 'exit'") - a plain PrintWriter over
                 // System.out has no such guarantee without an explicit
                 // flush after every write
-                Writer outWriter = (keyboard || bridgeUdpPort >= 0 || bridgeTcpPort >= 0) ? consoleAutoFlushWriter() : writer;
+                Writer outWriter = (keyboard || bridgeUdpPort >= 0 || bridgeTcpPort >= 0 || bridgeOutbound)
+                        ? consoleAutoFlushWriter() : writer;
                 vm.set_out_writer(outWriter);
                 if (keyboard) {
                     vm.set_interrupt_poll_interval(1);
@@ -382,6 +398,11 @@ public class Bl0jv2_CLI {
                         System.err.println("--bridge-tcp: cannot bind host port " + bridgeTcpPort + ": " + e.getMessage());
                         return 1;
                     }
+                }
+                if (bridgeOutbound) {
+                    vm.set_interrupt_poll_interval(1);
+                    new TcpOutboundBridge(vm).start();
+                    new UdpOutboundBridge(vm).start();
                 }
                 System.out.println();
                 // flush in finally: a crash mid-program must not discard

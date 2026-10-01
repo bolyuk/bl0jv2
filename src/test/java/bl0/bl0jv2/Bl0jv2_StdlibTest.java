@@ -331,4 +331,62 @@ class Bl0jv2_StdlibTest {
                 "print r.statusLine + '|' + r.body;",
                 vm -> vm.set_core_count(2)));
     }
+
+    // --- dns.bl0 --- pure wire-format logic (RFC1035 query building,
+    // response parsing including name compression) - no network needed,
+    // so these run the same everywhere regardless of whether the
+    // environment actually has outbound internet access (see
+    // UdpOutboundBridge's own doc: reaching a REAL resolver needs
+    // --bridge-outbound, which these tests deliberately don't exercise).
+
+    @Test
+    void dnsBuildQueryEncodesTheHeaderAndQuestionCorrectly(@TempDir Path dir) throws IOException {
+        // 12-byte header + 'a.bc' as [1]'a'[2]'bc'[0] (6 bytes) + QTYPE/QCLASS (4 bytes) = 22
+        assertEquals("22|18,52|1,0|1,97,2,98,99,0", run(dir, "net/dns.bl0",
+                "q = dnsBuildQuery('a.bc', 0x1234); " +
+                "print len(q) + '|' + q[0] + ',' + q[1] + '|' + q[2] + ',' + q[3] + '|' " +
+                "+ q[12] + ',' + q[13] + ',' + q[14] + ',' + q[15] + ',' + q[16] + ',' + q[17];"));
+    }
+
+    @Test
+    void dnsParseResponseFollowsANameCompressionPointerToFindTheAnswer(@TempDir Path dir) throws IOException {
+        // header(12) + question 'a.bc'(10) + one A answer whose own NAME is
+        // a compression pointer (0xC0 0x0C) back to the question's own
+        // qname at offset 12 - real authoritative servers do this
+        // constantly (RFC1035 4.1.4) rather than repeating the name
+        assertEquals("16909060", run(dir, "net/dns.bl0",
+                "resp = [" +
+                "0x12,0x34, 0x81,0x80, 0x00,0x01, 0x00,0x01, 0x00,0x00, 0x00,0x00, " +
+                "1,97,2,98,99,0, 0x00,0x01,0x00,0x01, " +
+                "0xC0,0x0C, 0x00,0x01, 0x00,0x01, 0x00,0x00,0x00,0x3C, 0x00,0x04, " +
+                "1,2,3,4" +
+                "]; " +
+                "print dnsParseResponse(resp);"));
+    }
+
+    @Test
+    void dnsParseResponseSkipsAPrecedingCnameToFindTheARecord(@TempDir Path dir) throws IOException {
+        // two answers: first a CNAME (type 5), then the A record - proves
+        // dnsParseResponse() doesn't just look at the FIRST answer, it
+        // scans for the first type-1 one, since a CNAME's own RDATA isn't
+        // an address at all
+        assertEquals("84281096", run(dir, "net/dns.bl0",
+                "resp = [" +
+                "0x00,0x01, 0x81,0x80, 0x00,0x01, 0x00,0x02, 0x00,0x00, 0x00,0x00, " +
+                "1,97,0, 0x00,0x01,0x00,0x01, " +
+                // answer 1: CNAME, pointer name, rdlength=2 (a nonsense 2-byte payload - content doesn't matter, only its length, to correctly skip past it)
+                "0xC0,0x0C, 0x00,0x05, 0x00,0x01, 0x00,0x00,0x00,0x3C, 0x00,0x02, 0xAA,0xBB, " +
+                // answer 2: A record, pointer name, rdata = 5.6.7.8
+                "0xC0,0x0C, 0x00,0x01, 0x00,0x01, 0x00,0x00,0x00,0x3C, 0x00,0x04, 5,6,7,8" +
+                "]; " +
+                "print dnsParseResponse(resp);"));
+    }
+
+    @Test
+    void dnsResolveReturnsZeroWhenNothingEverAnswers(@TempDir Path dir) throws IOException {
+        // no --bridge-outbound here, so nothing is listening on the
+        // DNS request ports at all - dnsResolve() has to give up and
+        // return the documented failure sentinel rather than hang forever
+        assertEquals("0", run(dir, "net/dns.bl0", "print dnsResolve('example.com');"));
+    }
 }

@@ -1,0 +1,33 @@
+// a one-shot "does this stack actually reach the real internet" check:
+// resolves google.com for real (stdlib/net/dns.bl0 - a real DNS-over-UDP
+// query, not a host-side shortcut), then does a real HTTP GET against
+// whatever IP came back. Needs --bridge-outbound (see Bl0jv2_CLI's own
+// help text) - without it, udpSend()/tcpConnect() never leave the VM at
+// all, loopback only.
+
+import 'D:/IdeaProjects/bl0jv2/stdlib/net/dns.bl0';
+import 'D:/IdeaProjects/bl0jv2/stdlib/net/http.bl0';
+import 'D:/IdeaProjects/bl0jv2/stdlib/mathlib.bl0';
+
+initNicWithHostBridge();
+
+// 8.8.8.8 is the default, but plenty of routers/ISPs intercept or drop
+// port-53 traffic addressed to a foreign resolver while leaving the
+// router's OWN resolver untouched - a ping/TCP:443 to 8.8.8.8 working
+// while an explicit DNS query to it times out is the telltale sign.
+// Point this at your own router/resolver (whatever `ipconfig /all`
+// shows as the DNS server) if 8.8.8.8 doesn't answer on your network.
+Dns.serverIp = 0x0A000101; // 10.0.1.1
+
+println 'resolving google.com...';
+ip = dnsResolve('google.com');
+println 'google.com -> ' + toHex(ip) + ' = ' + ((ip >>> 24) & 0xFF) + '.' + ((ip >>> 16) & 0xFF) + '.' + ((ip >>> 8) & 0xFF) + '.' + (ip & 0xFF);
+
+if (ip == 0) {
+    println 'DNS resolution failed - no internet access, or the query timed out';
+} else {
+    println 'connecting...';
+    response = httpGet(0x0A000002, 54000, ip, 80, '/');
+    println 'response:';
+    println response;
+}

@@ -14,21 +14,24 @@ import java.net.SocketTimeoutException;
 import static bl0.bl0jv2.cli.NicFrame.*;
 
 /**
- * Relays a real host UDP socket into stdlib/net/nic.bl0's own host-bridge
- * ports, so a bl0jv2 program using stdlib/net/udp.bl0 can talk to a REAL
- * external program (curl, netcat, a Python test client) instead of only
- * ever looping a packet back to itself. See nic.bl0's own header comment
- * for the port layout and why the frame format crossing that boundary is
- * this project's OWN fake IP/UDP framing, not a real Ethernet/IP frame -
- * this class is exactly the piece that translates between the two, one
- * direction each way. See NicFrame's own doc for why the port layout is
- * shared with TcpBridge, and what that does and doesn't let run at once.
+ * INBOUND direction: relays a real host UDP socket into stdlib/net/
+ * nic.bl0's own host-bridge ports, so a bl0jv2 program using stdlib/net/
+ * udp.bl0 can accept a REAL datagram (curl, netcat, a Python test client)
+ * instead of only ever looping one back to itself. See {@link
+ * UdpOutboundBridge} for the reverse direction (the VM's own udpSend()
+ * reaching OUT to a real host it names, e.g. stdlib/net/dns.bl0's own DNS
+ * queries), and NicFrame's own doc for why the port layout is shared
+ * between every bridge in this package.
  *
  * <p>Reply addressing is deliberately the simplest thing that could work
  * for testing: "whoever sent us the most recent real packet" - not a real
  * per-connection table. Fine for poking at this with netcat/curl one
  * request at a time; genuinely concurrent real senders would need a real
- * source-address table, not built here.
+ * source-address table, not built here. Kept separate from {@link
+ * UdpOutboundBridge}'s own send path specifically so a reply keeps coming
+ * FROM the same port a real client sent TO (this bridge's own bound
+ * socket) - a strict client checking that would reject a reply arriving
+ * from UdpOutboundBridge's own, different, ephemeral port instead.
  */
 final class UdpBridge {
 
@@ -87,7 +90,7 @@ final class UdpBridge {
             int srcPort = packet.getPort();
             int payloadLen = packet.getLength();
 
-            byte[] frame = buildFrame(addressToInt(packet.getAddress()), srcPort, localFakeIp, socket.getLocalPort(),
+            byte[] frame = buildUdpFrame(addressToInt(packet.getAddress()), srcPort, localFakeIp, socket.getLocalPort(),
                     packet.getData(), packet.getOffset(), payloadLen);
             injectRx(vm, frame);
         }
@@ -115,7 +118,7 @@ final class UdpBridge {
             if (dest == null)
                 continue; // nothing has ever reached us for real - nowhere to send a reply
 
-            byte[] payload = parsePayload(frame);
+            byte[] payload = parseUdpPayload(frame);
             if (payload == null)
                 continue;
 
@@ -126,41 +129,5 @@ final class UdpBridge {
                 // dropped packet on a real, unreliable network
             }
         }
-    }
-
-    // builds a frame in this project's OWN fake IP/UDP format (see
-    // stdlib/net/ip.bl0 and udp.bl0's own header comments) - NOT a real
-    // Ethernet/IP frame, so this can be built here with a plain UDP socket
-    // and no raw-socket privileges at all
-    private static byte[] buildFrame(int srcAddr, int srcPort, int dstAddr, int dstPort,
-                                      byte[] payload, int payloadOffset, int payloadLen) {
-        int udpLen = 8 + payloadLen;
-        byte[] ipHeader = buildIpHeader(srcAddr, dstAddr, IP_PROTO_UDP, udpLen);
-
-        byte[] frame = new byte[20 + udpLen];
-        System.arraycopy(ipHeader, 0, frame, 0, 20);
-
-        writeU16(frame, 20, srcPort);
-        writeU16(frame, 22, dstPort);
-        writeU16(frame, 24, udpLen);
-        writeU16(frame, 26, 0); // UDP checksum - always 0, see udp.bl0's own doc
-
-        System.arraycopy(payload, payloadOffset, frame, 28, payloadLen);
-        return frame;
-    }
-
-    // the reverse of buildFrame(): pulls the UDP payload back out of a
-    // frame the VM sent us via nicHostSend() - IP header (20 bytes, fixed,
-    // no options - see ip.bl0's own doc) then an 8-byte UDP header then
-    // the payload
-    private static byte[] parsePayload(byte[] frame) {
-        int totalLen = ipTotalLen(frame);
-        int udpLen = readU16(frame, 24);
-        int payloadLen = udpLen - 8;
-        if (payloadLen < 0 || 20 + udpLen > totalLen || 28 + payloadLen > frame.length)
-            return null;
-        byte[] payload = new byte[payloadLen];
-        System.arraycopy(frame, 28, payload, 0, payloadLen);
-        return payload;
     }
 }

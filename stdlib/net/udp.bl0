@@ -18,7 +18,8 @@ def class UdpPacket {
     field srcPort;
     field dstIp;
     field dstPort;
-    field message;
+    field message;      // string, via netByteToChar() - see udpReceive()'s own doc on what this loses
+    field payloadBytes; // array of ints, each 0-255 - lossless, use this for anything binary (DNS - see dns.bl0)
 }
 
 def udpBuildHeader(srcPort, dstPort, payloadLen) {
@@ -31,14 +32,13 @@ def udpBuildHeader(srcPort, dstPort, payloadLen) {
     ];
 }
 
-def udpSend(srcIp, srcPort, dstIp, dstPort, message) {
-    payload = [];
-    i = 0;
-    while (i < len(message)) {
-        push(payload, int(message[i]));
-        i = i + 1;
-    }
-
+// binary-safe: payload is an array of ints, each 0-255. Use this instead
+// of udpSend() for anything that isn't plain text - a DNS query (see
+// dns.bl0) is the reason this exists: udpSend()'s own message string goes
+// through netByteToChar() first, which only round-trips printable ASCII
+// plus \r/\n/\t/\0 (see its own doc) and would silently corrupt most of a
+// real binary protocol's bytes.
+def udpSendBytes(srcIp, srcPort, dstIp, dstPort, payload) {
     udpHeader = udpBuildHeader(srcPort, dstPort, len(payload));
     ipHeader = ipBuildHeader(srcIp, dstIp, Ip.protoUdp, len(udpHeader) + len(payload));
 
@@ -53,12 +53,24 @@ def udpSend(srcIp, srcPort, dstIp, dstPort, message) {
     nicSend(frame);
 }
 
+def udpSend(srcIp, srcPort, dstIp, dstPort, message) {
+    payload = [];
+    i = 0;
+    while (i < len(message)) {
+        push(payload, int(message[i]));
+        i = i + 1;
+    }
+    udpSendBytes(srcIp, srcPort, dstIp, dstPort, payload);
+}
+
 def udpHasPacket() {
     return nicHasFrame();
 }
 
 // caller must check udpHasPacket() first, same contract nicRecv() already
-// has for an empty queue
+// has for an empty queue. Fills in BOTH pkt.message (lossy for anything
+// outside netByteToChar()'s own range) and pkt.payloadBytes (lossless) -
+// see UdpPacket's own doc on which to actually use.
 def udpReceive() {
     frame = nicRecv();
     ipHeader = ipParseHeader(frame);
@@ -69,9 +81,12 @@ def udpReceive() {
     payloadLen = udpLen - 8;
 
     message = '';
+    payloadBytes = [];
     i = 0;
     while (i < payloadLen) {
-        message = message + netByteToChar(frame[28 + i]);
+        b = frame[28 + i];
+        push(payloadBytes, b);
+        message = message + netByteToChar(b);
         i = i + 1;
     }
 
@@ -81,5 +96,6 @@ def udpReceive() {
     pkt.dstIp = ipHeader.dstAddr;
     pkt.dstPort = dstPort;
     pkt.message = message;
+    pkt.payloadBytes = payloadBytes;
     return pkt;
 }
