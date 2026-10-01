@@ -831,7 +831,7 @@ public final class Bl0jv2_Parser {
         while (pos < tokens.size()) {
             Token t = peek_t();
             if (t instanceof OpToken op &&
-                    (op.op == Operator.STAR || op.op == Operator.DIV || op.op == Operator.REMAINDER || op.op == Operator.STAR_STAR)) {
+                    (op.op == Operator.STAR || op.op == Operator.DIV || op.op == Operator.REMAINDER)) {
                 consume_t();
                 left = new BinaryNode(left, op.op, unary_evaluation());
             } else break;
@@ -847,7 +847,19 @@ public final class Bl0jv2_Parser {
             consume_t();
             return new LUnaryNode(op.op, unary_evaluation());
         }
-        return postfix_evaluation();
+        return pow_evaluation();
+    }
+
+    // a ** b binds tighter than a unary minus on its left (-2 ** 2 is -4) and
+    // is right-associative (2 ** 3 ** 2 is 2 ** 9); the exponent may itself be
+    // negated (2 ** -1)
+    private Node pow_evaluation() {
+        Node base = postfix_evaluation();
+        if (peek_t() instanceof OpToken op && op.op == Operator.STAR_STAR) {
+            consume_t();
+            return new BinaryNode(base, op.op, unary_evaluation());
+        }
+        return base;
     }
 
     private Node postfix_evaluation(){
