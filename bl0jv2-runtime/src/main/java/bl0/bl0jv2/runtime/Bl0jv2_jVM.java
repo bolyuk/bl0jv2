@@ -7,9 +7,9 @@ import bl0.bl0jv2.runtime.arithmetic.ArithmeticOperators;
 import bl0.bl0jv2.runtime.interrupt.InterruptController;
 import bl0.bl0jv2.runtime.interrupt.TimerService;
 import bl0.bl0jv2.runtime.device.BlockDevice;
-import bl0.bl0jv2.runtime.device.ConsoleController;
+import bl0.bl0jv2.runtime.device.DisplayController;
 import bl0.bl0jv2.runtime.device.DiskController;
-import bl0.bl0jv2.runtime.device.KeyboardController;
+import bl0.bl0jv2.runtime.device.UartController;
 import bl0.bl0jv2.runtime.device.PortDevice;
 import bl0.bl0jv2.runtime.device.HostShare;
 import bl0.bl0jv2.runtime.device.ShareController;
@@ -63,15 +63,15 @@ public final class Bl0jv2_jVM {
     private final DiskController disk = new DiskController(portIO, rawMemory);
     private final ShareController share = new ShareController(portIO, rawMemory);
     // set_out_writer() may replace the writer after this is built, hence the indirection
-    private final ConsoleController console = new ConsoleController(text -> {
+    private final UartController uart = new UartController(text -> {
         try {
             if (out != null) out.write(text);
         } catch (IOException e) {
             throw new Bl0j_VM_Exception("console write failed: " + e.getMessage());
         }
-    });
-    private final KeyboardController keyboard = new KeyboardController();
-    private final PortDevice[] devices = {disk, share, console, keyboard};
+    }, () -> this.interrupts.raiseInterrupt(2));
+    private final DisplayController display = new DisplayController();
+    private final PortDevice[] devices = {disk, share, uart, display};
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
 
@@ -1089,15 +1089,24 @@ public final class Bl0jv2_jVM {
         return portIO.read(port, widthBytes);
     }
 
-    /** the terminal sent these bytes: they wait in the keyboard FIFO and interrupt vector 2 is raised */
-    public void key_input(byte[] bytes) {
-        keyboard.push(bytes);
-        interrupts.raiseInterrupt(2);
+    /** the terminal sent these bytes: they go through the UART's receiver, which interrupts vector 2 */
+    public void uart_receive(byte[] bytes) {
+        uart.receive(bytes);
     }
 
-    /** the screen size the console reports to the guest (default 80x24) */
+    /** the UART's transmit speed in bits per second; 0 (the default) sends instantly */
+    public void set_uart_baud(int baud) {
+        uart.setBaud(baud);
+    }
+
+    /** with flow control (the default) the receiver holds bytes back while its FIFO is full; without, they are lost */
+    public void set_uart_flow_control(boolean on) {
+        uart.setFlowControl(on);
+    }
+
+    /** the screen size the display reports to the guest (default 80x24) */
     public void set_console_size(int columns, int rows) {
-        console.setSize(columns, rows);
+        display.setSize(columns, rows);
     }
 
     public long hostPortRead(int port, int widthBytes) {

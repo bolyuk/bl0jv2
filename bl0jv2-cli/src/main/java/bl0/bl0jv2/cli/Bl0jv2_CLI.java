@@ -62,6 +62,8 @@ public class Bl0jv2_CLI {
     private Path diskImage = null;
     // --bridge-fs: one host folder shown to the program (see DirShare)
     private Path bridgeFsDir = null;
+    // --uart-baud: how fast the serial port sends (0 = instantly)
+    private int uartBaud = 0;
     private final java.util.List<DiskImport.Spec> diskPuts = new java.util.ArrayList<>();
     private int diskSectors = 2048; // 1 MiB, used only when the image does not exist yet
 
@@ -126,6 +128,19 @@ public class Bl0jv2_CLI {
                         System.exit(1);
                     }
                     includeDirs.add(Path.of(args[++i]));
+                }
+                case "--uart-baud" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--uart-baud requires a number");
+                        System.exit(1);
+                    }
+                    try {
+                        uartBaud = Integer.parseInt(args[++i]);
+                        if (uartBaud < 0) throw new NumberFormatException();
+                    } catch (NumberFormatException e) {
+                        System.err.println("--uart-baud must be a non-negative integer: " + args[i]);
+                        System.exit(1);
+                    }
                 }
                 case "--bridge-fs" -> {
                     if (i + 1 >= args.length) {
@@ -224,6 +239,8 @@ public class Bl0jv2_CLI {
         System.out.println("      --disk-put HOSTFILE[:NAME]  copy a host file onto the --disk image first");
         System.out.println("                  (formats a blank image); a .bl0 file is compiled and stored as");
         System.out.println("                  .bl0c, ready for the shell's exec (repeatable)");
+        System.out.println("      --uart-baud N  send on the serial port at N bits per second (default 0:");
+        System.out.println("                  instantly); a driver that ignores the line status loses text");
         System.out.println("      --bridge-fs DIR  show the host folder DIR to the program (read, write,");
         System.out.println("                  list, delete inside it only; the guest's hls/hget/hput)");
         System.out.println("      --disk-sectors N  size of a newly created image (default 2048)");
@@ -251,7 +268,7 @@ public class Bl0jv2_CLI {
     }
 
     // Feeds what the host terminal sends into the VM's keyboard device (a FIFO with an
-    // interrupt, see KeyboardController): bytes as they come, UTF-8 and escape
+    // interrupt, see UartController): bytes as they come, UTF-8 and escape
     // sequences untouched. The guest turns them into keys. Only meaningful against an
     // interactive stdin.
     private static void startKeyboardBridge(Bl0jv2_jVM vm) {
@@ -268,7 +285,7 @@ public class Bl0jv2_CLI {
                 // the bytes go into the keyboard device's FIFO as they arrive and an interrupt tells
                 // the guest; the FIFO is what makes pacing unnecessary. In the terminal's normal line
                 // mode the Enter key arrives as a line feed, which the guest also takes as Enter.
-                while ((n = in.read(buffer)) > 0) vm.key_input(java.util.Arrays.copyOf(buffer, n));
+                while ((n = in.read(buffer)) > 0) vm.uart_receive(java.util.Arrays.copyOf(buffer, n));
             } catch (IOException ignored) {
                 // stdin closed or the JVM is shutting down - nothing left for this bridge to do
             }
@@ -403,6 +420,7 @@ public class Bl0jv2_CLI {
                 // fine, this just keeps VM setup grouped together
                 vm.set_core_count(cores);
                 vm.feed_compiled_file(ByteBuffer.wrap(bytes));
+                vm.set_uart_baud(uartBaud);
                 if (bridgeFsDir != null) {
                     try {
                         vm.attach_share(new DirShare(bridgeFsDir));
