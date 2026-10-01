@@ -19,6 +19,12 @@ def class Net {
     static field handlers;  // by IP protocol number: nil, or a function (ipHeader, frame)
     static field pumpLock;  // one core at a time takes frames AND handles them, so segments are handled in arrival order
     static field dropped;
+    static field localIp;   // this machine's own address - what ICMP echo requests are answered for
+
+    // true for this machine's own address and for the 127.0.0.0/8 loopback range
+    static def isLocal(addr) {
+        return addr == Net.localIp || (addr >>> 24) == 127;
+    }
 
     static def register(proto, handler) {
         Net.handlers[proto] = handler;
@@ -57,5 +63,6 @@ def class Net {
 Net.handlers = [];
 Net.pumpLock = newMutex();
 Net.dropped = 0;
+Net.localIp = 0x0A000002; // 10.0.0.2 - the 'our side' address the stdlib tests and demos use
 i = 0;
 while (i < 256) { push(Net.handlers, nil); i = i + 1; }
