@@ -56,6 +56,11 @@ public class Bl0jv2_CLI {
     // than just answering whoever already knows to connect to a chosen
     // local port, worth requiring explicitly.
     private boolean bridgeOutbound = false;
+    // -I: extra directories an import is looked up in when it is not found next to the importing file
+    private final java.util.List<Path> includeDirs = new java.util.ArrayList<>();
+    // --disk: a host file presented to the program as a block device (see DiskController)
+    private Path diskImage = null;
+    private int diskSectors = 2048; // 1 MiB, used only when the image does not exist yet
 
     private void parseArgs(String[] args) {
         for (int i = 0; i < args.length; i++) {
@@ -112,6 +117,33 @@ public class Bl0jv2_CLI {
                     }
                 }
                 case "--bridge-outbound" -> bridgeOutbound = true;
+                case "-I", "--include" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--include requires a directory");
+                        System.exit(1);
+                    }
+                    includeDirs.add(Path.of(args[++i]));
+                }
+                case "--disk" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--disk requires an image file");
+                        System.exit(1);
+                    }
+                    diskImage = Path.of(args[++i]);
+                }
+                case "--disk-sectors" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--disk-sectors requires a number");
+                        System.exit(1);
+                    }
+                    try {
+                        diskSectors = Integer.parseInt(args[++i]);
+                        if (diskSectors < 16) throw new NumberFormatException();
+                    } catch (NumberFormatException e) {
+                        System.err.println("--disk-sectors must be an integer of at least 16: " + args[i]);
+                        System.exit(1);
+                    }
+                }
                 case "-h", "--help"    -> help    = true;
                 case "-V", "--version" -> version = true;
                 default -> {
@@ -168,6 +200,11 @@ public class Bl0jv2_CLI {
         System.out.println("                  names, and stdlib/net/dns.bl0's Dns.resolve() answers for");
         System.out.println("                  real too. The reverse of -b/--bridge-tcp above (a real");
         System.out.println("                  peer reaching IN); only meaningful together with -e");
+        System.out.println("  -I, --include DIR  look an import up in DIR when it is not found next to");
+        System.out.println("                  the file that names it (repeatable)");
+        System.out.println("      --disk FILE  present FILE to the program as a block device (512-byte");
+        System.out.println("                  sectors, ports 0x0F00-0x0F0D); created when missing");
+        System.out.println("      --disk-sectors N  size of a newly created image (default 2048)");
         System.out.println("  -h, --help      show this help message and exit");
         System.out.println("  -V, --version   print version information and exit");
     }
@@ -262,7 +299,11 @@ public class Bl0jv2_CLI {
                 String line = scanner.nextLine().trim();
                 if(line.equals("!exit")) break;
 
-                byte[] instructions = compiler.compile(parser.getAST(lexer.getTokens(line)));
+                var ast = parser.getAST(lexer.getTokens(line));
+                // imports work at the prompt too: relative to the current directory, then -I
+                if (ast instanceof PROGRAM_N program)
+                    ast = Bl0jv2_Linker.resolveImports(program, Path.of("repl"), includeDirs);
+                byte[] instructions = compiler.compile(ast);
 
                 Bl0jv2_Utils.dump_file(instructions, writer);
 
@@ -333,7 +374,7 @@ public class Bl0jv2_CLI {
 
             if (!(ast instanceof PROGRAM_N program))
                 throw new IllegalStateException("parser did not produce a program");
-            var linked = Bl0jv2_Linker.resolveImports(program, source);
+            var linked = Bl0jv2_Linker.resolveImports(program, source, includeDirs);
 
             bytes = compiler.compile(linked);
             timer.mark("compiler");
@@ -365,6 +406,14 @@ public class Bl0jv2_CLI {
                 // fine, this just keeps VM setup grouped together
                 vm.set_core_count(cores);
                 vm.feed_compiled_file(ByteBuffer.wrap(bytes));
+                if (diskImage != null) {
+                    try {
+                        vm.attach_disk(new FileDisk(diskImage, diskSectors));
+                    } catch (IOException e) {
+                        System.err.println("--disk: cannot open " + diskImage + ": " + e.getMessage());
+                        return 1;
+                    }
+                }
                 // -k needs output to appear as the program prints it, not
                 // buffered until run_instructions() returns (which, for an
                 // interactive keyboard-driven program, might be "never

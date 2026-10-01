@@ -6,6 +6,8 @@ import bl0.bl0jv2.exceptions.Bl0j_VM_Panic;
 import bl0.bl0jv2.runtime.arithmetic.ArithmeticOperators;
 import bl0.bl0jv2.runtime.interrupt.InterruptController;
 import bl0.bl0jv2.runtime.interrupt.TimerService;
+import bl0.bl0jv2.runtime.device.BlockDevice;
+import bl0.bl0jv2.runtime.device.DiskController;
 import bl0.bl0jv2.runtime.memory.PortIO;
 import bl0.bl0jv2.runtime.memory.RawMemory;
 import bl0.bl0jv2.runtime.values.*;
@@ -55,6 +57,7 @@ public final class Bl0jv2_jVM {
     // a second, port-addressed bus - see PortIO's own javadoc for why this
     // is deliberately separate from rawMemory
     private final PortIO portIO = new PortIO();
+    private final DiskController disk = new DiskController(portIO, rawMemory);
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
 
@@ -1051,6 +1054,12 @@ public final class Bl0jv2_jVM {
     // a bridge thread polls this directly (a sequence-number port bl0jv2
     // code bumps on every new write is the usual way to tell a fresh write
     // apart from re-reading stale data - see nic.bl0's own TX port layout).
+    // attaches the disk behind the controller ports (see DiskController);
+    // null detaches it
+    public void attach_disk(BlockDevice device) {
+        disk.attach(device);
+    }
+
     public long hostPortRead(int port, int widthBytes) {
         return portIO.read(port, widthBytes);
     }
@@ -1662,7 +1671,9 @@ public final class Bl0jv2_jVM {
                         requirePrivileged(ctx, "out");
                         int width = (int) unbox(reg[b]);
                         long value = ((Number) unbox(reg[b + 1])).longValue();
-                        portIO.write((int) unbox(reg[a]), width / 8, value);
+                        int port = (int) unbox(reg[a]);
+                        portIO.write(port, width / 8, value);
+                        disk.onPortWrite(port, value);
                     }
 
                     // vector in a, arg in b - synchronous, unlike

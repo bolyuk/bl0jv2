@@ -43,15 +43,24 @@ public final class Bl0jv2_Linker {
     private Bl0jv2_Linker() {}
 
     public static PROGRAM_N resolveImports(PROGRAM_N entryProgram, Path entryPath) {
+        return resolveImports(entryProgram, entryPath, List.of());
+    }
+
+    /**
+     * An import that is not found next to the file that names it is looked up in
+     * each of 'searchPaths' in turn (the CLI's -I directories) before the stdlib
+     * classpath fallback applies.
+     */
+    public static PROGRAM_N resolveImports(PROGRAM_N entryProgram, Path entryPath, List<Path> searchPaths) {
         Set<Path> visited = new HashSet<>();
         visited.add(entryPath.toAbsolutePath().normalize());
 
         List<Node> resolved = new ArrayList<>();
-        resolveInto(entryProgram, entryPath.toAbsolutePath().getParent(), visited, resolved);
+        resolveInto(entryProgram, entryPath.toAbsolutePath().getParent(), searchPaths, visited, resolved);
         return new PROGRAM_N(resolved);
     }
 
-    private static void resolveInto(PROGRAM_N program, Path baseDir, Set<Path> visited, List<Node> out) {
+    private static void resolveInto(PROGRAM_N program, Path baseDir, List<Path> searchPaths, Set<Path> visited, List<Node> out) {
         for (Node node : program.nodes) {
             if (!(node instanceof ImportNode importNode)) {
                 out.add(node);
@@ -59,6 +68,15 @@ public final class Bl0jv2_Linker {
             }
 
             Path resolvedPath = baseDir.resolve(importNode.path).normalize();
+            if (!Files.exists(resolvedPath)) {
+                for (Path dir : searchPaths) {
+                    Path candidate = dir.toAbsolutePath().resolve(importNode.path).normalize();
+                    if (Files.exists(candidate)) {
+                        resolvedPath = candidate;
+                        break;
+                    }
+                }
+            }
             if (!visited.add(resolvedPath))
                 continue; // already imported (directly or via another import) - skip quietly
 
@@ -71,7 +89,7 @@ public final class Bl0jv2_Linker {
             if (!(importedAst instanceof PROGRAM_N importedProgram))
                 throw new Bl0j_CompilerException("imported file did not parse to a program: " + importNode.path);
 
-            resolveInto(importedProgram, resolvedPath.getParent(), visited, out);
+            resolveInto(importedProgram, resolvedPath.getParent(), searchPaths, visited, out);
         }
     }
 

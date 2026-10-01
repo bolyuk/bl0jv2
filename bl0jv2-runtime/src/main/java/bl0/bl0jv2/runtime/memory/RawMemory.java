@@ -107,6 +107,27 @@ public final class RawMemory {
         }
     }
 
+    // bulk transfers for DMA-style devices (see DiskController)
+    public void readBytes(int addr, byte[] into) {
+        lock.readLock().lock();
+        try {
+            checkBounds(addr, into.length);
+            System.arraycopy(memory, addr, into, 0, into.length);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    public void writeBytes(int addr, byte[] from) {
+        lock.readLock().lock();
+        try {
+            checkBounds(addr, from.length);
+            System.arraycopy(from, 0, memory, addr, from.length);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
     public void poke(int addr, int widthBytes, long value) {
         lock.readLock().lock();
         try {
