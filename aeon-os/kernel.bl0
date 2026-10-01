@@ -27,6 +27,7 @@
 import '../stdlib/str/char.bl0';
 import '../stdlib/str/affix.bl0';
 import '../stdlib/str/substr.bl0';
+import '../stdlib/str/utf8.bl0';
 
 // --- kernel heap: a minimal bump allocator, backed by one 32-bit counter
 // at raw address 0. No free-list, no reuse - kfree() is a deliberate
@@ -57,126 +58,136 @@ def kfree(addr) {
     // no-op - see this section's own header comment
 }
 
-// --- keyboard: a tiny HID driver stack - port -> interrupt handler -> ring
-// buffer -> consumer API, the same shape a real PS/2 keyboard driver has.
-// This VM has no real keyboard behind a port (see PortIO's own doc), so
-// the "device" is simulated from the host side - Bl0jv2_jVM.hostPortWrite()
-// + raiseInterrupt() from a test, or the CLI's own -k flag bridging real
-// stdin the same way (see Bl0jv2_CLI's own doc) - the driver code below
-// has no idea, and doesn't need to: it only ever sees a byte arrive on a
-// port and an interrupt fire, exactly as it would from real hardware.
+// --- keyboard: the receive side of the serial terminal. The device is a FIFO
+// behind two ports (data, status) and an interrupt: the interrupt handler drains
+// it into a ring buffer, readers take bytes from the ring. What arrives are the
+// bytes the terminal sends - UTF-8 text and ANSI sequences for the arrow keys and
+// so on; turning those into characters and keys is the job of whoever reads
+// (see lib/lineedit.bl0), the driver only moves bytes.
 //
-// The ring buffer's storage is raw memory from the kernel heap (kalloc()),
-// not a managed Bl0jArray - Bl0jArray only exposes push()/pop(), which is
-// LIFO (last typed key read first), wrong order for an input stream ---
+// The ring lives in RAW MEMORY, head and tail included, not in static fields:
+// a program started from the disk has its own copy of this file (and so its own
+// statics), but all copies must see one ring, and raw memory is what they share.
+//   +0 head (next slot the handler writes)   +4 tail (next slot a reader takes)
+//   +8 the bytes (Keyboard.size of them)
+// One slot is always left empty so head==tail means "empty"; when the ring is
+// full the newest byte is dropped rather than overwriting unread input ---
 def class Keyboard {
     static field dataPort;
-    static field vector; // static field, not a top-level variable, because
-                          // initKeyboard() (a plain 'def' function) needs
-                          // to read it - see this file's own header
-                          // comment on why a top-level variable wouldn't
-                          // be visible there at all
-    static field bufferAddr;
-    static field bufferSize;
-    static field event; // signalled by the ISR on every key, so a reader can sleep in kbWait()
-    static field head; // next slot the ISR writes to
-    static field tail; // next slot a reader consumes from
+    static field statusPort;
+    static field vector;
+    static field base;     // raw address of the ring (see above)
+    static field size;
+    static field event;    // signalled by the handler; only the copy that registered it has it
 }
-Keyboard.dataPort = 0;
+Keyboard.dataPort = 0x0F48;
+Keyboard.statusPort = 0x0F49;
 Keyboard.vector = 2;
-Keyboard.bufferSize = 32;
-Keyboard.head = 0;
-Keyboard.tail = 0;
+Keyboard.size = 256;
 
-// one slot is always left empty so head==tail can mean "empty" without
-// also meaning "full" - a classic ring-buffer trade-off, not a bug. A full
-// buffer drops the newest byte rather than overwriting unread input -
-// simplest policy a real driver could still make a different call here
 def onKeyboardIRQ(vector) {
-    nextHead = (Keyboard.head + 1) % Keyboard.bufferSize;
-    if (nextHead == Keyboard.tail) {
-        return nil;
+    while (in8(Keyboard.statusPort) == 1) {
+        b = in8(Keyboard.dataPort);
+        head = peek32(Keyboard.base);
+        next = (head + 1) % Keyboard.size;
+        if (next != peek32(Keyboard.base + 4)) {
+            poke8(Keyboard.base + 8 + head, b);
+            poke32(Keyboard.base, next);
+        }
     }
-    poke8(Keyboard.bufferAddr + Keyboard.head, in8(Keyboard.dataPort));
-    Keyboard.head = nextHead;
     signalEvent(Keyboard.event);
 }
 
-// call once, after the importer has reserved whatever fixed regions it
-// needs and set HeapAlloc.nextFree past them - NOT at import time: this
-// calls kalloc() (to size the ring buffer) and registerHandler(), and
-// doing that unconditionally the moment kernel.bl0 is spliced in would
-// race the importer's own MMIO reservation, however early in the
-// importing file the import statement happens to sit (imports splice in
-// at that exact position, see Bl0jv2_Linker's own doc - there is no
-// "imports always run last" rule to lean on instead)
+// call once, privileged, after the importer has reserved whatever fixed regions it
+// needs (it allocates the ring from the kernel heap - NOT at import time, see
+// initHeap)
 def initKeyboard() {
-    Keyboard.bufferAddr = kalloc(Keyboard.bufferSize);
+    Keyboard.base = kalloc(8 + Keyboard.size);
+    poke32(Keyboard.base, 0);
+    poke32(Keyboard.base + 4, 0);
     Keyboard.event = newEvent();
     registerHandler(onKeyboardIRQ, Keyboard.vector, 50);
+    // bytes the terminal sent before the handler existed are in the FIFO but their interrupt
+    // was dropped: take them now
+    onKeyboardIRQ(Keyboard.vector);
 }
 
-// sleeps until a key is available or timeoutMs passes; true if one is. No
-// privilege needed (waitEvent is not a device access), so user-mode code
-// like the shell can block here instead of polling kbHasInput() in a
-// wait() loop. The generation is read before the buffer is checked, so a key
-// that arrives in between is not slept through.
-def kbWait(timeoutMs) {
-    gen = eventGen(Keyboard.event);
-    if (Keyboard.head != Keyboard.tail) { return true; }
-    waitEvent(Keyboard.event, gen, timeoutMs);
-    return Keyboard.head != Keyboard.tail;
+// for a program started from the disk: use the ring the kernel already set up
+def attachKeyboard(base) {
+    Keyboard.base = base;
 }
 
 def kbHasInput() {
-    return Keyboard.head != Keyboard.tail;
+    return peek32(Keyboard.base) != peek32(Keyboard.base + 4);
 }
 
-// caller must check kbHasInput() first - reading an empty buffer is a
-// caller error, same spirit as pop() on an empty array elsewhere in bl0jv2
-def kbReadChar() {
-    c = peek8(Keyboard.bufferAddr + Keyboard.tail);
-    Keyboard.tail = (Keyboard.tail + 1) % Keyboard.bufferSize;
-    return c;
+// sleeps until a byte is available or timeoutMs passes; true if one is. Not a
+// device access, so no privilege needed. The copy that owns the event sleeps on
+// it (generation read before the check, so a byte arriving in between is not slept
+// through); a program's copy has no event to wait on - handles cannot live in raw
+// memory - and sleeps in short steps instead, which costs one timer wake-up per
+// step the way an idle loop does on any machine without a better primitive.
+def kbWait(timeoutMs) {
+    if (Keyboard.event == nil) {
+        waited = 0;
+        while (!kbHasInput() && waited < timeoutMs) {
+            wait(5);
+            waited += 5;
+        }
+        return kbHasInput();
+    }
+    gen = eventGen(Keyboard.event);
+    if (kbHasInput()) { return true; }
+    waitEvent(Keyboard.event, gen, timeoutMs);
+    return kbHasInput();
 }
 
-// --- console device: only kernel code may out8() to it directly (see
-// requirePrivileged's own doc) - unprivileged code goes through
-// sysConsoleWrite()/consoleWrite()/consoleWriteLine() instead ---
+// the next byte; the caller must check kbHasInput() first
+def kbReadByte() {
+    tail = peek32(Keyboard.base + 4);
+    b = peek8(Keyboard.base + 8 + tail);
+    poke32(Keyboard.base + 4, (tail + 1) % Keyboard.size);
+    return b;
+}
+
+// --- console: the transmit side of the same serial terminal - one port taking
+// UTF-8 bytes (and ANSI escape sequences, see lib/term.bl0). Only kernel code may
+// out8() to it (see requirePrivileged's own doc); everything else writes through
+// the syscall, which takes a whole string: one trap per write, not per byte ---
 def class Console {
     static field port;
     static field sysWriteVector;
+    static field columns;
+    static field rows;
 }
-Console.port = 1; // distinct from the keyboard's own port (0)
+Console.port = 0x0F40;
 Console.sysWriteVector = 1;
+Console.columns = 80;
+Console.rows = 24;
 
-// runs ELEVATED (syscall()'s trap gate - see invokeAsTrap), regardless of
-// which ring the calling command was in. Prints what it wrote via plain
-// print(), same PoC stance as smp_boot.bl0's sysPutc: this reference VM
-// has no real display behind the port, so this is how the write becomes
-// observable at all
-def sysConsoleWrite(byteValue) {
-    out8(Console.port, byteValue);
-    print Char.char(byteValue);
+// runs ELEVATED (syscall()'s trap gate - see invokeAsTrap), regardless of which
+// ring the caller was in
+def sysConsoleWrite(text) {
+    bytes = Utf8.encode(text);
+    i = 0;
+    while (i < len(bytes)) {
+        out8(Console.port, bytes[i]);
+        i += 1;
+    }
+    free(bytes);
 }
 
-// call once - see initKeyboard()'s own doc on why this isn't done at
-// import time either (registerHandler() itself isn't order-sensitive the
-// way kalloc() is, but keeping both drivers' init explicit and symmetric
-// is worth more than saving one function call)
+// call once, privileged: the write syscall, and the screen size the device reports
 def initConsole() {
     registerHandler(sysConsoleWrite, Console.sysWriteVector, 1);
+    Console.columns = in16(0x0F44);
+    Console.rows = in16(0x0F46);
 }
 
 def consoleWrite(s) {
-    i = 0;
-    while (i < len(s)) {
-        syscall(Console.sysWriteVector, int(s[i]));
-        i = i + 1;
-    }
+    if (len(s) > 0) { syscall(Console.sysWriteVector, s); }
 }
 
 def consoleWriteLine(s) {
-    consoleWrite(s);
-    println '';
+    syscall(Console.sysWriteVector, s + '\n');
 }

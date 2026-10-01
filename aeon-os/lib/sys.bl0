@@ -10,6 +10,7 @@
 //   +12   syscall vector the disk driver uses from user mode
 //   +16   command line: 32-bit byte count, then UTF-8 bytes (at most 1000)
 //   +1024 working folder: the same shape
+//   +3088 keyboard ring (raw address); +3092 screen columns; +3096 screen rows
 //   +3072 host folder share (--bridge-fs): present, path buffer, data buffer, syscall vector
 //
 // The shell reserves the page once, privileged (reserve() is), and fills it
@@ -78,4 +79,12 @@ def sysPublishHfs(present, pathBuffer, dataBuffer, vector) {
     poke32(Sys.base + 3076, pathBuffer);
     poke32(Sys.base + 3080, dataBuffer);
     poke32(Sys.base + 3084, vector);
+}
+
+// the terminal: where the keyboard ring is (every copy of the keyboard driver must read
+// the same one) and how big the screen is
+def sysPublishTerm(keyboardBase, columns, rows) {
+    poke32(Sys.base + 3088, keyboardBase);
+    poke32(Sys.base + 3092, columns);
+    poke32(Sys.base + 3096, rows);
 }

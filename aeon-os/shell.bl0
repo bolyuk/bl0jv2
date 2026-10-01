@@ -47,6 +47,7 @@ import '../stdlib/str/split.bl0';
 import '../stdlib/str/fmt.bl0';
 import 'lib/loader.bl0';
 import 'lib/userland.bl0';
+import 'lib/lineedit.bl0';
 
 // when boot.bl0 exec()s this file, it already called kernel.bl0's
 // initHeap() with ITS OWN reserved regions accounted for (see its own
@@ -81,6 +82,7 @@ sysPublish(Disk.bufAddr, Disk.sectors, Disk.vector);
 // the host folder, if the host shared one (--bridge-fs)
 Hfs.init(kalloc(260), kalloc(Hfs.chunk));
 sysPublishHfs(Hfs.present, Hfs.pathAddr, Hfs.dataAddr, Hfs.vector);
+sysPublishTerm(Keyboard.base, Console.columns, Console.rows);
 Log.write('shell: started');
 
 // --- built-in commands ---
@@ -476,42 +478,123 @@ def runCommand(line) {
     runProgram('bin/' + cmd + '.bl0c', line, cmd);
 }
 
-println '=== aeon-os shell booting ===';
+// --- command history and completion for the line editor ---
+
+// the history lives on the disk (var/history), one line per command; the editor
+// keeps the last 200 in memory
+def histLoad() {
+    if (!Fs.mounted) { return nil; }
+    text = Fs.read('var/history');
+    if (text == nil) { return nil; }
+    lines = Split.split(text, strChar(10));
+    kept = [];
+    i = 0;
+    while (i < len(lines)) {
+        if (lines[i] != '') { push(kept, lines[i]); }
+        i += 1;
+    }
+    if (len(kept) > 400) {
+        // the file only grows: cut it back to the lines that count
+        kept = Arr.slice(kept, len(kept) - 200, len(kept));
+        Fs.write('var/history', strJoin(kept, strChar(10)) + strChar(10));
+    }
+    i = 0;
+    while (i < len(kept)) {
+        LineEditor.remember(kept[i]);
+        i += 1;
+    }
+}
+
+def histSave(line) {
+    if (!Fs.mounted) { return nil; }
+    try {
+        Fs.append('var/history', line + strChar(10));
+    } catch (e) {
+        // a full disk must not stop the shell
+    }
+}
+
+def shellBuiltins() {
+    return ['help', 'echo', 'uptime', 'whoami', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec',
+            'net', 'netstat', 'setip', 'setdns', 'ping', 'resolve', 'http', 'tcp', 'udp', 'httpd'];
+}
+
+// Tab: what could replace the word under the cursor. The first word is a command
+// (a built-in or a program in bin/); any other word is a path.
+def shellComplete(line, pos) {
+    start = pos;
+    while (start > 0 && strSub(line, start - 1, start) != ' ') { start -= 1; }
+    word = strSub(line, start, pos);
+    firstWord = len(Substr.substr(line, 0, start)) == 0 || len(tokens(strSub(line, 0, start))) == 0;
+    found = [];
+    if (firstWord && strFind(word, '/', 0) < 0) {
+        names = shellBuiltins();
+        i = 0;
+        while (i < len(names)) {
+            if (strFind(names[i], word, 0) == 0) { push(found, names[i]); }
+            i += 1;
+        }
+        if (Fs.mounted) {
+            programs = Dirs.list('bin');
+            i = 0;
+            while (i < len(programs)) {
+                n = programs[i][0];
+                if (!programs[i][2] && len(n) > 5 && strSub(n, len(n) - 5, len(n)) == '.bl0c') { n = strSub(n, 0, len(n) - 5); }
+                if (strFind(n, word, 0) == 0 && !Arr.contains(found, n)) { push(found, n); }
+                i += 1;
+            }
+        }
+        return [start, found];
+    }
+    if (!Fs.mounted) { return nil; }
+    slash = -1;
+    i = 0;
+    while (i < len(word)) {
+        if (strSub(word, i, i + 1) == '/') { slash = i; }
+        i += 1;
+    }
+    dirPart = slash < 0 ? '' : strSub(word, 0, slash + 1);
+    namePart = strSub(word, slash + 1, len(word));
+    dir = ShellState.cwd;
+    if (dirPart != '') { dir = here(dirPart); }
+    if (!Dirs.isDir(dir)) { return nil; }
+    entries = Dirs.list(dir);
+    i = 0;
+    while (i < len(entries)) {
+        if (strFind(entries[i][0], namePart, 0) == 0) {
+            push(found, dirPart + entries[i][0] + (entries[i][2] ? '/' : ''));
+        }
+        i += 1;
+    }
+    return [start, found];
+}
+
+LineEditor.completer = shellComplete;
+histLoad();
+
+consoleWriteLine('=== aeon-os shell booting ===');
 
 dropToUserMode();
 
-println 'aeon-shell ready - type a command, press enter (try: help)';
-print prompt();
+consoleWriteLine('aeon-shell ready - type a command, press enter (try: help)');
 
-line = '';
 commandsRun = 0;
-// sleeps in kbWait() while there is no input: the keyboard ISR signals an
-// event on every key, so the shell costs no CPU while idle and reacts to a key
-// the moment the ISR has run (waitEvent also returns early when an interrupt
-// this core can take is pending, which is what lets a single core run its own
-// keyboard ISR while it sits here). waitEvent is unprivileged, so this is fine
-// after dropToUserMode().
+// The line editor sleeps in kbWait() while there is no input: the keyboard handler
+// signals an event on every byte, so the shell costs no CPU while idle and reacts the
+// moment the handler has run (waitEvent also returns early when an interrupt this core
+// can take is pending, which is what lets a single core run its own keyboard handler
+// while it sits here). waitEvent is unprivileged, so this is fine after dropToUserMode().
 while (ShellState.running) {
-    if (kbHasInput()) {
-        b = kbReadChar();
-        if (b == 13) {
-            println '';
-            runCommand(line);
-            line = '';
-            commandsRun = commandsRun + 1;
-            if (ShellState.running) {
-                print prompt();
-            }
-        } else {
-            ch = Char.char(b);
-            line = line + ch;
-            print ch;
-        }
+    line = LineEditor.read(prompt());
+    if (line == nil) {
+        // Ctrl-D on an empty line
+        ShellState.running = false;
     } else {
-        kbWait(1000); // sleeps until a key arrives - see kernel.bl0's kbWait()
+        if (line != '') { histSave(line); }
+        runCommand(line);
+        commandsRun = commandsRun + 1;
     }
 }
 
 Log.write('shell: exiting after ' + commandsRun + ' commands');
-println '';
-println '=== aeon-shell exiting after ' + commandsRun + ' commands ===';
+consoleWriteLine('=== aeon-shell exiting after ' + commandsRun + ' commands ===');

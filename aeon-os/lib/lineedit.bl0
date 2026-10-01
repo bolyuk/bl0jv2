@@ -1,0 +1,291 @@
+// aeon-os: the line editor - what runs between "$ " and Enter. It lives in the
+// guest because a serial terminal gives it only keys; the editing is ours.
+//
+//   line = LineEditor.read('$ ');      // the line, or nil at Ctrl-D on an empty line
+//
+// Keys: characters (any Unicode), Backspace, Delete, Left/Right, Home/End (Ctrl-A,
+// Ctrl-E), Ctrl-Left/Right and Alt-B/F by word, Ctrl-U (cut to the start), Ctrl-K
+// (cut to the end), Ctrl-W (cut a word), Ctrl-L (clear the screen), Up/Down and
+// Ctrl-P/N (history), Tab (completion), Ctrl-C (abandon the line), Ctrl-D.
+//
+// How it draws: it keeps the position the terminal's cursor is at, counted in
+// cells from the start of the prompt, and moves it with relative cursor
+// sequences - so a line longer than the screen wraps and still edits correctly.
+// A change redraws from the changed cell to the end of the line and clears the
+// rest. One cell per character is assumed (no double-width or combining marks).
+
+import 'term.bl0';
+import 'keys.bl0';
+import '../../stdlib/arrlib.bl0';
+
+def class LineEditor {
+    static field history;      // oldest first
+    static field maxHistory;
+    static field completer;    // function(line, pos) -> [start, candidates] or nil; see complete()
+
+    // editing state of the line being read
+    static field line;
+    static field pos;          // cursor, in characters
+    static field cur;          // where the terminal cursor is, in cells from the prompt's start
+    static field promptWidth;
+    static field prompt;
+
+    // ---- drawing ----
+
+    static def columns() {
+        return Console.columns > 0 ? Console.columns : 80;
+    }
+
+    // writes text at the cursor and tracks where the cursor ends up
+    static def put(text) {
+        consoleWrite(text);
+        LineEditor.cur += len(text);
+        // a character that fills the last column leaves the terminal in a half-wrapped
+        // state; a blank and a carriage return finish the wrap so the cursor is where we think
+        if (len(text) > 0 && LineEditor.cur % LineEditor.columns() == 0) {
+            consoleWrite(' ' + strChar(13));
+        }
+    }
+
+    // moves the terminal cursor to cell 'target' (cells from the prompt's start)
+    static def goTo(target) {
+        cols = LineEditor.columns();
+        fromRow = LineEditor.cur / cols;
+        fromCol = LineEditor.cur % cols;
+        toRow = target / cols;
+        toCol = target % cols;
+        out = '';
+        if (toRow < fromRow) { out = out + Term.up(fromRow - toRow); }
+        if (toRow > fromRow) { out = out + Term.down(toRow - fromRow); }
+        if (toCol < fromCol) { out = out + Term.left(fromCol - toCol); }
+        if (toCol > fromCol) { out = out + Term.right(toCol - fromCol); }
+        consoleWrite(out);
+        LineEditor.cur = target;
+    }
+
+    // redraws from character index 'from' to the end of the line, clears what was
+    // after it, and puts the cursor back at pos
+    static def redraw(from) {
+        LineEditor.goTo(LineEditor.promptWidth + from);
+        LineEditor.put(strSub(LineEditor.line, from, len(LineEditor.line)));
+        consoleWrite(Term.clearToEndOfScreen());
+        LineEditor.goTo(LineEditor.promptWidth + LineEditor.pos);
+    }
+
+    // ---- editing ----
+
+    static def insert(text) {
+        line = LineEditor.line;
+        pos = LineEditor.pos;
+        LineEditor.line = strSub(line, 0, pos) + text + strSub(line, pos, len(line));
+        LineEditor.pos = pos + len(text);
+        if (pos == len(line)) {
+            LineEditor.put(text);          // typing at the end: just echo it
+        } else {
+            LineEditor.redraw(pos);
+        }
+    }
+
+    // removes characters [from, to) and keeps the cursor where it was relative to the text
+    static def remove(from, to) {
+        line = LineEditor.line;
+        if (from >= to) { return nil; }
+        LineEditor.line = strSub(line, 0, from) + strSub(line, to, len(line));
+        if (LineEditor.pos > to) {
+            LineEditor.pos -= (to - from);
+        } else if (LineEditor.pos > from) {
+            LineEditor.pos = from;
+        }
+        LineEditor.redraw(from);
+    }
+
+    static def moveTo(newPos) {
+        if (newPos < 0) { newPos = 0; }
+        if (newPos > len(LineEditor.line)) { newPos = len(LineEditor.line); }
+        LineEditor.pos = newPos;
+        LineEditor.goTo(LineEditor.promptWidth + newPos);
+    }
+
+    static def isWordChar(c) {
+        return c != ' ' && c != '\t' && c != '/';
+    }
+
+    // index of the start of the word before 'from'
+    static def wordStart(from) {
+        i = from;
+        while (i > 0 && !LineEditor.isWordChar(strSub(LineEditor.line, i - 1, i))) { i -= 1; }
+        while (i > 0 && LineEditor.isWordChar(strSub(LineEditor.line, i - 1, i))) { i -= 1; }
+        return i;
+    }
+
+    // index just past the end of the word at or after 'from'
+    static def wordEnd(from) {
+        n = len(LineEditor.line);
+        i = from;
+        while (i < n && !LineEditor.isWordChar(strSub(LineEditor.line, i, i + 1))) { i += 1; }
+        while (i < n && LineEditor.isWordChar(strSub(LineEditor.line, i, i + 1))) { i += 1; }
+        return i;
+    }
+
+    // draws the prompt and the line afresh from the cursor's current row start (after a
+    // clear, or after something was printed below the line)
+    static def redrawAll() {
+        LineEditor.cur = 0;
+        LineEditor.put(LineEditor.prompt);
+        LineEditor.put(LineEditor.line);
+        LineEditor.goTo(LineEditor.promptWidth + LineEditor.pos);
+    }
+
+    // replaces the whole line (history navigation)
+    static def replaceLine(text) {
+        LineEditor.line = text;
+        LineEditor.pos = len(text);
+        LineEditor.redraw(0);
+    }
+
+    // ---- history ----
+
+    static def remember(text) {
+        h = LineEditor.history;
+        if (text == '') { return nil; }
+        if (len(h) > 0 && h[len(h) - 1] == text) { return nil; }
+        push(h, text);
+        if (len(h) > LineEditor.maxHistory) { LineEditor.history = Arr.slice(h, len(h) - LineEditor.maxHistory, len(h)); }
+    }
+
+    // ---- completion ----
+
+    static def commonPrefix(items) {
+        prefix = items[0];
+        i = 1;
+        while (i < len(items)) {
+            k = 0;
+            while (k < len(prefix) && k < len(items[i]) && strSub(prefix, k, k + 1) == strSub(items[i], k, k + 1)) { k += 1; }
+            prefix = strSub(prefix, 0, k);
+            i += 1;
+        }
+        return prefix;
+    }
+
+    // Tab: ask the completer what could replace the word before the cursor. One
+    // candidate is inserted; several insert their common prefix, and if that adds
+    // nothing (a second Tab) they are listed below the line.
+    static def complete(second) {
+        f = LineEditor.completer;
+        if (f == nil) { return false; }
+        result = f(LineEditor.line, LineEditor.pos);
+        if (result == nil || len(result[1]) == 0) { return false; }
+        start = result[0];
+        items = result[1];
+        typed = strSub(LineEditor.line, start, LineEditor.pos);
+        if (len(items) == 1) {
+            text = items[0];
+            if (strSub(text, len(text) - 1, len(text)) != '/') { text = text + ' '; }
+            LineEditor.applyCompletion(start, text);
+            return true;
+        }
+        common = LineEditor.commonPrefix(items);
+        if (len(common) > len(typed)) {
+            LineEditor.applyCompletion(start, common);
+            return true;
+        }
+        if (second) {
+            LineEditor.goTo(LineEditor.promptWidth + len(LineEditor.line));
+            consoleWrite('\n' + strJoin(items, '  ') + '\n');
+            LineEditor.redrawAll();
+        }
+        return true;
+    }
+
+    static def applyCompletion(start, text) {
+        line = LineEditor.line;
+        LineEditor.line = strSub(line, 0, start) + text + strSub(line, LineEditor.pos, len(line));
+        LineEditor.pos = start + len(text);
+        LineEditor.redraw(start);
+    }
+
+    // ---- the loop ----
+
+    static def read(prompt) {
+        LineEditor.line = '';
+        LineEditor.pos = 0;
+        LineEditor.prompt = prompt;
+        LineEditor.promptWidth = len(prompt);
+        LineEditor.cur = 0;
+        LineEditor.put(prompt);
+        h = LineEditor.history;
+        index = len(h);          // len(h) = the line being typed, below the newest history entry
+        draft = '';
+        lastWasTab = false;
+
+        while (true) {
+            key = Keys.read(1000);
+            if (key == nil) { continue; }
+            name = key.name;
+            wasTab = false;
+
+            if (name == nil) {
+                LineEditor.insert(key.text);
+            } else if (name == 'ENTER') {
+                LineEditor.goTo(LineEditor.promptWidth + len(LineEditor.line));
+                consoleWrite('\n');
+                LineEditor.remember(LineEditor.line);
+                return LineEditor.line;
+            } else if (name == 'BACKSPACE') {
+                if (LineEditor.pos > 0) { LineEditor.remove(LineEditor.pos - 1, LineEditor.pos); }
+            } else if (name == 'DEL') {
+                LineEditor.remove(LineEditor.pos, LineEditor.pos + 1);
+            } else if (name == 'LEFT') {
+                LineEditor.moveTo(LineEditor.pos - 1);
+            } else if (name == 'RIGHT') {
+                LineEditor.moveTo(LineEditor.pos + 1);
+            } else if (name == 'HOME' || name == 'CTRL-A') {
+                LineEditor.moveTo(0);
+            } else if (name == 'END' || name == 'CTRL-E') {
+                LineEditor.moveTo(len(LineEditor.line));
+            } else if (name == 'CTRL-LEFT' || name == 'ALT-b') {
+                LineEditor.moveTo(LineEditor.wordStart(LineEditor.pos));
+            } else if (name == 'CTRL-RIGHT' || name == 'ALT-f') {
+                LineEditor.moveTo(LineEditor.wordEnd(LineEditor.pos));
+            } else if (name == 'CTRL-U') {
+                LineEditor.remove(0, LineEditor.pos);
+            } else if (name == 'CTRL-K') {
+                LineEditor.remove(LineEditor.pos, len(LineEditor.line));
+            } else if (name == 'CTRL-W') {
+                LineEditor.remove(LineEditor.wordStart(LineEditor.pos), LineEditor.pos);
+            } else if (name == 'CTRL-L') {
+                consoleWrite(Term.clearScreen());
+                LineEditor.redrawAll();
+            } else if (name == 'UP' || name == 'CTRL-P') {
+                h = LineEditor.history;
+                if (index > 0) {
+                    if (index == len(h)) { draft = LineEditor.line; }
+                    index -= 1;
+                    LineEditor.replaceLine(h[index]);
+                }
+            } else if (name == 'DOWN' || name == 'CTRL-N') {
+                h = LineEditor.history;
+                if (index < len(h)) {
+                    index += 1;
+                    LineEditor.replaceLine(index == len(h) ? draft : h[index]);
+                }
+            } else if (name == 'TAB') {
+                LineEditor.complete(lastWasTab);
+                wasTab = true;
+            } else if (name == 'CTRL-C') {
+                LineEditor.goTo(LineEditor.promptWidth + len(LineEditor.line));
+                consoleWrite('^C\n');
+                return '';
+            } else if (name == 'CTRL-D') {
+                if (LineEditor.line == '') {
+                    consoleWrite('\n');
+                    return nil;
+                }
+                LineEditor.remove(LineEditor.pos, LineEditor.pos + 1);
+            }
+            lastWasTab = wasTab;
+        }
+    }
+}
+LineEditor.history = [];
+LineEditor.maxHistory = 200;

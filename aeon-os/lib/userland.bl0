@@ -96,6 +96,9 @@ def destination(from, to) {
 def startProgram() {
     Disk.attach(peek32(Sys.base + 8), peek32(Sys.base + 4), peek32(Sys.base + 12));
     Hfs.attach(peek32(Sys.base + 3076), peek32(Sys.base + 3080), peek32(Sys.base + 3084), peek32(Sys.base + 3072) == 1);
+    attachKeyboard(peek32(Sys.base + 3088));
+    Console.columns = peek32(Sys.base + 3092);
+    Console.rows = peek32(Sys.base + 3096);
     Prog.cwd = sysCwd();
     Prog.words = tokens(sysArgs());
     if (!Fs.mount()) {

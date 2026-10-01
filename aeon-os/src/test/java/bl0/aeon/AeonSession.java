@@ -99,12 +99,14 @@ public final class AeonSession {
         return output().contains(text);
     }
 
-    /** what the CLI's -k bridge does: a byte on port 0, then interrupt vector 2 */
+    /** what the terminal sends when the user types: these characters as UTF-8, escape sequences included */
     public void type(String text) throws InterruptedException {
-        for (char c : text.toCharArray()) {
-            vm.hostPortWrite(0, 1, c);
-            vm.raiseInterrupt(2);
-            Thread.sleep(30);
-        }
+        vm.key_input(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Thread.sleep(30);
+    }
+
+    /** the screen as an 80x24 terminal would show it now */
+    VirtualTerminal screen() {
+        return VirtualTerminal.render(output());
     }
 }
