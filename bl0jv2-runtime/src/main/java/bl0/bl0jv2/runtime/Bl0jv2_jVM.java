@@ -828,6 +828,11 @@ public final class Bl0jv2_jVM {
 
     // takes effect on the next boxRef() call - no need to call this before
     // feed_compiled_file() the way set_max_raw_bytes() does
+    /** longest string (in chars) a '+' or '*' may produce - default 64M; beyond it the operation is an error */
+    public void set_max_string_length(int chars) {
+        ops.setMaxStringLength(chars);
+    }
+
     // ---- recursion limits ----
     //
     // Each bl0jv2 call pushes a frame (a heap-allocated long[]), so runaway
