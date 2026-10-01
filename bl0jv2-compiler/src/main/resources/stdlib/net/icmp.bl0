@@ -1,0 +1,119 @@
+import 'net.bl0';
+
+// ICMP echo (ping): request type 8, reply type 0. Layout after the 20-byte IP
+// header: type, code, checksum(2), identifier(2), sequence(2), payload; the
+// checksum covers the whole ICMP message (no pseudo-header, unlike TCP).
+//
+// This machine answers an echo request only when it is addressed to it
+// (Net.isLocal): a request for any other address goes out the NIC and is left
+// for the network - on the loopback NIC nothing answers it, so pinging a
+// stranger times out, which is the honest result; with --bridge-outbound the
+// host answers on its behalf.
+
+def class IcmpReply {
+    field srcIp;
+    field id;
+    field seq;
+}
+
+def class Icmp {
+    static field replies;   // IcmpReply, newest last; ping() consumes its own
+    static field lock;
+    static field nextId;
+
+    // the ICMP message (without IP header) with its checksum filled in
+    static def build(type, id, seq, payload) {
+        msg = [type, 0, 0, 0, Ip.byteAt(id, 8), Ip.byteAt(id, 0), Ip.byteAt(seq, 8), Ip.byteAt(seq, 0)];
+        Arr.appendAll(msg, payload);
+        cs = Ip.checksum(msg);
+        msg[2] = Ip.byteAt(cs, 8);
+        msg[3] = Ip.byteAt(cs, 0);
+        return msg;
+    }
+
+    static def send(srcIp, dstIp, type, id, seq, payload) {
+        msg = Icmp.build(type, id, seq, payload);
+        ip = Ip.buildHeader(srcIp, dstIp, Ip.protoIcmp, len(msg));
+        Nic.send(Arr.appendAll(ip, msg));
+    }
+
+    // Net.pump() calls this, under Net.pumpLock, for every ICMP message
+    static def handleFrame(ipHeader, frame) {
+        total = Ip.u16From(frame, 2);
+        if (total < 28) { return nil; }
+        if (Ip.finishSum(Ip.sumRange(frame, 20, total, 0)) != 0) { return nil; } // corrupt
+        type = frame[20];
+        id = Ip.u16From(frame, 24);
+        seq = Ip.u16From(frame, 26);
+
+        if (type == 8) {
+            if (!Net.isLocal(ipHeader.dstAddr)) { return nil; }
+            payload = Arr.slice(frame, 28, total);
+            Icmp.send(ipHeader.dstAddr, ipHeader.srcAddr, 0, id, seq, payload);
+            return nil;
+        }
+        if (type == 0) {
+            r = new IcmpReply();
+            r.srcIp = ipHeader.srcAddr;
+            r.id = id;
+            r.seq = seq;
+            lock(Icmp.lock);
+            push(Icmp.replies, r);
+            unlock(Icmp.lock);
+        }
+    }
+
+    // removes and returns the reply matching (id, seq), or nil
+    static def takeReply(id, seq) {
+        lock(Icmp.lock);
+        found = nil;
+        i = 0;
+        while (found == nil && i < len(Icmp.replies)) {
+            r = Icmp.replies[i];
+            if (r.id == id && r.seq == seq) { found = i; }
+            i = i + 1;
+        }
+        result = nil;
+        if (found != nil) {
+            result = Icmp.replies[found];
+            rest = [];
+            j = 0;
+            while (j < len(Icmp.replies)) {
+                if (j != found) { push(rest, Icmp.replies[j]); }
+                j = j + 1;
+            }
+            Icmp.replies = rest;
+        }
+        unlock(Icmp.lock);
+        return result;
+    }
+
+    // sends one echo request (32 bytes of payload) from srcIp to dstIp and
+    // waits up to timeoutMs for its reply. Returns the round-trip time in
+    // milliseconds (0 if it came back within the same millisecond), or -1 on timeout.
+    static def ping(srcIp, dstIp, seq, timeoutMs) {
+        id = Icmp.nextId & 0xFFFF;
+        Icmp.nextId = Icmp.nextId + 1;
+
+        payload = [];
+        i = 0;
+        while (i < 32) { push(payload, 0x61 + (i % 23)); i = i + 1; } // a-w, like ping(8) fills its payload
+
+        start = ticks();
+        Icmp.send(srcIp, dstIp, 8, id, seq, payload);
+
+        deadline = start + timeoutMs;
+        while (true) {
+            gen = eventGen(Nic.rxEvent);
+            Net.pump();
+            if (Icmp.takeReply(id, seq) != nil) { return ticks() - start; }
+            remaining = deadline - ticks();
+            if (remaining <= 0) { return -1; }
+            waitEvent(Nic.rxEvent, gen, remaining);
+        }
+    }
+}
+Icmp.replies = [];
+Icmp.lock = newMutex();
+Icmp.nextId = 1;
+Net.register(Ip.protoIcmp, Icmp.handleFrame);

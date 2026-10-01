@@ -1,4 +1,5 @@
 import 'nic.bl0';
+import '../arrlib.bl0';
 import '../str/char.bl0';
 
 // minimal IPv4-shaped header: fixed 20 bytes, no options, no fragmentation
@@ -26,6 +27,7 @@ import '../str/char.bl0';
 // one, the same way a real stack's own byte-order helpers tend to live in
 // the IP layer's own utility code.
 def class Ip {
+    static field protoIcmp;
     static field protoUdp;
     static field protoTcp;
 
@@ -71,18 +73,88 @@ def class Ip {
     // input's last byte is treated as a word with an implicit zero low
     // byte, same as every real IP/TCP/UDP checksum does.
     static def checksum(bytes) {
-        sum = 0;
-        i = 0;
-        while (i < len(bytes)) {
+        return Ip.finishSum(Ip.partialSum(bytes, 0));
+    }
+
+    // the running 16-bit-word sum of 'bytes' on top of 'sum' (not yet folded or
+    // complemented). Summing a message in pieces is the same as summing it
+    // whole PROVIDED every piece but the last has an even length - then no
+    // word straddles two pieces. TCP's checksum uses that to sum pseudo-header,
+    // header and payload where they are, instead of copying them into one array.
+    static def partialSum(bytes, sum) {
+        return Ip.sumRange(bytes, 0, len(bytes), sum);
+    }
+
+    // the same over bytes[from .. to)
+    static def sumRange(bytes, from, to, sum) {
+        i = from;
+        n = to;
+        while (i < n) {
             word = bytes[i] * 256;
-            if (i + 1 < len(bytes)) { word = word + bytes[i + 1]; }
+            if (i + 1 < n) { word = word + bytes[i + 1]; }
             sum = sum + word;
             i = i + 2;
         }
+        return sum;
+    }
+
+    // carries folded back in, complemented
+    static def finishSum(sum) {
         while (sum > 0xFFFF) {
             sum = (sum & 0xFFFF) + (sum >>> 16);
         }
         return (~sum) & 0xFFFF;
+    }
+
+    // true if bytes[0..20) is an IPv4 header whose checksum field is consistent:
+    // summing a header that includes its own correct checksum gives all ones,
+    // i.e. finishSum() == 0
+    static def headerValid(bytes) {
+        if (len(bytes) < 20) { return false; }
+        if ((bytes[0] >>> 4) != 4) { return false; }
+        return Ip.finishSum(Ip.sumRange(bytes, 0, 20, 0)) == 0;
+    }
+
+    // 'a.b.c.d' -> the 32-bit address, or nil if it is not a dotted quad
+    // (four decimal parts, each 0-255, nothing else in the string)
+    static def parseAddr(text) {
+        n = len(text);
+        value = 0;
+        part = 0;
+        digits = 0;
+        parts = 0;
+        i = 0;
+        while (i < n) {
+            c = int(text[i]);
+            if (c >= 48 && c <= 57) {
+                part = part * 10 + (c - 48);
+                digits = digits + 1;
+                if (part > 255 || digits > 3) { return nil; }
+            } else {
+                if (c != 46 || digits == 0) { return nil; }
+                value = (value << 8) | part;
+                part = 0;
+                digits = 0;
+                parts = parts + 1;
+            }
+            i = i + 1;
+        }
+        if (digits == 0 || parts != 3) { return nil; }
+        return (value << 8) | part;
+    }
+
+    // the 32-bit address as 'a.b.c.d'
+    static def formatAddr(addr) {
+        return str(Ip.byteAt(addr, 24)) + '.' + str(Ip.byteAt(addr, 16)) + '.' + str(Ip.byteAt(addr, 8)) + '.' + str(Ip.byteAt(addr, 0));
+    }
+
+    // a string's characters as an array of byte values 0-255
+    static def bytesOf(message) {
+        result = [];
+        i = 0;
+        n = len(message);
+        while (i < n) { push(result, int(message[i])); i = i + 1; }
+        return result;
     }
 
     // builds a 20-byte header with the checksum field zeroed, computes the
@@ -106,6 +178,7 @@ def class Ip {
         return h;
     }
 }
+Ip.protoIcmp = 1;
 Ip.protoUdp = 17;
 Ip.protoTcp = 6;
 

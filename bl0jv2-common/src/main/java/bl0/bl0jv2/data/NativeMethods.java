@@ -25,7 +25,32 @@ public final class NativeMethods {
     // registration for why this is a native (a blocking Java loop), not a
     // dedicated opcode
     public static final byte HALT_CORE = 0x10;
-    // loads and runs a separate compiled (.bl0c) file as a genuinely
-    // isolated child process - see Bl0jv2_jVM's own registration
-    public static final byte EXEC = 0x11;
+    // generation-counted event (see Bl0jEvent): eventGen() snapshots it,
+    // signalEvent() bumps it and wakes every waiter, waitEvent() sleeps
+    // until it differs from a snapshot (or timeout / deliverable interrupt)
+    public static final byte NEW_EVENT = 0x12;
+    public static final byte SIGNAL_EVENT = 0x13;
+    public static final byte WAIT_EVENT = 0x14;
+    public static final byte EVENT_GEN = 0x15;
+    // inter-processor interrupt: raises a vector on ONE specific core
+    public static final byte RAISE_INTERRUPT_ON = 0x16;
+    // timers: raise a vector after a delay (SET_TIMER, packed [ms, vector,
+    // periodic]) and cancel one by id
+    public static final byte SET_TIMER = 0x17;
+    public static final byte CANCEL_TIMER = 0x18;
+    // string helpers, so library code doesn't build strings a character at a
+    // time (each intermediate string is a heap entry): strSub(s, from, to),
+    // strFind(s, sub, from), strUpper(s), strLower(s), strJoin(array, sep)
+    public static final byte STR_SUB = 0x19;
+    public static final byte STR_FIND = 0x1A;
+    public static final byte STR_UPPER = 0x1B;
+    public static final byte STR_LOWER = 0x1C;
+    public static final byte STR_JOIN = 0x1D;
+    // throw(message): raise an error a surrounding try/catch receives
+    public static final byte THROW = 0x1E;
+    // strChar(codePoint): the one-character string for a Unicode code point
+    public static final byte STR_CHAR = 0x1F;
+    // execMem(addr, size, mode): run a compiled program that sits in raw memory
+    // (0x11, once exec(path), is free: the VM never reads a host file)
+    public static final byte EXEC_MEM = 0x20;
 }

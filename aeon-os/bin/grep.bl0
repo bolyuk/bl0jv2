@@ -1,0 +1,25 @@
+// aeon-os program: the lines containing a text; grep <text> [file] (standard input when no file)
+// Loaded from the virtual disk by the shell (bin/grep.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+import '../lib/input.bl0';
+
+def main(words) {
+    if (len(words) < 2 || len(words) > 3) { sayErr('usage: grep <text> [file]'); return nil; }
+    text = inputText(len(words) == 3 ? words[2] : nil);
+    if (text == nil) { sayErr(words[2] + ': no such file'); return nil; }
+    lines = Split.split(text, strChar(10));
+    if (len(lines) > 0 && lines[len(lines) - 1] == '') { pop(lines); }
+    found = 0;
+    i = 0;
+    while (i < len(lines)) {
+        if (strFind(lines[i], words[1], 0) >= 0) {
+            say(lines[i]);
+            found += 1;
+        }
+        i += 1;
+    }
+    if (found == 0) { sayErr('(no match)'); }
+}
+
+programMain(main);

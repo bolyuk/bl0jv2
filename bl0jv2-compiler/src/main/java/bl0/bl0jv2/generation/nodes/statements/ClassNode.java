@@ -5,6 +5,9 @@ import bl0.bl0jv2.generation.nodes.Node;
 import java.util.List;
 
 public class ClassNode extends Node {
+    // declared by a shared library (see Bl0jv2_Linker): the compiler checks calls against it but
+    // emits no code - the loader supplies the real thing
+    public boolean external;
     public final String name;
     public final List<String> fieldNames;
     // parallel to fieldNames - null where a field has no initializer.

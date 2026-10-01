@@ -1,0 +1,13 @@
+// aeon-os program: add text to the end of a file
+// Loaded from the virtual disk by the shell (bin/append.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) < 3) { sayErr('usage: append <file> <text>'); return nil; }
+    name = inCwd(words[1]);
+    Fs.append(name, restOf(words, 2));
+    say(Fmt.format('{} is now {} bytes', [words[1], Fs.size(name)]));
+}
+
+programMain(main);

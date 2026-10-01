@@ -76,7 +76,7 @@ public final class Bl0jv2_TestRunner {
         }
     }
 
-    private static String runInstructions(byte[] instructions, Consumer<Bl0jv2_jVM> configure) {
+    public static String runInstructions(byte[] instructions, Consumer<Bl0jv2_jVM> configure) {
         var vm = new Bl0jv2_jVM();
         StringWriter sw = new StringWriter();
         PrintWriter writer = new PrintWriter(sw);

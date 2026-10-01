@@ -2,6 +2,7 @@ package bl0.bl0jv2.generation;
 
 import bl0.bl0jv2.data.C;
 import bl0.bl0jv2.data.ClassDef;
+import bl0.bl0jv2.data.ExternDef;
 import bl0.bl0jv2.data.Constants;
 import bl0.bl0jv2.data.FunDef;
 import bl0.bl0jv2.data.NativeMethods;
@@ -10,6 +11,7 @@ import bl0.bl0jv2.exceptions.Bl0j_CompilerException;
 import bl0.bl0jv2.generation.nodes.BinaryNode;
 import bl0.bl0jv2.generation.nodes.Node;
 import bl0.bl0jv2.generation.nodes.PROGRAM_N;
+import bl0.bl0jv2.generation.nodes.RegValueNode;
 import bl0.bl0jv2.generation.nodes.data.*;
 import bl0.bl0jv2.generation.nodes.statements.*;
 import bl0.bl0jv2.generation.nodes.unary.LUnaryNode;
@@ -70,6 +72,11 @@ public final class Bl0jv2_Compiler {
         // local later found to be captured never needs its earlier
         // (already-compiled) accesses retroactively rewritten
         final boolean boxed;
+        // names read while they had no binding yet - each is an error unless
+        // something later in the same function assigns it (a loop may
+        // legitimately read a variable above the line that first sets it).
+        // Checked once the whole body has been compiled.
+        final Set<String> suspectReads = new LinkedHashSet<>();
 
         FunctionScope(boolean boxed) {
             this.boxed = boxed;
@@ -99,7 +106,13 @@ public final class Bl0jv2_Compiler {
     // compile-time-only check (see compileAssign), not part of the
     // compiled ClassDef.
     private final HashMap<String, ClassInfo> classMapping = new HashMap<>();
-    private record ClassInfo(String name, int constIndex, boolean hasInit, List<String> staticFieldNames, List<String> constFieldNames) {
+    // fieldNames/methodArity describe the INSTANCE side (arity excludes the
+    // implicit 'this'); staticMethodArity the 'static def' side. initArity
+    // is -1 when the class declares no init(). All of it exists purely so
+    // the compiler can reject a misspelled member or a wrong argument count
+    // instead of leaving that to a runtime error.
+    private record ClassInfo(String name, int constIndex, boolean hasInit, List<String> staticFieldNames, List<String> constFieldNames,
+                             Set<String> fieldNames, Map<String, Integer> methodArity, Map<String, Integer> staticMethodArity, int initArity) {
         int staticFieldIndex(String fieldName) {
             return staticFieldNames.indexOf(fieldName);
         }
@@ -122,6 +135,28 @@ public final class Bl0jv2_Compiler {
         if (!(target instanceof IdentityNode idNode))
             return null;
         return classMapping.get(idNode.name);
+    }
+
+    // parameter count of every top-level function, by name
+    private final Map<String, Integer> functionArity = new HashMap<>();
+    // every instance field name declared by ANY class, and for every
+    // instance method name the set of arities some class declares it with -
+    // what an access through a receiver of unknown class is checked against
+    private final Set<String> allFieldNames = new HashSet<>();
+    private final Map<String, Set<Integer>> allMethodArities = new HashMap<>();
+    // the function whose body is being compiled, null at the top level
+    private String currentFunctionName;
+
+    private Bl0j_CompilerException err(String message) {
+        String where;
+        if (currentFunctionName == null) where = "at top level";
+        else if (currentFunctionName.startsWith("<lambda")) where = "in a lambda";
+        else where = "in function " + currentFunctionName;
+        return new Bl0j_CompilerException(where + ": " + message);
+    }
+
+    private static String argumentCount(int n) {
+        return n + " argument" + (n == 1 ? "" : "s");
     }
 
     // number of TRY_ENTERs currently open (incremented/decremented only
@@ -156,6 +191,10 @@ public final class Bl0jv2_Compiler {
         lambdaCounter = 0;
         currentClassName = null;
         currentMethodIsInit = false;
+        currentFunctionName = null;
+        functionArity.clear();
+        allFieldNames.clear();
+        allMethodArities.clear();
         regIndex = 0;
         regCount = 0;
 
@@ -169,7 +208,9 @@ public final class Bl0jv2_Compiler {
         scopeChain.add(new FunctionScope(containsLambda(program)));
 
         fetchFunctions(program);
+        FunctionScope topScope = currentScope();
         compileInner(program);
+        checkNoUndefinedReads(topScope);
         _emit(OpCodes.HALT);
         compileFunctions();
 
@@ -190,12 +231,55 @@ public final class Bl0jv2_Compiler {
         throw new Bl0j_CompilerException("unexpected field default node: " + defaultNode);
     }
 
+    // names a shared library declares (see Bl0jv2_Linker): defining one of them here too would
+    // make two different things with one name
+    private final Set<String> externalNames = new HashSet<>();
+    private final Set<String> localNames = new HashSet<>();
+
+    // the constant-pool index of a function; a shared library's function gets its EXTERN
+    // constant when first referred to, so a program carries only the names it actually uses
+    private Integer functionConst(String name) {
+        Integer index = functionMapping.get(name);
+        if (index != null && index == -1) {
+            index = constant(new ExternDef(name));
+            functionMapping.put(name, index);
+        }
+        return index;
+    }
+
+    private final Map<String, Integer> externClassConsts = new HashMap<>();
+
+    private int classConst(ClassInfo info) {
+        if (info.constIndex() != -1) return info.constIndex();
+        return externClassConsts.computeIfAbsent(info.name(), n -> constant(new ExternDef(n)));
+    }
+
+    private void checkNotDefinedTwice(String name, boolean external) {
+        if (external) {
+            if (localNames.contains(name))
+                throw new Bl0j_CompilerException("'" + name + "' is defined here and by a shared library");
+            externalNames.add(name);
+        } else {
+            if (externalNames.contains(name))
+                throw new Bl0j_CompilerException("'" + name + "' is defined here and by a shared library");
+            localNames.add(name);
+        }
+    }
+
     private void fetchFunctions(PROGRAM_N program) {
         for(var node : program.nodes) {
             if(node instanceof FunNode funNode){
-                lazy_functions.add(new PendingFunction(funNode));
-                int constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
+                checkNotDefinedTwice(funNode.name, funNode.external);
+                int constIndex;
+                if (funNode.external) {
+                    // a shared library's function: nothing to compile, the loader links it by name
+                    constIndex = -1;   // the constant is made when something refers to it (see functionConst)
+                } else {
+                    lazy_functions.add(new PendingFunction(funNode));
+                    constIndex = constant(new FunDef(funNode.name, -1, (short)0, (short)0));
+                }
                 functionMapping.put(funNode.name, constIndex);
+                functionArity.put(funNode.name, funNode.args.args.size());
             }
 
             // a class's methods are registered exactly like top-level
@@ -204,27 +288,48 @@ public final class Bl0jv2_Compiler {
             // itself is then a ClassDef constant that just points at each
             // method's own FunDef constant by index
             if (node instanceof ClassNode classNode) {
+                checkNotDefinedTwice(classNode.name, classNode.external);
                 List<String> methodNames = new ArrayList<>();
                 List<Integer> methodConstIndices = new ArrayList<>();
                 boolean hasInit = false;
+                Map<String, Integer> methodArity = new HashMap<>();
+                int initArity = -1;
 
                 for (FunNode method : classNode.methods) {
-                    lazy_functions.add(new PendingFunction(method));
-                    int constIndex = constant(new FunDef(method.name, -1, (short)0, (short)0));
-                    functionMapping.put(method.name, constIndex);
+                    int constIndex = -1;
+                    if (!classNode.external) {
+                        lazy_functions.add(new PendingFunction(method));
+                        constIndex = constant(new FunDef(method.name, -1, (short)0, (short)0));
+                        functionMapping.put(method.name, constIndex);
+                    }
 
                     String plainName = method.name.substring(classNode.name.length() + 1);
                     methodNames.add(plainName);
                     methodConstIndices.add(constIndex);
                     if (plainName.equals("init")) hasInit = true;
+
+                    int arity = method.args.args.size() - 1; // minus the implicit 'this'
+                    methodArity.put(plainName, arity);
+                    allMethodArities.computeIfAbsent(plainName, k -> new HashSet<>()).add(arity);
+                    if (plainName.equals("init")) initArity = arity;
                 }
+                allFieldNames.addAll(classNode.fieldNames);
 
-                List<Integer> fieldDefaultConstIndices = new ArrayList<>();
-                for (Node defaultNode : classNode.fieldDefaultNodes)
-                    fieldDefaultConstIndices.add(fieldDefaultConstIndex(defaultNode));
+                int classConstIndex;
+                if (classNode.external) {
+                    classConstIndex = -1;   // made on first use (see classConst)
+                } else {
+                    List<Integer> fieldDefaultConstIndices = new ArrayList<>();
+                    for (Node defaultNode : classNode.fieldDefaultNodes)
+                        fieldDefaultConstIndices.add(fieldDefaultConstIndex(defaultNode));
+                    classConstIndex = constant(new ClassDef(classNode.name, classNode.fieldNames, fieldDefaultConstIndices, methodNames, methodConstIndices, classNode.staticFieldNames.size()));
+                }
+                Map<String, Integer> staticMethodArity = new HashMap<>();
+                for (FunNode staticMethod : classNode.staticMethods)
+                    staticMethodArity.put(staticMethod.name.substring(classNode.name.length() + 1), staticMethod.args.args.size());
 
-                int classConstIndex = constant(new ClassDef(classNode.name, classNode.fieldNames, fieldDefaultConstIndices, methodNames, methodConstIndices, classNode.staticFieldNames.size()));
-                classMapping.put(classNode.name, new ClassInfo(classNode.name, classConstIndex, hasInit, classNode.staticFieldNames, classNode.constFieldNames));
+                classMapping.put(classNode.name, new ClassInfo(classNode.name, classConstIndex, hasInit, classNode.staticFieldNames, classNode.constFieldNames,
+                        new HashSet<>(classNode.fieldNames), methodArity, staticMethodArity, initArity));
 
                 // static methods are registered as plain functions under
                 // their mangled name and resolved entirely at compile time
@@ -232,8 +337,13 @@ public final class Bl0jv2_Compiler {
                 // instance dispatch, so they're deliberately left out of
                 // the ClassDef's own method table above
                 for (FunNode staticMethod : classNode.staticMethods) {
-                    lazy_functions.add(new PendingFunction(staticMethod));
-                    int constIndex = constant(new FunDef(staticMethod.name, -1, (short)0, (short)0));
+                    int constIndex;
+                    if (classNode.external) {
+                        constIndex = -1;
+                    } else {
+                        lazy_functions.add(new PendingFunction(staticMethod));
+                        constIndex = constant(new FunDef(staticMethod.name, -1, (short)0, (short)0));
+                    }
                     functionMapping.put(staticMethod.name, constIndex);
                 }
             }
@@ -251,6 +361,7 @@ public final class Bl0jv2_Compiler {
         for (int idx = 0; idx < lazy_functions.size(); idx++) {
             PendingFunction pending = lazy_functions.get(idx);
             FunNode fun = pending.fun();
+            currentFunctionName = fun.name;
 
             // a regular function/method has no enclosing scope (this
             // language has no nested 'def'); a lambda's own chain was
@@ -284,6 +395,7 @@ public final class Bl0jv2_Compiler {
             for (int i = 0; i < fun.args.args.size(); i++) {
                 String argName = fun.args.args.get(i);
                 boolean isCaptured = i < pending.captureCount();
+
                 // mark BEFORE resolve() allocates it, so isCell() already
                 // reports the truth about this incoming value
                 if (isCaptured) scope.cellNames.add(argName);
@@ -304,6 +416,7 @@ public final class Bl0jv2_Compiler {
 
             int bodyStart = adress * C.INSTR_WIDTH;
             compileInner(fun.body);
+            checkNoUndefinedReads(scope);
             // an empty body emits nothing, so there is no instruction of
             // *this* function to inspect - peeking at the last instruction's
             // opcode byte would read the tail of whatever was emitted
@@ -314,7 +427,13 @@ public final class Bl0jv2_Compiler {
                 _emit(OpCodes.RETURN, 0);
 
             int constIndex = functionMapping.get(fun.name);
-            constants.set(constIndex, new FunDef(fun.name, adress, (short) arity, (short) regIndex));
+            // an instance method's first parameter is 'this' (see the parser's
+            // method desugaring) - only a mangled "Class.method" name can
+            // have one, so a lambda or plain function that merely names a
+            // parameter 'this' is not mistaken for a method
+            boolean receiver = dot >= 0 && classMapping.containsKey(fun.name.substring(0, dot))
+                    && fun.args.args.size() > 0 && fun.args.args.get(0).equals("this");
+            constants.set(constIndex, new FunDef(fun.name, adress, (short) arity, (short) regIndex, receiver));
         }
 
     }
@@ -463,6 +582,174 @@ public final class Bl0jv2_Compiler {
         return result;
     }
 
+    // newEvent(): zero-arg, value-producing - same shape as newMutex()
+    private Integer compileNewEvent(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "newEvent", 0))
+            return null;
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.NEW_EVENT, result);
+        return result;
+    }
+
+    // signalEvent(e): 1-arg, same clobber-avoidance MOV as lock(m)
+    private Integer compileSignalEvent(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "signalEvent", 1))
+            return null;
+
+        int eRegRaw = compileInner(funCall.args.get(0));
+        int eReg = regIndex++;
+        _emit(OpCodes.MOV, eReg, eRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.SIGNAL_EVENT, eReg);
+
+        int result = regIndex++;
+        _emit(OpCodes.LOAD_NIL, result);
+        return result;
+    }
+
+    // raiseInterruptOn(core, vector): packs (core, vector) into a 2-element
+    // array for the one-operand native, the same way waitEvent packs its
+    // three. Returns nil.
+    private Integer compileRaiseInterruptOn(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "raiseInterruptOn", 2))
+            return null;
+
+        int coreReg = compileInner(funCall.args.get(0));
+        int vectorReg = compileInner(funCall.args.get(1));
+
+        int startReg = regIndex++;
+        _emit(OpCodes.MOV, regIndex, coreReg);
+        regIndex++;
+        _emit(OpCodes.MOV, regIndex, vectorReg);
+        regIndex++;
+        _emit(OpCodes.NEW_ARRAY, startReg, 2);
+
+        int arrRef = regIndex++; // see compileWaitEvent on why the array is freed
+        _emit(OpCodes.MOV, arrRef, startReg);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.RAISE_INTERRUPT_ON, startReg);
+        _emit(OpCodes.FREE, arrRef);
+
+        _emit(OpCodes.LOAD_NIL, startReg);
+        return startReg;
+    }
+
+    // a builtin that is a native call taking 'argc' arguments and returning
+    // its result: one operand goes in directly, several are packed into a
+    // temporary array (a native has exactly one operand register), which is
+    // freed again right after the call
+    private Integer compileValueNative(FunCall funCall, String name, int argc, byte nativeId) {
+        if (!isBuiltinCall(funCall, name, argc))
+            return null;
+
+        if (argc == 1) {
+            int raw = compileInner(funCall.args.get(0));
+            int reg = regIndex++;
+            _emit(OpCodes.MOV, reg, raw);
+            _emit(OpCodes.CALL_NATIVE, nativeId, reg);
+            return reg;
+        }
+
+        int[] argRegs = new int[argc];
+        for (int i = 0; i < argc; i++)
+            argRegs[i] = compileInner(funCall.args.get(i));
+
+        int startReg = regIndex++;
+        for (int argReg : argRegs) {
+            _emit(OpCodes.MOV, regIndex, argReg);
+            regIndex++;
+        }
+        _emit(OpCodes.NEW_ARRAY, startReg, argc);
+
+        int arrRef = regIndex++; // see compileWaitEvent on why the array is freed
+        _emit(OpCodes.MOV, arrRef, startReg);
+        _emit(OpCodes.CALL_NATIVE, nativeId, startReg);
+        _emit(OpCodes.FREE, arrRef);
+        return startReg;
+    }
+
+    // setTimer(ms, vector) / setInterval(ms, vector): value-producing (the
+    // timer id). Both pack [ms, vector, periodic] into one array for the
+    // one-operand native; the periodic flag is a compile-time constant.
+    private Integer compileSetTimer(FunCall funCall, String name, int periodic) {
+        if (!isBuiltinCall(funCall, name, 2))
+            return null;
+
+        int msReg = compileInner(funCall.args.get(0));
+        int vectorReg = compileInner(funCall.args.get(1));
+        int periodicReg = compileInner(new NumberNode(periodic));
+
+        int startReg = regIndex++;
+        for (int argReg : new int[]{msReg, vectorReg, periodicReg}) {
+            _emit(OpCodes.MOV, regIndex, argReg);
+            regIndex++;
+        }
+        _emit(OpCodes.NEW_ARRAY, startReg, 3);
+
+        int arrRef = regIndex++; // see compileWaitEvent on why the array is freed
+        _emit(OpCodes.MOV, arrRef, startReg);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.SET_TIMER, startReg);
+        _emit(OpCodes.FREE, arrRef);
+        return startReg;
+    }
+
+    // cancelTimer(id): 1-arg, value-producing (true if it was still pending)
+    private Integer compileCancelTimer(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "cancelTimer", 1))
+            return null;
+
+        int idRegRaw = compileInner(funCall.args.get(0));
+        int idReg = regIndex++;
+        _emit(OpCodes.MOV, idReg, idRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.CANCEL_TIMER, idReg);
+        return idReg;
+    }
+
+    // eventGen(e): 1-arg, value-producing (the event's current generation) -
+    // same shape as syscall's value-producing natives
+    private Integer compileEventGen(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "eventGen", 1))
+            return null;
+
+        int eRegRaw = compileInner(funCall.args.get(0));
+        int eReg = regIndex++;
+        _emit(OpCodes.MOV, eReg, eRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.EVENT_GEN, eReg);
+        return eReg;
+    }
+
+    // waitEvent(e, gen, timeoutMs): a native call carries exactly one
+    // operand register, so the three arguments are packed into a fresh
+    // 3-element array first (laid out exactly like an ArrayLiteralNode's own
+    // registers) and unpacked again inside the native. Result: true if the
+    // event was signalled since 'gen' was read, false on timeout or a
+    // pending interrupt.
+    private Integer compileWaitEvent(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "waitEvent", 3))
+            return null;
+
+        int[] argRegs = new int[3];
+        for (int i = 0; i < 3; i++)
+            argRegs[i] = compileInner(funCall.args.get(i));
+
+        int startReg = regIndex++;
+        for (int argReg : argRegs) {
+            _emit(OpCodes.MOV, regIndex, argReg);
+            regIndex++;
+        }
+        _emit(OpCodes.NEW_ARRAY, startReg, 3);
+
+        // the heap has no GC (only explicit free), so the packing array is
+        // freed right after the call instead of leaking one slot per wait -
+        // CALL_NATIVE overwrites startReg with the result, so the array's
+        // reference is parked in its own register first
+        int arrRef = regIndex++;
+        _emit(OpCodes.MOV, arrRef, startReg);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.WAIT_EVENT, startReg);
+        _emit(OpCodes.FREE, arrRef);
+        return startReg;
+    }
+
     // peek8(addr)/peek16(addr)/peek32(addr): the width is known at compile
     // time (which builtin name matched), so it's baked in as PEEK's b
     // operand directly - an immediate, not a register
@@ -590,21 +877,6 @@ public final class Bl0jv2_Compiler {
         _emit(OpCodes.LOAD_NIL, result);
         _emit(OpCodes.CALL_NATIVE, NativeMethods.HALT_CORE, result);
         return result;
-    }
-
-    // exec(path): 1-arg, value-producing (0 on success) - same shape as
-    // compileRaiseInterrupt's clobber-avoidance MOV, but the result here is
-    // meaningful (CALL_NATIVE overwrites its own operand register with the
-    // native's return value), not discarded
-    private Integer compileExec(FunCall funCall) {
-        if (!isBuiltinCall(funCall, "exec", 1))
-            return null;
-
-        int pathRegRaw = compileInner(funCall.args.get(0));
-        int pathReg = regIndex++;
-        _emit(OpCodes.MOV, pathReg, pathRegRaw);
-        _emit(OpCodes.CALL_NATIVE, NativeMethods.EXEC, pathReg);
-        return pathReg;
     }
 
     // syscall(vector, arg): SYSCALL takes its two values directly in a/b,
@@ -791,8 +1063,7 @@ public final class Bl0jv2_Compiler {
         _emit(OpCodes.LOAD_CONST, expectedReg, constant(expectedType));
 
         int result = regIndex++;
-        _emit(OpCodes.MOV, result, typeReg);
-        _emit(OpCodes.EQ, result, expectedReg);
+        _emit(OpCodes.EQ, typeReg, expectedReg, result);
         return result;
     }
 
@@ -802,14 +1073,54 @@ public final class Bl0jv2_Compiler {
     // class (LOOKUP_METHOD), then calls it with 'this' prepended to args -
     // shared by both obj.method(...) call sites and new ClassName(...)'s
     // implicit init(...) call
-    private int compileMethodCall(int objReg, String methodName, List<Node> argNodes) {
+    // 'known' is the receiver's class when the compiler can tell (this, or
+    // a just-constructed instance), null otherwise. With a known class the
+    // method and its argument count are checked exactly; with an unknown
+    // receiver the check is whether ANY class declares such a method with
+    // this many arguments - closed classes make a miss a certain typo.
+    private void checkMethodCall(ClassInfo known, String methodName, int argc) {
+        if (known != null) {
+            Integer expected = known.methodArity().get(methodName);
+            if (expected == null)
+                throw err("class " + known.name() + " has no method '" + methodName + "'");
+            if (expected != argc)
+                throw err("method " + known.name() + "." + methodName + " expects " + argumentCount(expected) + ", got " + argc);
+            return;
+        }
+
+        Set<Integer> declared = allMethodArities.get(methodName);
+        if (declared == null)
+            throw err("no class declares a method '" + methodName + "'");
+        if (!declared.contains(argc))
+            throw err("no method '" + methodName + "' takes " + argumentCount(argc) + " (declared with "
+                    + declared.stream().sorted().map(String::valueOf).collect(java.util.stream.Collectors.joining(", ")) + ")");
+    }
+
+    private void checkFieldAccess(Node receiver, String field) {
+        ClassInfo known = knownReceiverClass(receiver);
+        if (known != null) {
+            if (!known.fieldNames().contains(field))
+                throw err("class " + known.name() + " has no field '" + field + "'");
+        } else if (!allFieldNames.contains(field)) {
+            throw err("no class declares a field '" + field + "'");
+        }
+    }
+
+    // the class a receiver expression is certainly an instance of, or null
+    private ClassInfo knownReceiverClass(Node receiver) {
+        if (receiver instanceof IdentityNode id && id.name.equals("this") && currentClassName != null)
+            return classMapping.get(currentClassName);
+        return null;
+    }
+
+    private int compileMethodCall(int objReg, String methodName, List<Node> argNodes, ClassInfo known) {
+        checkMethodCall(known, methodName, argNodes.size());
         int[] valRegs = new int[argNodes.size()];
         for (int i = 0; i < argNodes.size(); i++)
             valRegs[i] = compileInner(argNodes.get(i));
 
         int methodReg = regIndex++;
-        _emit(OpCodes.MOV, methodReg, objReg);
-        _emit(OpCodes.LOOKUP_METHOD, methodReg, constant(methodName));
+        _emit(OpCodes.LOOKUP_METHOD, objReg, constant(methodName), methodReg);
 
         int startReg = regIndex++;
         _emit(OpCodes.MOV, regIndex, objReg); // 'this'
@@ -819,7 +1130,7 @@ public final class Bl0jv2_Compiler {
             regIndex++;
         }
 
-        _emit(OpCodes.CALL, methodReg, startReg);
+        _emit(OpCodes.CALL, methodReg, startReg, valRegs.length + 1); // + 'this'
         return startReg;
     }
 
@@ -854,6 +1165,22 @@ public final class Bl0jv2_Compiler {
         if ((r = compileNewMutex(funCall)) != null) return r;
         if ((r = compileLockMutex(funCall)) != null) return r;
         if ((r = compileUnlockMutex(funCall)) != null) return r;
+        if ((r = compileNewEvent(funCall)) != null) return r;
+        if ((r = compileSignalEvent(funCall)) != null) return r;
+        if ((r = compileRaiseInterruptOn(funCall)) != null) return r;
+        if ((r = compileValueNative(funCall, "throw", 1, NativeMethods.THROW)) != null) return r;
+        if ((r = compileValueNative(funCall, "strSub", 3, NativeMethods.STR_SUB)) != null) return r;
+        if ((r = compileValueNative(funCall, "strFind", 3, NativeMethods.STR_FIND)) != null) return r;
+        if ((r = compileValueNative(funCall, "execMem", 3, NativeMethods.EXEC_MEM)) != null) return r;
+        if ((r = compileValueNative(funCall, "strChar", 1, NativeMethods.STR_CHAR)) != null) return r;
+        if ((r = compileValueNative(funCall, "strUpper", 1, NativeMethods.STR_UPPER)) != null) return r;
+        if ((r = compileValueNative(funCall, "strLower", 1, NativeMethods.STR_LOWER)) != null) return r;
+        if ((r = compileValueNative(funCall, "strJoin", 2, NativeMethods.STR_JOIN)) != null) return r;
+        if ((r = compileSetTimer(funCall, "setTimer", 0)) != null) return r;
+        if ((r = compileSetTimer(funCall, "setInterval", 1)) != null) return r;
+        if ((r = compileCancelTimer(funCall)) != null) return r;
+        if ((r = compileEventGen(funCall)) != null) return r;
+        if ((r = compileWaitEvent(funCall)) != null) return r;
         if ((r = compileRaiseInterrupt(funCall)) != null) return r;
         if ((r = compileRegisterHandler(funCall)) != null) return r;
         if ((r = compileDispatch(funCall)) != null) return r;
@@ -862,7 +1189,6 @@ public final class Bl0jv2_Compiler {
         if ((r = compileDropToUserMode(funCall)) != null) return r;
         if ((r = compileIsPrivileged(funCall)) != null) return r;
         if ((r = compileHaltCore(funCall)) != null) return r;
-        if ((r = compileExec(funCall)) != null) return r;
         if ((r = compileSyscall(funCall)) != null) return r;
         if ((r = compileAtomicAdd(funCall)) != null) return r;
         if ((r = compileAtomicCas(funCall)) != null) return r;
@@ -887,6 +1213,9 @@ public final class Bl0jv2_Compiler {
             return reg;
         }
 
+        if(node instanceof RegValueNode regValue)
+            return regValue.reg;
+
         if(node instanceof NativeCallNode nativeCallNode){
             int valRegRaw = compileInner(nativeCallNode.right);
 
@@ -909,6 +1238,13 @@ public final class Bl0jv2_Compiler {
             Integer builtin = tryCompileBuiltin(funCall);
             if (builtin != null) return builtin;
 
+            if (funCall.left instanceof IdentityNode calleeName && functionArity.containsKey(calleeName.name)
+                    && !currentScope().identityMapping.containsKey(calleeName.name)) {
+                int expected = functionArity.get(calleeName.name);
+                if (expected != funCall.args.size())
+                    throw err("function " + calleeName.name + " expects " + argumentCount(expected) + ", got " + funCall.args.size());
+            }
+
             if (funCall.left instanceof FieldAccessNode fieldAccess) {
                 // ClassName.method(args): resolved entirely at compile
                 // time (the "receiver" is a literal class name, not a
@@ -917,8 +1253,17 @@ public final class Bl0jv2_Compiler {
                 // no 'this'
                 ClassInfo staticTarget = staticTargetOf(fieldAccess.target);
                 if (staticTarget != null) {
+                    Integer staticExpected = staticTarget.staticMethodArity().get(fieldAccess.fieldName);
+                    if (staticExpected == null) {
+                        if (staticTarget.methodArity().containsKey(fieldAccess.fieldName))
+                            throw err(staticTarget.name() + "." + fieldAccess.fieldName + " is an instance method - call it on an instance, not on the class");
+                        throw err("class " + staticTarget.name() + " has no static method '" + fieldAccess.fieldName + "'");
+                    }
+                    if (staticExpected != funCall.args.size())
+                        throw err("function " + staticTarget.name() + "." + fieldAccess.fieldName + " expects " + argumentCount(staticExpected) + ", got " + funCall.args.size());
+
                     String mangledName = staticTarget.name() + "." + fieldAccess.fieldName;
-                    Integer staticConstIndex = functionMapping.get(mangledName);
+                    Integer staticConstIndex = functionConst(mangledName);
                     if (staticConstIndex == null)
                         throw new Bl0j_CompilerException(
                                 "class " + staticTarget.name() + " has no static method '" + fieldAccess.fieldName + "'");
@@ -936,12 +1281,12 @@ public final class Bl0jv2_Compiler {
                         regIndex++;
                     }
 
-                    _emit(OpCodes.CALL, staticMethodReg, staticStartReg);
+                    _emit(OpCodes.CALL, staticMethodReg, staticStartReg, staticValRegs.length);
                     return staticStartReg;
                 }
 
                 int objReg = compileInner(fieldAccess.target);
-                return compileMethodCall(objReg, fieldAccess.fieldName, funCall.args);
+                return compileMethodCall(objReg, fieldAccess.fieldName, funCall.args, knownReceiverClass(fieldAccess.target));
             }
 
             int[] valRegs = new int[funCall.args.size()];
@@ -959,7 +1304,7 @@ public final class Bl0jv2_Compiler {
                 regIndex++;
             }
 
-            _emit(OpCodes.CALL, method, startReg);
+            _emit(OpCodes.CALL, method, startReg, valRegs.length);
             return startReg;
         }
 
@@ -1080,19 +1425,29 @@ public final class Bl0jv2_Compiler {
             ClassInfo staticTarget = staticTargetOf(fieldAccess.target);
             if (staticTarget != null) {
                 int fieldIndex = staticTarget.staticFieldIndex(fieldAccess.fieldName);
-                if (fieldIndex < 0)
-                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field '" + fieldAccess.fieldName + "'");
+                if (fieldIndex < 0) {
+                    // not a static field - a static method used as a value
+                    // (Class.method without a call): its function constant
+                    // is the callable, same as a bare function name
+                    Integer methodConst = functionConst(staticTarget.name() + "." + fieldAccess.fieldName);
+                    if (methodConst != null) {
+                        int methodReg = regIndex++;
+                        _emit(OpCodes.LOAD_CONST, methodReg, methodConst);
+                        return methodReg;
+                    }
+                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field or method '" + fieldAccess.fieldName + "'");
+                }
 
                 int classReg = regIndex++;
-                _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());
+                _emit(OpCodes.LOAD_CONST, classReg, classConst(staticTarget));
                 _emit(OpCodes.GET_STATIC_FIELD, classReg, fieldIndex);
                 return classReg;
             }
 
+            checkFieldAccess(fieldAccess.target, fieldAccess.fieldName);
             int objReg = compileInner(fieldAccess.target);
             int result = regIndex++;
-            _emit(OpCodes.MOV, result, objReg);
-            _emit(OpCodes.GET_FIELD, result, constant(fieldAccess.fieldName));
+            _emit(OpCodes.GET_FIELD, objReg, constant(fieldAccess.fieldName), result);
             return result;
         }
 
@@ -1102,11 +1457,13 @@ public final class Bl0jv2_Compiler {
                 throw new Bl0j_CompilerException("unknown class: " + newNode.className);
 
             int instanceReg = regIndex++;
-            _emit(OpCodes.LOAD_CONST, instanceReg, info.constIndex());
+            _emit(OpCodes.LOAD_CONST, instanceReg, classConst(info));
             _emit(OpCodes.NEW_INSTANCE, instanceReg); // class-ref in, instance-ref out
 
             if (info.hasInit())
-                compileMethodCall(instanceReg, "init", newNode.args); // return value discarded
+                compileMethodCall(instanceReg, "init", newNode.args, info); // return value discarded
+            else if (!newNode.args.isEmpty())
+                throw err("class " + info.name() + " has no init(), so new " + info.name() + "(...) takes no arguments, got " + newNode.args.size());
 
             return instanceReg;
         }
@@ -1285,14 +1642,18 @@ public final class Bl0jv2_Compiler {
             int constIndex = -1;
 
             if(node instanceof IdentityNode n){
-                if (functionMapping.containsKey(n.name)) {
-                    constIndex = functionMapping.get(n.name);
+                // a parameter (or captured variable) shadows a function of the
+                // same name inside its own function - lexical scoping. Plain
+                // assignment to a function's name is rejected, so a local
+                // that exists here is always a parameter.
+                if (functionMapping.containsKey(n.name) && !currentScope().identityMapping.containsKey(n.name)) {
+                    constIndex = functionConst(n.name);
                     int reg = regIndex++;
                     _emit(OpCodes.LOAD_CONST, reg, constIndex);
                     return reg;
                 }
 
-                VarRef ref = resolve(n.name);
+                VarRef ref = resolveForRead(n.name);
                 if (ref.isCell()) {
                     int result = regIndex++;
                     _emit(OpCodes.MOV, result, ref.reg());
@@ -1350,8 +1711,8 @@ public final class Bl0jv2_Compiler {
             int left  = compileInner(n.left);
             int right = compileInner(n.right);
 
-            // a <= b  and  a >= b  reuse GREATER/LESS the same way NOT_EQUALS
-            // reuses EQ: compute the opposite comparison, then negate it.
+            // != reuses EQ and negates it; <= and >= have their own opcodes
+            // (negating the opposite comparison gets NaN wrong).
             byte op = switch (n.op) {
                 case PLUS -> OpCodes.LR_ADD;
                 case MINUS -> OpCodes.LR_SUB;
@@ -1361,9 +1722,9 @@ public final class Bl0jv2_Compiler {
                 case REMAINDER ->  OpCodes.LR_REM;
                 case EQUALS, NOT_EQUALS -> OpCodes.EQ;
                 case LESS -> OpCodes.LESS;
-                case GREATER_EQUALS -> OpCodes.LESS;
+                case GREATER_EQUALS -> OpCodes.GREATER_EQ;
                 case GREATER -> OpCodes.GREATER;
-                case LESS_EQUALS -> OpCodes.GREATER;
+                case LESS_EQUALS -> OpCodes.LESS_EQ;
                 case BIT_AND -> OpCodes.LR_AND;
                 case BIT_OR -> OpCodes.LR_OR;
                 case BIT_XOR -> OpCodes.LR_XOR;
@@ -1373,10 +1734,10 @@ public final class Bl0jv2_Compiler {
                 default -> throw new Bl0j_CompilerException("Unknown op: " + n.op);
             };
 
-            _emit(OpCodes.MOV, result, left);
-            _emit(op, result, right);
+            // three-operand form: result = left op right, neither operand touched
+            _emit(op, left, right, result);
 
-            if(n.op == Operator.NOT_EQUALS || n.op == Operator.LESS_EQUALS || n.op == Operator.GREATER_EQUALS)
+            if(n.op == Operator.NOT_EQUALS)
                 _emit(OpCodes.NOT, result);
 
             return result;
@@ -1386,12 +1747,16 @@ public final class Bl0jv2_Compiler {
             int reg;
 
             if(node instanceof RUnaryNode rUnaryNode){
-                reg = compileInner(rUnaryNode.right);
-
-                int oneConst = constant(1);
-                int tempReg = regIndex++;
-                int tempRegToReturn = regIndex++;
-                _emit(OpCodes.LOAD_CONST, tempReg, oneConst);
+                // x++ / x-- as 'x = x + 1' written back to wherever x lives, and
+                // yielding x's OLD value. It used to add to a register that holds
+                // a COPY of x for anything but a plain local - a captured variable
+                // (a cell), a field or an array element - so those silently never
+                // changed.
+                Node target = rUnaryNode.right;
+                if (!(target instanceof IdentityNode || target instanceof FieldAccessNode || target instanceof IndexNode))
+                    throw err("the operand of '" + (rUnaryNode.op == Operator.PLUS_PLUS ? "++" : "--") + "' must be a variable, a field or an array element");
+                if (!isRepeatableTarget(target))
+                    throw err("the operand of '++'/'--' is read and written, so it must not contain calls or assignments");
 
                 byte op = switch (rUnaryNode.op){
                     case MINUS_MINUS -> OpCodes.LR_SUB;
@@ -1399,10 +1764,16 @@ public final class Bl0jv2_Compiler {
                     default -> throw new Bl0j_CompilerException("Unknown op: " + u.op);
                 };
 
-                _emit(OpCodes.MOV, tempRegToReturn, reg);
-                _emit(op, reg, tempReg);
+                int current = compileInner(target);
+                int oldValue = regIndex++;
+                _emit(OpCodes.MOV, oldValue, current); // 'current' may BE the variable's register, which the store below changes
+                int one = regIndex++;
+                _emit(OpCodes.LOAD_CONST, one, constant(1));
+                int updated = regIndex++;
+                _emit(op, oldValue, one, updated);
 
-                return tempRegToReturn;
+                compileAssign(target, new RegValueNode(updated));
+                return oldValue;
             }
 
             if(node instanceof LUnaryNode l) {
@@ -1446,21 +1817,29 @@ public final class Bl0jv2_Compiler {
     // emitting it (see patchAddr)
     private static final int A_OFFSET = 1;
     private static final int B_OFFSET = 3;
+    private static final int C_OFFSET = 5;
 
     // returns the index of the instruction's own first (opcode) byte, not
     // the index right after it - callers that need to patch an operand
     // later add A_OFFSET/B_OFFSET to find it, which is far less error-prone
     // than counting backward from where bytecode.size() happened to land
-    private int _emit(int op, int a, int b) {
+    private int _emit(int op, int a, int b, int c) {
         checkOperand(a, "operand 'a'");
         checkOperand(b, "operand 'b'");
+        checkOperand(c, "operand 'c'");
         int start = bytecode.size();
         bytecode.add((byte) op);
         bytecode.add((byte) (a >> 8));
         bytecode.add((byte) a);
         bytecode.add((byte) (b >> 8));
         bytecode.add((byte) b);
+        bytecode.add((byte) (c >> 8));
+        bytecode.add((byte) c);
         return start;
+    }
+
+    private int _emit(int op, int a, int b) {
+        return _emit(op, a, b, 0);
     }
 
     private int _emit(int op, int a) {
@@ -1497,12 +1876,35 @@ public final class Bl0jv2_Compiler {
     private VarRef resolve(String name) {
         FunctionScope scope = currentScope();
         Integer reg = scope.identityMapping.get(name);
-        if (reg != null)
+        if (reg != null) {
+            scope.suspectReads.remove(name); // something besides a read touched it: it IS assigned
             return new VarRef(reg, scope.isCell(name));
+        }
 
         int newReg = regIndex++;
         scope.identityMapping.put(name, newReg);
         return new VarRef(newReg, scope.isCell(name));
+    }
+
+    // resolve() for a variable being READ: a name with no binding yet still
+    // gets a register (the read may sit above the assignment in a loop), but
+    // is remembered so that, if no assignment ever follows in this function,
+    // the compile fails with "undefined variable" instead of the program
+    // quietly reading nil forever
+    private VarRef resolveForRead(String name) {
+        FunctionScope scope = currentScope();
+        boolean known = scope.identityMapping.containsKey(name);
+        Integer reg = scope.identityMapping.get(name);
+        if (known)
+            return new VarRef(reg, scope.isCell(name));
+        VarRef ref = resolve(name);
+        scope.suspectReads.add(name);
+        return ref;
+    }
+
+    private void checkNoUndefinedReads(FunctionScope scope) {
+        if (!scope.suspectReads.isEmpty())
+            throw err("undefined variable '" + scope.suspectReads.iterator().next() + "' (read, but never assigned)");
     }
 
     // writes valueReg into 'name', handling first-establishment of a cell
@@ -1544,19 +1946,24 @@ public final class Bl0jv2_Compiler {
             ClassInfo staticTarget = staticTargetOf(fieldAccess.target);
             if (staticTarget != null) {
                 int fieldIndex = staticTarget.staticFieldIndex(fieldAccess.fieldName);
-                if (fieldIndex < 0)
-                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field '" + fieldAccess.fieldName + "'");
+                if (fieldIndex < 0) {
+                    // not a static field - a static method used as a value
+                    // (Class.method without a call): its function constant
+                    // is the callable, same as a bare function name
+                    Integer methodConst = functionConst(staticTarget.name() + "." + fieldAccess.fieldName);
+                    if (methodConst != null) {
+                        int methodReg = regIndex++;
+                        _emit(OpCodes.LOAD_CONST, methodReg, methodConst);
+                        return methodReg;
+                    }
+                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field or method '" + fieldAccess.fieldName + "'");
+                }
 
                 int classReg = regIndex++;
-                _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());
+                _emit(OpCodes.LOAD_CONST, classReg, classConst(staticTarget));
                 int valueRegRaw = compileInner(valueNode);
 
-                int base = regIndex++;
-                _emit(OpCodes.SET, base, fieldIndex);
-                _emit(OpCodes.MOV, regIndex, valueRegRaw);
-                regIndex++;
-
-                _emit(OpCodes.SET_STATIC_FIELD, classReg, base);
+                _emit(OpCodes.SET_STATIC_FIELD, classReg, valueRegRaw, fieldIndex);
                 return valueRegRaw;
             }
 
@@ -1572,29 +1979,71 @@ public final class Bl0jv2_Compiler {
                     throw new Bl0j_CompilerException("cannot assign to const field '" + fieldAccess.fieldName + "' outside " + currentClassName + ".init()");
             }
 
+            checkFieldAccess(fieldAccess.target, fieldAccess.fieldName);
             int objReg = compileInner(fieldAccess.target);
             int valueRegRaw = compileInner(valueNode);
 
-            // the field name's const index and the value need to sit in
-            // two consecutive registers, same trick as INDEX_SET above
-            // (SET_FIELD only has 2 operand slots but needs object + name
-            // + value)
-            int base = regIndex++;
-            _emit(OpCodes.SET, base, constant(fieldAccess.fieldName));
-            _emit(OpCodes.MOV, regIndex, valueRegRaw);
-            regIndex++;
-
-            _emit(OpCodes.SET_FIELD, objReg, base);
+            _emit(OpCodes.SET_FIELD, objReg, valueRegRaw, constant(fieldAccess.fieldName));
             return valueRegRaw;
         }
 
         if (target instanceof IdentityNode idNode) {
+            // 'f = (n) -> ... f(n - 1) ...': the lambda's own body names the
+            // variable it is about to be assigned to. Left alone, 'f' would
+            // not exist in any enclosing scope yet while the lambda is
+            // compiled (the assignment only creates it AFTER the value), so
+            // it would not be captured and the call inside would hit a
+            // fresh nil local. Declaring the (cell-backed) variable first,
+            // as nil, makes the lambda capture the very cell the assignment
+            // below then fills in - the same cell, so by the time the
+            // lambda actually runs it sees itself.
+            // assigning to the name of a global function makes a LOCAL variable of
+            // that name, hiding the function from here on in this function - the
+            // same as a parameter does. (It must not be an error: a library
+            // function's local called 'handler' would then break the moment a
+            // program defines its own top-level 'handler'.)
+            if (classMapping.containsKey(idNode.name))
+                throw err("cannot assign to '" + idNode.name + "': it is the name of a class");
+
+            if (valueNode instanceof LambdaNode lambda && lambdaMentionsFreely(lambda, idNode.name)) {
+                FunctionScope scope = currentScope();
+                if (!scope.identityMapping.containsKey(idNode.name) && scope.isCell(idNode.name)) {
+                    VarRef ref = resolve(idNode.name);
+                    int nilReg = regIndex++;
+                    _emit(OpCodes.LOAD_NIL, nilReg);
+                    _emit(OpCodes.MAKE_CELL, ref.reg());
+                    _emit(OpCodes.CELL_SET, ref.reg(), nilReg);
+                }
+            }
+
             int valueRegRaw = compileInner(valueNode);
             writeToIdentity(idNode.name, valueRegRaw);
             return valueRegRaw;
         }
 
         throw new Bl0j_CompilerException("cannot assign to " + target);
+    }
+
+    // a target that can be compiled twice (read, then written) without running
+    // anything twice: names, literals, and field/index chains over them
+    private static boolean isRepeatableTarget(Node node) {
+        return switch (node) {
+            case IdentityNode n -> true;
+            case NumberNode n -> true;
+            case StringNode n -> true;
+            case FieldAccessNode n -> isRepeatableTarget(n.target);
+            case IndexNode n -> isRepeatableTarget(n.left) && isRepeatableTarget(n.index);
+            default -> false;
+        };
+    }
+
+    // does the lambda's body refer to 'name' without it being one of the
+    // lambda's own parameters (i.e. as a free variable)?
+    private boolean lambdaMentionsFreely(LambdaNode lambda, String name) {
+        FreeVarScan scan = new FreeVarScan();
+        scan.bound.addAll(lambda.params.args);
+        scanFree(lambda.body, scan);
+        return scan.free.contains(name);
     }
 
     // is 'name' bound anywhere in the enclosing scope chain (excluding
@@ -1764,6 +2213,7 @@ public final class Bl0jv2_Compiler {
                         dos.writeInt(f.address());
                         dos.writeShort(f.arity());
                         dos.writeShort(f.regs());
+                        dos.writeBoolean(f.receiver());
                     }
                     case Byte b -> {
                         dos.writeByte(Constants.BYTE);
@@ -1772,6 +2222,12 @@ public final class Bl0jv2_Compiler {
                     case Double d -> {
                         dos.writeByte(Constants.FLOAT);
                         dos.writeDouble(d);
+                    }
+                    case ExternDef e -> {
+                        dos.writeByte(Constants.EXTERN);
+                        byte[] bytes = e.name().getBytes(StandardCharsets.UTF_8);
+                        dos.writeShort(bytes.length);
+                        dos.write(bytes);
                     }
                     case ClassDef cd -> {
                         dos.writeByte(Constants.CLASS);

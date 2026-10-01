@@ -1,0 +1,22 @@
+// aeon-os: terminal control. The console is a serial terminal: what moves the
+// cursor or clears the screen is ANSI escape sequences in the output stream
+// (ECMA-48), the same on a real terminal, an emulator and a hardware serial
+// console, so nothing here knows about the host. Each function returns the
+// sequence; write it with consoleWrite().
+
+def class Term {
+    static field esc;
+
+    static def up(n) { return n <= 0 ? '' : Term.esc + '[' + n + 'A'; }
+    static def down(n) { return n <= 0 ? '' : Term.esc + '[' + n + 'B'; }
+    static def right(n) { return n <= 0 ? '' : Term.esc + '[' + n + 'C'; }
+    static def left(n) { return n <= 0 ? '' : Term.esc + '[' + n + 'D'; }
+    static def moveTo(row, col) { return Term.esc + '[' + row + ';' + col + 'H'; }   // 1-based
+    static def clearScreen() { return Term.esc + '[2J' + Term.esc + '[H'; }
+    static def clearToEndOfLine() { return Term.esc + '[K'; }
+    static def clearToEndOfScreen() { return Term.esc + '[J'; }
+    static def clearLine() { return Term.esc + '[2K'; }
+    static def invert() { return Term.esc + '[7m'; }
+    static def normal() { return Term.esc + '[0m'; }
+}
+Term.esc = strChar(27);

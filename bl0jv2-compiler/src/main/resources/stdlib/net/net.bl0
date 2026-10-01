@@ -1,0 +1,68 @@
+import 'ip.bl0';
+
+// the receive side of the IP layer: ONE place that takes frames off the NIC
+// and hands each to whichever protocol handler is registered for its IP
+// protocol number (tcp.bl0, udp.bl0 and icmp.bl0 each register theirs when
+// imported).
+//
+// Before this existed, TCP's pump() and UDP's receive() each pulled frames
+// straight off the NIC queue - and TCP's threw away everything that was not
+// TCP, so a UDP datagram or ping reply arriving while a TCP connection was
+// being serviced was silently lost. Now whoever pumps, every protocol gets its
+// frames.
+//
+// A frame is dropped (and counted in Net.dropped) if it is shorter than an IP
+// header, has a bad header checksum, claims a total length longer than what
+// arrived, or names a protocol nobody registered.
+
+def class Net {
+    static field handlers;  // by IP protocol number: nil, or a function (ipHeader, frame)
+    static field pumpLock;  // one core at a time takes frames AND handles them, so segments are handled in arrival order
+    static field dropped;
+    static field localIp;   // this machine's own address - what ICMP echo requests are answered for
+
+    // true for this machine's own address and for the 127.0.0.0/8 loopback range
+    static def isLocal(addr) {
+        return addr == Net.localIp || (addr >>> 24) == 127;
+    }
+
+    static def register(proto, handler) {
+        Net.handlers[proto] = handler;
+    }
+
+    // drains every frame currently queued on the NIC into the protocol
+    // handlers. Handlers run with pumpLock held (it is reentrant, so a handler
+    // may itself send or pump). Anything that may be waiting for a frame is
+    // woken after each handled frame - the owner of a connection or ping can be
+    // a different core, asleep in waitEvent().
+    static def pump() {
+        lock(Net.pumpLock);
+        while (true) {
+            frame = Nic.tryRecv();
+            if (frame == nil) { break; }
+            Net.dispatch(frame);
+        }
+        unlock(Net.pumpLock);
+    }
+
+    static def dispatch(frame) {
+        if (!Ip.headerValid(frame) || Ip.u16From(frame, 2) > len(frame)) {
+            Net.dropped = Net.dropped + 1;
+            return nil;
+        }
+        header = IpHeader.parse(frame);
+        handler = Net.handlers[header.proto];
+        if (handler == nil) {
+            Net.dropped = Net.dropped + 1;
+            return nil;
+        }
+        handler(header, frame);
+        signalEvent(Nic.rxEvent);
+    }
+}
+Net.handlers = [];
+Net.pumpLock = newMutex();
+Net.dropped = 0;
+Net.localIp = 0x0A000002; // 10.0.0.2 - the 'our side' address the stdlib tests and demos use
+i = 0;
+while (i < 256) { push(Net.handlers, nil); i = i + 1; }

@@ -59,7 +59,7 @@ public final class Bl0jv2_Lexer {
                     tokens.add(new SemicolonToken(line, line_index));
                     break;
                 case '%':
-                    tokens.add(new OpToken(line, line_index, Operator.REMAINDER));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.REMAINDER_ASSIGN : Operator.REMAINDER));
                     break;
                 case '=':
                     if (peekIfNext('='))
@@ -68,25 +68,28 @@ public final class Bl0jv2_Lexer {
                         tokens.add(new OpToken(line, line_index, Operator.ASSIGNMENT));
                     break;
                 case '>':
-                    if (peekIfNext('>'))
-                        tokens.add(new OpToken(line, line_index, peekIfNext('>') ? Operator.SHIFT_RIGHT_UNSIGNED : Operator.SHIFT_RIGHT));
-                    else
+                    if (peekIfNext('>')) {
+                        if (peekIfNext('>'))
+                            tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.SHIFT_RIGHT_UNSIGNED_ASSIGN : Operator.SHIFT_RIGHT_UNSIGNED));
+                        else
+                            tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.SHIFT_RIGHT_ASSIGN : Operator.SHIFT_RIGHT));
+                    } else
                         tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.GREATER_EQUALS : Operator.GREATER));
                     break;
                 case '<':
                     if (peekIfNext('<'))
-                        tokens.add(new OpToken(line, line_index, Operator.SHIFT_LEFT));
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.SHIFT_LEFT_ASSIGN : Operator.SHIFT_LEFT));
                     else
                         tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.LESS_EQUALS : Operator.LESS));
                     break;
                 case '&':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('&') ? Operator.AND : Operator.BIT_AND));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('&') ? Operator.AND : peekIfNext('=') ? Operator.AND_ASSIGN : Operator.BIT_AND));
                     break;
                 case '|':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('|') ? Operator.OR : Operator.BIT_OR));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('|') ? Operator.OR : peekIfNext('=') ? Operator.OR_ASSIGN : Operator.BIT_OR));
                     break;
                 case '^':
-                    tokens.add(new OpToken(line, line_index, Operator.BIT_XOR));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.XOR_ASSIGN : Operator.BIT_XOR));
                     break;
                 case '~':
                     tokens.add(new OpToken(line, line_index, Operator.BIT_NOT));
@@ -107,16 +110,19 @@ public final class Bl0jv2_Lexer {
                     tokens.add(new RBracketToken(line, line_index));
                     break;
                 case '+':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('+') ? Operator.PLUS_PLUS : Operator.PLUS));
+                    tokens.add(new OpToken(line, line_index, peekIfNext('+') ? Operator.PLUS_PLUS : peekIfNext('=') ? Operator.PLUS_ASSIGN : Operator.PLUS));
                     break;
                 case '-':
                     if (peekIfNext('>'))
                         tokens.add(new ArrowToken(line, line_index));
                     else
-                        tokens.add(new OpToken(line, line_index, peekIfNext('-') ? Operator.MINUS_MINUS : Operator.MINUS));
+                        tokens.add(new OpToken(line, line_index, peekIfNext('-') ? Operator.MINUS_MINUS : peekIfNext('=') ? Operator.MINUS_ASSIGN : Operator.MINUS));
                     break;
                 case '*':
-                    tokens.add(new OpToken(line, line_index, peekIfNext('*') ? Operator.STAR_STAR : Operator.STAR));
+                    if (peekIfNext('*'))
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.STAR_STAR_ASSIGN : Operator.STAR_STAR));
+                    else
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.STAR_ASSIGN : Operator.STAR));
                     break;
                 case '/':
                     if (peekIfNext('/')) {
@@ -124,7 +130,7 @@ public final class Bl0jv2_Lexer {
                         while (pos + 1 < len && lookAhead() != '\n')
                             pos++;
                     } else
-                        tokens.add(new OpToken(line, line_index, Operator.DIV));
+                        tokens.add(new OpToken(line, line_index, peekIfNext('=') ? Operator.DIV_ASSIGN : Operator.DIV));
                     break;
                 case '!':
                     if (peekIfNext('='))
@@ -133,28 +139,45 @@ public final class Bl0jv2_Lexer {
                         tokens.add(new OpToken(line, line_index, Operator.NOT));
                     break;
                 default:
-                    if (c == '\'') {
+                    if (c == '\'' || c == '"') {
+                        // 'text' or "text": same escapes in both, the other quote
+                        // character needs none. A newline inside is kept and
+                        // counted, so later tokens still report the right line.
+                        char quote = c;
                         int start_index = line_index;
+                        int start_line = line;
                         StringBuilder buf = new StringBuilder();
                         boolean closed = false;
                         while (pos + 1 < len) {
-                            if (isNext('\'')) {
-                                pos++; // consume '
+                            if (isNext(quote)) {
+                                pos++; // consume the closing quote
                                 closed = true;
                                 break;
                             }
                             char ch = peek();
                             line_index++;
-                            if (ch == '\\' && pos + 1 < len) {
+                            if (ch == '\n') {
+                                line++;
+                                line_index = 0;
+                                buf.append(ch);
+                            } else if (ch == '\\' && pos + 1 < len) {
                                 char escaped = peek();
                                 line_index++;
-                                buf.append(unescape(escaped, line, line_index));
+                                if (escaped == 'x') {
+                                    // \xNN: exactly two hex digits, one byte value
+                                    if (pos + 2 >= len || !isHexDigit(data[pos + 1]) || !isHexDigit(data[pos + 2]))
+                                        gen_exception(line, line_index, "expected two hex digits after \\x");
+                                    buf.append((char) Integer.parseInt("" + data[pos + 1] + data[pos + 2], 16));
+                                    pos += 2;
+                                    line_index += 2;
+                                } else
+                                    buf.append(unescape(escaped, line, line_index));
                             } else
                                 buf.append(ch);
                         }
                         if (!closed)
-                            gen_exception(line, start_index, "unterminated string literal");
-                        tokens.add(new StringToken(line, start_index, buf.toString()));
+                            gen_exception(start_line, start_index, "unterminated string literal");
+                        tokens.add(new StringToken(start_line, start_index, buf.toString()));
                     } else if (isNumber(c) && c == '0' && pos + 1 < len && isRadixPrefix(lookAhead())) {
                         // 0x.../0b... - kept with their prefix in the
                         // token's own text; the parser picks the radix off
@@ -195,6 +218,25 @@ public final class Bl0jv2_Lexer {
                             } else
                                 break;
                         }
+                        // exponent: 1e5, 2.5E-3, 4e+2 - only when digits really
+                        // follow, otherwise the letter is a stray one (below)
+                        if (pos + 1 < len && (lookAhead() == 'e' || lookAhead() == 'E')) {
+                            int sign = (pos + 2 < len && (data[pos + 2] == '+' || data[pos + 2] == '-')) ? 1 : 0;
+                            if (pos + 2 + sign < len && isNumber(data[pos + 2 + sign])) {
+                                buf += peek(); // e
+                                line_index++;
+                                if (sign == 1) {
+                                    buf += peek(); // sign
+                                    line_index++;
+                                }
+                                while (pos + 1 < len && isNumber(lookAhead())) {
+                                    buf += peek();
+                                    line_index++;
+                                }
+                            }
+                        }
+                        if (pos + 1 < len && (isIdentity(lookAhead())))
+                            gen_exception(line, line_index + 1, "invalid number literal - '" + buf + lookAhead() + "' (letters directly after digits)");
                         tokens.add(new NumberToken(line, start_index, buf));
                     } else if (isIdentity(c)) {
                         int start_index = line_index;
@@ -272,6 +314,7 @@ public final class Bl0jv2_Lexer {
             case 'r' -> '\r';
             case '0' -> '\0';
             case '\'' -> '\'';
+            case '"' -> '"';
             case '\\' -> '\\';
             default -> {
                 gen_exception(line, line_index, "unknown escape sequence - \\" + escaped);

@@ -10,4 +10,7 @@ public final class Constants {
     public static final int BYTE = 0x05;
     public static final int FLOAT = 0x06;
     public static final int CLASS = 0x07;
+    // a function or class defined by a shared library: just its name, replaced by the library's
+    // own function or class when the program is loaded (see ExternDef)
+    public static final int EXTERN = 0x08;
 }

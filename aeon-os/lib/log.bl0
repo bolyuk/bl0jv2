@@ -1,0 +1,34 @@
+// aeon-os: the system log, a text file on the virtual disk
+// (var/log/aeon.log). Log.write() is for the kernel and for programs alike -
+// it goes through Fs, so from user mode the disk syscall does the privileged
+// part. A log must never take the system down: when the disk is missing,
+// unformatted or full, the line is dropped and counted, not raised. When the
+// file passes Log.maxBytes it becomes aeon.log.1 (replacing the previous
+// one), so the log's footprint stays bounded.
+
+import '../../stdlib/fs/fs.bl0';
+
+def class Log {
+    static field path;
+    static field maxBytes;
+    static field dropped;
+
+    static def write(message) {
+        if (!Fs.mounted) {
+            Log.dropped += 1;
+            return nil;
+        }
+        try {
+            if (Fs.size(Log.path) > Log.maxBytes) {
+                Fs.remove(Log.path + '.1');
+                Fs.rename(Log.path, Log.path + '.1');
+            }
+            Fs.append(Log.path, ticks() + 'ms ' + message + '\n');
+        } catch (e) {
+            Log.dropped += 1;
+        }
+    }
+}
+Log.path = 'var/log/aeon.log';
+Log.maxBytes = 16384;
+Log.dropped = 0;

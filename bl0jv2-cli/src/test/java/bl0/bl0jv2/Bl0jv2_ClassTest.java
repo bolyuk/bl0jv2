@@ -77,19 +77,34 @@ class Bl0jv2_ClassTest {
                 "p3 = new Point(1, 2).add(new Point(10, 20)); print p3;"));
     }
 
+    // a name no class declares at all is a compile error; a name some OTHER
+    // class declares can't be ruled out at compile time (the receiver's
+    // class isn't known), so that one is still a runtime error
+    private static final String OTHER = "def class Other { field bogus; def bogus() { return 1; } } ";
+
     @Test
-    void accessingUnknownFieldThrowsClearError() {
-        assertThrows(Bl0j_VM_Exception.class, () -> run(POINT + "p = new Point(1, 2); print p.bogus;"));
+    void accessingAFieldNoClassDeclaresIsACompileError() {
+        assertThrows(Bl0j_CompilerException.class, () -> run(POINT + "p = new Point(1, 2); print p.bogus;"));
     }
 
     @Test
-    void callingUnknownMethodThrowsClearError() {
-        assertThrows(Bl0j_VM_Exception.class, () -> run(POINT + "p = new Point(1, 2); p.bogus();"));
+    void callingAMethodNoClassDeclaresIsACompileError() {
+        assertThrows(Bl0j_CompilerException.class, () -> run(POINT + "p = new Point(1, 2); p.bogus();"));
+    }
+
+    @Test
+    void accessingAnotherClassesFieldThrowsClearError() {
+        assertThrows(Bl0j_VM_Exception.class, () -> run(POINT + OTHER + "p = new Point(1, 2); print p.bogus;"));
+    }
+
+    @Test
+    void callingAnotherClassesMethodThrowsClearError() {
+        assertThrows(Bl0j_VM_Exception.class, () -> run(POINT + OTHER + "p = new Point(1, 2); p.bogus();"));
     }
 
     @Test
     void unknownFieldErrorIsCatchable() {
-        assertEquals("true", run(POINT +
+        assertEquals("true", run(POINT + OTHER +
                 "p = new Point(1, 2); " +
                 "try { x = p.bogus; } catch (e) { print isErr(e); }"));
     }

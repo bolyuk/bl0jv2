@@ -1,0 +1,15 @@
+// aeon-os program: copy a file
+// Loaded from the virtual disk by the shell (bin/cp.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 3) { sayErr('usage: cp <from> <to>'); return nil; }
+    from = inCwd(words[1]);
+    data = Fs.readData(from);
+    if (data == nil) { sayErr(words[1] + ': no such file'); return nil; }
+    Fs.writeData(destination(from, words[2]), data);
+    free(data);
+}
+
+programMain(main);

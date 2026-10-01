@@ -1,0 +1,34 @@
+// aeon-os program: a file as hex and text; hexdump [file] (standard input when no file)
+// Loaded from the virtual disk by the shell (bin/hexdump.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+import '../lib/input.bl0';
+
+def main(words) {
+    if (len(words) > 2) { sayErr('usage: hexdump [file]'); return nil; }
+    data = inputBytes(len(words) == 2 ? words[1] : nil);
+    if (data == nil) { sayErr(words[1] + ': no such file'); return nil; }
+    limit = len(data) < 512 ? len(data) : 512;
+    off = 0;
+    while (off < limit) {
+        hex = [];
+        ascii = '';
+        i = 0;
+        while (i < 16) {
+            if (off + i < limit) {
+                b = data[off + i];
+                push(hex, Fmt.format('{:02x}', [b]));
+                ascii = ascii + (b >= 32 && b < 127 ? Char.char(b) : '.');
+            } else {
+                push(hex, '  ');
+            }
+            i += 1;
+        }
+        say(Fmt.format('{:04x}  {}  {}', [off, strJoin(hex, ' '), ascii]));
+        off += 16;
+    }
+    if (limit < len(data)) { say(Fmt.format('... {} more bytes', [len(data) - limit])); }
+    free(data);
+}
+
+programMain(main);

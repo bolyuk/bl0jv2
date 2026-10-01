@@ -18,18 +18,18 @@ def class Http {
     // this end's own address (TcpConn.connect() needs one - see its own
     // doc). Blocks until the server closes its end - see this file's own
     // header comment on why that's how a response ends here, not a length
-    // header. Returns the raw response text (status line + blank line +
+    // header. Returns nil if the connection attempt timed
+    // out, otherwise the raw response text (status line + blank line +
     // body) unparsed - see HttpResponse.parse() to split it into pieces.
     static def get(localIp, localPort, serverIp, serverPort, path) {
         conn = TcpConn.connect(localIp, localPort, serverIp, serverPort);
+        if (conn == nil) { return nil; } // connect timed out - see TcpConn.connectTimeoutMs
         conn.send('GET ' + path + ' ' + Http.version + '\r\n\r\n');
 
         response = '';
         while (!conn.peerFinReceived) {
-            if (conn.hasData()) {
+            if (conn.waitData(-1)) {
                 response = response + conn.receive();
-            } else {
-                wait(1);
             }
         }
         response = response + conn.receive(); // whatever arrived alongside the FIN itself
@@ -59,10 +59,10 @@ def class Http {
 
         request = '';
         while (Find.find(request, '\r\n\r\n') < 0) {
-            if (conn.hasData()) {
+            if (conn.waitData(-1)) {
                 request = request + conn.receive();
             } else {
-                wait(1);
+                break; // peer closed before sending a full request
             }
         }
 

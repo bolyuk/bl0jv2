@@ -17,7 +17,7 @@
 // the device directly, and gets blocked, the same enforcement pattern
 // smp_boot.bl0's taskRogue demonstrates.
 //
-// Reading the keyboard needs no syscall at all: kbHasInput()/kbReadChar()
+// Reading the keyboard needs no syscall at all: kbHasInput()/kbReadByte()
 // only ever peek8() a ring buffer in raw memory (never gated - see
 // requirePrivileged's own doc on why) - it's a read-only, kernel-populated
 // buffer userspace polls directly, the same shape a real io_uring/vDSO
@@ -31,13 +31,25 @@
 // the outermost poll-eligible execute() loop - and a syscall trap has
 // already left that loop by the time its own handler body runs. Blocking
 // there waits for a delivery that can only happen after the block ends,
-// which never happens. This is why the REPL loop below busy-polls
-// kbHasInput() directly instead of trying to wrap it in a "blocking read"
-// syscall - a design this file's author tried first, and which hangs for
-// exactly the reason above.
+// which never happens. This is why the REPL loop below checks kbHasInput()
+// itself (sleeping in kbWait() when there is nothing) instead of trying to
+// wrap it in a "blocking read" syscall - a design this file's author tried
+// first, and which hangs for exactly the reason above.
 
 import '../stdlib/mathlib.bl0';
 import 'kernel.bl0';
+import 'lib/drivers.bl0';
+import '../stdlib/net/icmp.bl0';
+import '../stdlib/net/tcp.bl0';
+import '../stdlib/net/udp.bl0';
+import '../stdlib/net/dns.bl0';
+import '../stdlib/net/http.bl0';
+import '../stdlib/str/split.bl0';
+import '../stdlib/str/fmt.bl0';
+import 'lib/loader.bl0';
+import 'lib/userland.bl0';
+import 'lib/lineedit.bl0';
+import 'lib/cmdline.bl0';
 
 // when boot.bl0 exec()s this file, it already called kernel.bl0's
 // initHeap() with ITS OWN reserved regions accounted for (see its own
@@ -56,21 +68,40 @@ if (peek32(0) == 0) {
 }
 initKeyboard();
 initConsole();
+// the network device: init() or initWithHostBridge(), whichever the host attached
+// (privileged - reads a port and registers handlers - so it happens here, before
+// dropToUserMode(); afterwards the shell sends through the kernel's syscall)
+Nic.initAuto();
+Dns.myIp = Net.localIp;
+TcpConn.connectTimeoutMs = 5000;
+// the disk, if the host attached one (privileged, like the NIC): a sector buffer
+// in raw memory, then mount - an unformatted disk stays unmounted until 'format'
+Disk.init(kalloc(512));
+if (Disk.present()) { Fs.mount(); }
+// the host folder, if the host shared one (--bridge-fs)
+Hfs.init(kalloc(260), kalloc(Hfs.chunk));
+Log.write('shell: started');
 
 // --- built-in commands ---
 def cmdHelp() {
-    consoleWriteLine('available commands: help, echo <text>, uptime, whoami, reboot, exit');
+    say('built in: help, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
+    say('          exec <file> [args]  (a text may hold \\n for a line break)');
+    say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
+    say('          hexdump df mkdir rmdir - and any program you put there, run by its name');
+    say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
+    say('network: net, netstat, setip <ip>, setdns <ip>, ping <host>, resolve <host>,');
+    say('         http <host[:port]> [path], tcp <host> <port> <text>, udp <host> <port> <text>, httpd <port>');
 }
 
 def cmdUptime() {
-    consoleWriteLine('uptime: ' + ticks() + 'ms');
+    say('uptime: ' + ticks() + 'ms');
 }
 
 def cmdWhoami() {
     if (isPrivileged()) {
-        consoleWriteLine('kernel');
+        say('kernel');
     } else {
-        consoleWriteLine('user');
+        say('user');
     }
 }
 
@@ -79,76 +110,539 @@ def cmdWhoami() {
 def cmdReboot() {
     try {
         out8(Console.port, 0);
-        consoleWriteLine('rebooting...');
+        say('rebooting...');
     } catch (e) {
-        consoleWriteLine('reboot: permission denied');
+        sayErr('reboot: permission denied');
     }
+}
+
+// --- network commands ---
+//
+// <host> is a dotted address (10.0.0.2) or a name, looked up with 'resolve'.
+// Reaching anything beyond this machine's own loopback needs the host to attach a
+// bridge (bl0jv2 --bridge-outbound ...): without one, frames only ever come back
+// to this same VM, so a ping to another address times out, which is the true answer.
+
+def class ShellNet {
+    static field nextPort;
+}
+ShellNet.nextPort = 49152;
+
+def freePort() {
+    p = ShellNet.nextPort;
+    ShellNet.nextPort += 1;
+    if (ShellNet.nextPort > 65000) { ShellNet.nextPort = 49152; }
+    return p;
+}
+
+// an address: dotted quad as is, otherwise a DNS lookup; nil (after saying why) if neither works
+def hostAddress(name) {
+    addr = Ip.parseAddr(name);
+    if (addr != nil) { return addr; }
+    say('resolving ' + name + '...');
+    addr = Dns.resolve(name);
+    if (addr == 0) {
+        sayErr(name + ': name not found (no answer from DNS server ' + Ip.formatAddr(Dns.serverIp) + ')');
+        return nil;
+    }
+    return addr;
+}
+
+def cmdNet() {
+    bridge = Nic.hostBridgeEnabled ? 'attached' : 'none (loopback only)';
+    say(Fmt.format('address  {}', [Ip.formatAddr(Net.localIp)]));
+    say(Fmt.format('dns      {}', [Ip.formatAddr(Dns.serverIp)]));
+    say(Fmt.format('bridge   {}', [bridge]));
+    say(Fmt.format('frames   {} sent, {} received, {} waiting, {} dropped by the IP layer', [Nic.txCount, Nic.rxCount, Nic.pending(), Net.dropped]));
+}
+
+def cmdNetstat() {
+    say('proto  local                  remote                 state');
+    n = 0;
+    i = 0;
+    while (i < len(TcpRegistry.conns)) {
+        c = TcpRegistry.conns[i];
+        remote = '*';
+        if (c.remoteIp != nil) { remote = Ip.formatAddr(c.remoteIp) + ':' + c.remotePort; }
+        say(Fmt.format('tcp    {:<22} {:<22} {}', [Ip.formatAddr(c.localIp) + ':' + c.localPort, remote, c.state]));
+        n += 1;
+        i += 1;
+    }
+    if (n == 0) { say('(no connections)'); }
+}
+
+def cmdSetIp(words) {
+    if (len(words) != 2) { sayErr('usage: setip <a.b.c.d>'); return nil; }
+    addr = Ip.parseAddr(words[1]);
+    if (addr == nil) { sayErr(words[1] + ': not an address'); return nil; }
+    Net.localIp = addr;
+    Dns.myIp = addr;
+    say('address is now ' + Ip.formatAddr(addr));
+}
+
+def cmdSetDns(words) {
+    if (len(words) != 2) { sayErr('usage: setdns <a.b.c.d>'); return nil; }
+    addr = Ip.parseAddr(words[1]);
+    if (addr == nil) { sayErr(words[1] + ': not an address'); return nil; }
+    Dns.serverIp = addr;
+    say('dns server is now ' + Ip.formatAddr(addr));
+}
+
+def cmdPing(words) {
+    if (len(words) != 2) { sayErr('usage: ping <host>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    say('PING ' + Ip.formatAddr(addr) + ' with 32 bytes of data');
+    received = 0;
+    seq = 1;
+    while (seq <= 4) {
+        rtt = Icmp.ping(Net.localIp, addr, seq, 1000);
+        if (rtt < 0) {
+            sayErr(Fmt.format('seq={}: request timed out', [seq]));
+        } else {
+            say(Fmt.format('reply from {}: seq={} time={}ms', [Ip.formatAddr(addr), seq, rtt]));
+            received += 1;
+        }
+        seq += 1;
+    }
+    say(Fmt.format('4 sent, {} received', [received]));
+}
+
+def cmdResolve(words) {
+    if (len(words) != 2) { sayErr('usage: resolve <host>'); return nil; }
+    addr = Dns.resolve(words[1]);
+    if (addr == 0) {
+        sayErr(words[1] + ': no answer from DNS server ' + Ip.formatAddr(Dns.serverIp));
+    } else {
+        say(words[1] + ' is ' + Ip.formatAddr(addr));
+    }
+}
+
+def cmdHttp(words) {
+    if (len(words) < 2 || len(words) > 3) { sayErr('usage: http <host[:port]> [path]'); return nil; }
+    target = words[1];
+    port = 80;
+    colon = strFind(target, ':', 0);
+    if (colon >= 0) {
+        port = portNumber(strSub(target, colon + 1, len(target)));
+        target = strSub(target, 0, colon);
+        if (port == nil) { sayErr('bad port'); return nil; }
+    }
+    path = '/';
+    if (len(words) == 3) { path = words[2]; }
+    addr = hostAddress(target);
+    if (addr == nil) { return nil; }
+    response = Http.get(Net.localIp, freePort(), addr, port, path);
+    if (response == nil) {
+        sayErr('connection to ' + Ip.formatAddr(addr) + ':' + port + ' timed out');
+        return nil;
+    }
+    parsed = HttpResponse.parse(response);
+    say(parsed.statusLine);
+    say(parsed.body);
+}
+
+def cmdTcp(words) {
+    if (len(words) < 4) { sayErr('usage: tcp <host> <port> <text>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    port = portNumber(words[2]);
+    if (port == nil) { sayErr('bad port'); return nil; }
+    conn = TcpConn.connect(Net.localIp, freePort(), addr, port);
+    if (conn == nil) {
+        sayErr('connection to ' + Ip.formatAddr(addr) + ':' + port + ' timed out');
+        return nil;
+    }
+    conn.send(restOf(words, 3));
+    reply = '';
+    while (conn.waitData(2000)) { reply = reply + conn.receive(); }
+    conn.close();
+    if (reply == '') {
+        say('(no reply)');
+    } else {
+        say(reply);
+    }
+}
+
+def cmdUdp(words) {
+    if (len(words) < 4) { sayErr('usage: udp <host> <port> <text>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    port = portNumber(words[2]);
+    if (port == nil) { sayErr('bad port'); return nil; }
+    local = freePort();
+    Udp.send(Net.localIp, local, addr, port, restOf(words, 3));
+    // the datagram we just sent also comes back to us through the loopback NIC:
+    // skip it, wait for something that is not from ourselves
+    deadline = ticks() + 2000;
+    while (true) {
+        remaining = deadline - ticks();
+        if (remaining <= 0) { say('(no reply)'); return nil; }
+        pkt = Udp.recvWait(local, remaining);
+        if (pkt == nil) { say('(no reply)'); return nil; }
+        if (pkt.srcIp == Net.localIp && pkt.srcPort == local) { continue; }
+        say(Fmt.format('reply from {}:{}: {}', [Ip.formatAddr(pkt.srcIp), pkt.srcPort, pkt.message]));
+        return nil;
+    }
+}
+
+def httpdPage(path) {
+    return 'hello from aeon-os, you asked for ' + path;
+}
+
+// serves exactly ONE request, then returns to the prompt (TcpConn.listen()
+// accepts one connection per call - see its own doc); run it again for the next
+def cmdHttpd(words) {
+    if (len(words) != 2) { sayErr('usage: httpd <port>'); return nil; }
+    port = portNumber(words[1]);
+    if (port == nil) { sayErr('bad port'); return nil; }
+    say('listening on ' + Ip.formatAddr(Net.localIp) + ':' + port + ' for one request...');
+    Http.serve(Net.localIp, port, httpdPage);
+    say('served one request');
+}
+
+// --- files and programs ---
+//
+// The disk is the host's --disk image behind the block-device ports; Fs (a
+// filesystem written in bl0) does the rest. Folders are name prefixes (see
+// stdlib/fs/dirs.bl0); paths are relative to the current folder ('cd'),
+// absolute when they start with '/', and may use '.' and '..'.
+//
+// Only what changes the shell's own state is built in (cd, pwd, echo >, format,
+// exec, the network commands, ...). Every other command - ls, cat, cp, grep,
+// ... - is a program on the virtual disk, bin/<name>.bl0c, loaded into memory
+// when you type its name: the shell finds it with Fs, puts the command line and
+// the current folder where the program finds them (Prog.words, Prog.cwd, Io - shared libraries
+// make those the shell's own variables), and asks the kernel to
+// run it. The kernel half is sysExec below, a syscall handler registered before
+// dropToUserMode(): it reads the file and calls execMem, which runs the program
+// UNPRIVILEGED and unloads it when it returns. A program that fails reports its
+// error and the shell goes on; one that calls panic() halts the machine.
+
+// true when the files can be used; otherwise says why
+def fsReady() {
+    if (!Disk.present()) {
+        sayErr('no disk attached (start with --disk <image>)');
+        return false;
+    }
+    if (!Fs.mounted) {
+        sayErr('the disk has no filesystem: run "format yes" to create one (erases the disk)');
+        return false;
+    }
+    return true;
 }
 
 def class ShellState {
     static field running;
+    static field cwd;
+    static field pipeSeq;
 }
 ShellState.running = true;
+ShellState.cwd = '';
+ShellState.pipeSeq = 0;
 
-def runCommand(line) {
-    if (line == 'help') { cmdHelp(); return nil; }
-    if (line == 'uptime') { cmdUptime(); return nil; }
-    if (line == 'whoami') { cmdWhoami(); return nil; }
-    if (line == 'reboot') { cmdReboot(); return nil; }
-    if (line == 'exit') {
-        consoleWriteLine('bye');
+// a path as typed -> the stored name, relative to the current folder
+def here(path) {
+    return FsPath.resolve(ShellState.cwd, path);
+}
+
+def prompt() {
+    if (ShellState.cwd == '') { return '$ '; }
+    return '/' + ShellState.cwd + ' $ ';
+}
+
+def cmdPwd() {
+    say('/' + ShellState.cwd);
+}
+
+def cmdCd(words) {
+    if (len(words) > 2) { sayErr('usage: cd [folder]'); return nil; }
+    if (!fsReady()) { return nil; }
+    target = '';
+    if (len(words) == 2) { target = here(words[1]); }
+    if (!Dirs.isDir(target)) { sayErr(words[1] + ': no such folder'); return nil; }
+    ShellState.cwd = target;
+}
+
+def cmdFormat(words) {
+    if (!Disk.present()) { sayErr('no disk attached (start with --disk <image>)'); return nil; }
+    if (len(words) != 2 || words[1] != 'yes') {
+        say('this erases the whole disk: run "format yes" to go ahead');
+        return nil;
+    }
+    Fs.format();
+    ShellState.cwd = '';
+    Log.write('shell: disk formatted');
+    say('formatted ' + Disk.sectors + ' sectors');
+}
+
+def class Exec {
+    static field vector;
+}
+Exec.vector = 7;
+
+// the kernel half of running a program (a syscall handler, so privileged): '' or the error
+def sysExec(path) {
+    try {
+        loadAndRun(path, 0);
+        return '';
+    } catch (e) {
+        return str(e);
+    }
+}
+registerHandler(sysExec, Exec.vector, 1);
+
+// runs the program at 'path' with 'words' as its command line (words[0] is its name); label names it in messages
+def runProgram(path, words, label) {
+    if (!Disk.present() || !Fs.mounted || Fs.size(path) < 0) {
+        sayErr(label + ': command not found');
+        return nil;
+    }
+    Prog.words = words;
+    Prog.cwd = ShellState.cwd;
+    problem = syscall(Exec.vector, path);
+    if (problem != '') {
+        say(label + ': ' + problem);
+        Log.write('shell: ' + label + ' failed: ' + problem);
+    }
+}
+
+// exec <file> [arguments]: any compiled program on the disk, by path
+def cmdExec(words) {
+    if (len(words) < 2) { sayErr('usage: exec <file> [arguments]'); return nil; }
+    if (!fsReady()) { return nil; }
+    runProgram(here(words[1]), Arr.slice(words, 1, len(words)), words[1]);
+}
+
+// echo [-n] words...
+def cmdEcho(words) {
+    newline = true;
+    from = 1;
+    if (len(words) > 1 && words[1] == '-n') { newline = false; from = 2; }
+    text = restOf(words, from);
+    if (newline) { say(text); } else { sayRaw(text); }
+}
+
+// a built-in that fails (disk full, bad name, ...) reports it and the shell carries on
+def guarded(command, words) {
+    try {
+        command(words);
+    } catch (e) {
+        sayErr(str(e));
+    }
+}
+
+// one command of a pipeline: a built-in or a program on the disk
+def runStage(words) {
+    cmd = words[0];
+    if (cmd == 'help') { cmdHelp(); return nil; }
+    if (cmd == 'uptime') { cmdUptime(); return nil; }
+    if (cmd == 'whoami') { cmdWhoami(); return nil; }
+    if (cmd == 'reboot') { cmdReboot(); return nil; }
+    if (cmd == 'exit') {
+        say('bye');
         ShellState.running = false;
         return nil;
     }
-    if (Affix.startsWith(line, 'echo ')) {
-        consoleWriteLine(Substr.substr(line, 5, len(line)));
-        return nil;
-    }
-    if (line == '') { return nil; }
-    consoleWriteLine(line + ': command not found');
+    if (cmd == 'echo') { cmdEcho(words); return nil; }
+    if (cmd == 'pwd') { cmdPwd(); return nil; }
+    if (cmd == 'cd') { guarded(cmdCd, words); return nil; }
+    if (cmd == 'exec') { guarded(cmdExec, words); return nil; }
+    if (cmd == 'format') { guarded(cmdFormat, words); return nil; }
+    if (cmd == 'net') { cmdNet(); return nil; }
+    if (cmd == 'netstat') { cmdNetstat(); return nil; }
+    if (cmd == 'setip') { cmdSetIp(words); return nil; }
+    if (cmd == 'setdns') { cmdSetDns(words); return nil; }
+    if (cmd == 'ping') { cmdPing(words); return nil; }
+    if (cmd == 'resolve') { cmdResolve(words); return nil; }
+    if (cmd == 'http') { cmdHttp(words); return nil; }
+    if (cmd == 'tcp') { cmdTcp(words); return nil; }
+    if (cmd == 'udp') { cmdUdp(words); return nil; }
+    if (cmd == 'httpd') { cmdHttpd(words); return nil; }
+    // anything else: a program on the disk
+    runProgram('bin/' + cmd + '.bl0c', words, cmd);
 }
 
-println '=== aeon-os shell booting ===';
+// Runs the stages of a command line one after another. Each stage's standard
+// input and output are files: what a stage prints is written to a temporary file
+// (var/tmp/pipe<N>) that the next stage reads - the pipe is a file, and the stages
+// do not run at the same time. '< file' and '> file' / '>> file' name the first
+// stage's input and the last stage's output. The temporary files are removed
+// afterwards, whatever happened.
+def runPipeline(stages) {
+    temps = [];
+    last = len(stages) - 1;
+    i = 0;
+    while (i <= last) {
+        stage = stages[i];
+        inPath = '';
+        outPath = '';
+        if (i > 0) { inPath = temps[i - 1]; }
+        if (stage.inFile != nil) {
+            inPath = here(stage.inFile);
+            if (!Fs.exists(inPath)) {
+                sayErr(stage.inFile + ': no such file');
+                break;
+            }
+        }
+        if (i < last) {
+            ShellState.pipeSeq += 1;
+            outPath = 'var/tmp/pipe' + ShellState.pipeSeq;
+            push(temps, outPath);
+            Fs.write(outPath, '');
+        } else if (stage.outFile != nil) {
+            outPath = here(stage.outFile);
+            if (!stage.append) { Fs.write(outPath, ''); }
+        }
+        if (!Fs.mounted && (inPath != '' || outPath != '')) {
+            sayErr('redirection needs a disk with a filesystem');
+            break;
+        }
+        Io.inPath = inPath;
+        Io.outPath = outPath;
+        guarded(runStage, stage.words);
+        Io.flush();
+        i += 1;
+    }
+    Io.inPath = '';
+    Io.outPath = '';
+    i = 0;
+    while (i < len(temps)) {
+        Fs.remove(temps[i]);
+        i += 1;
+    }
+}
+
+def runCommand(line) {
+    if (line == '') { return nil; }
+    Log.write('shell: ' + line);
+    stages = [];
+    try {
+        stages = Cmdline.parse(line);
+    } catch (e) {
+        sayErr(str(e));
+        return nil;
+    }
+    if (len(stages) > 0) { runPipeline(stages); }
+}
+
+// --- command history and completion for the line editor ---
+
+// the history lives on the disk (var/history), one line per command; the editor
+// keeps the last 200 in memory
+def histLoad() {
+    if (!Fs.mounted) { return nil; }
+    text = Fs.read('var/history');
+    if (text == nil) { return nil; }
+    lines = Split.split(text, strChar(10));
+    kept = [];
+    i = 0;
+    while (i < len(lines)) {
+        if (lines[i] != '') { push(kept, lines[i]); }
+        i += 1;
+    }
+    if (len(kept) > 400) {
+        // the file only grows: cut it back to the lines that count
+        kept = Arr.slice(kept, len(kept) - 200, len(kept));
+        Fs.write('var/history', strJoin(kept, strChar(10)) + strChar(10));
+    }
+    i = 0;
+    while (i < len(kept)) {
+        LineEditor.remember(kept[i]);
+        i += 1;
+    }
+}
+
+def histSave(line) {
+    if (!Fs.mounted) { return nil; }
+    try {
+        Fs.append('var/history', line + strChar(10));
+    } catch (e) {
+        // a full disk must not stop the shell
+    }
+}
+
+def shellBuiltins() {
+    return ['help', 'echo', 'uptime', 'whoami', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec',
+            'net', 'netstat', 'setip', 'setdns', 'ping', 'resolve', 'http', 'tcp', 'udp', 'httpd'];
+}
+
+// Tab: what could replace the word under the cursor. The first word is a command
+// (a built-in or a program in bin/); any other word is a path.
+def shellComplete(line, pos) {
+    start = pos;
+    while (start > 0 && strSub(line, start - 1, start) != ' ') { start -= 1; }
+    word = strSub(line, start, pos);
+    firstWord = len(Substr.substr(line, 0, start)) == 0 || len(tokens(strSub(line, 0, start))) == 0;
+    found = [];
+    if (firstWord && strFind(word, '/', 0) < 0) {
+        names = shellBuiltins();
+        i = 0;
+        while (i < len(names)) {
+            if (strFind(names[i], word, 0) == 0) { push(found, names[i]); }
+            i += 1;
+        }
+        if (Fs.mounted) {
+            programs = Dirs.list('bin');
+            i = 0;
+            while (i < len(programs)) {
+                n = programs[i][0];
+                if (!programs[i][2] && len(n) > 5 && strSub(n, len(n) - 5, len(n)) == '.bl0c') { n = strSub(n, 0, len(n) - 5); }
+                if (strFind(n, word, 0) == 0 && !Arr.contains(found, n)) { push(found, n); }
+                i += 1;
+            }
+        }
+        return [start, found];
+    }
+    if (!Fs.mounted) { return nil; }
+    slash = -1;
+    i = 0;
+    while (i < len(word)) {
+        if (strSub(word, i, i + 1) == '/') { slash = i; }
+        i += 1;
+    }
+    dirPart = slash < 0 ? '' : strSub(word, 0, slash + 1);
+    namePart = strSub(word, slash + 1, len(word));
+    dir = ShellState.cwd;
+    if (dirPart != '') { dir = here(dirPart); }
+    if (!Dirs.isDir(dir)) { return nil; }
+    entries = Dirs.list(dir);
+    i = 0;
+    while (i < len(entries)) {
+        if (strFind(entries[i][0], namePart, 0) == 0) {
+            push(found, dirPart + entries[i][0] + (entries[i][2] ? '/' : ''));
+        }
+        i += 1;
+    }
+    return [start, found];
+}
+
+LineEditor.completer = shellComplete;
+histLoad();
+
+consoleWriteLine('=== aeon-os shell booting ===');
 
 dropToUserMode();
 
-println 'aeon-shell ready - type a command, press enter (try: help)';
-print '$ ';
+consoleWriteLine('aeon-shell ready - type a command, press enter (try: help)');
 
-line = '';
 commandsRun = 0;
-// busy-polls kbHasInput() - no haltCore() (privileged, and see this
-// file's own header comment on why it wouldn't help here even if it
-// weren't), same accepted trade-off as smp_boot.bl0's own completion wait.
-// The wait(5) in the empty branch is what keeps this from pegging a real
-// CPU core at 100% for as long as the shell sits idle at its prompt -
-// wait() is just Thread.sleep() under the hood (see its own doc), plain
-// and unprivileged, so it's fine to call from here even after
-// dropToUserMode(). 5ms is well under any human's actual keystroke rate,
-// so it costs no perceptible input latency - and since -k sets the
-// interrupt poll interval to 1 (see Bl0jv2_CLI's own doc), a keypress that
-// arrives mid-sleep is still delivered on the very next instruction this
-// core executes once the sleep returns, not delayed any further than that
+// The line editor sleeps in kbWait() while there is no input: the keyboard handler
+// signals an event on every byte, so the shell costs no CPU while idle and reacts the
+// moment the handler has run (waitEvent also returns early when an interrupt this core
+// can take is pending, which is what lets a single core run its own keyboard handler
+// while it sits here). waitEvent is unprivileged, so this is fine after dropToUserMode().
 while (ShellState.running) {
-    if (kbHasInput()) {
-        b = kbReadChar();
-        if (b == 13) {
-            println '';
-            runCommand(line);
-            line = '';
-            commandsRun = commandsRun + 1;
-            if (ShellState.running) {
-                print '$ ';
-            }
-        } else {
-            ch = Char.char(b);
-            line = line + ch;
-            print ch;
-        }
+    line = LineEditor.read(prompt());
+    if (line == nil) {
+        // Ctrl-D on an empty line
+        ShellState.running = false;
     } else {
-        wait(5);
+        if (line != '') { histSave(line); }
+        runCommand(line);
+        commandsRun = commandsRun + 1;
     }
 }
 
-println '';
-println '=== aeon-shell exiting after ' + commandsRun + ' commands ===';
+Log.write('shell: exiting after ' + commandsRun + ' commands');
+consoleWriteLine('=== aeon-shell exiting after ' + commandsRun + ' commands ===');

@@ -26,7 +26,9 @@
 // keyboard handler just sees it.
 
 import '../stdlib/mathlib.bl0';
+import '../stdlib/arrlib.bl0';
 import 'kernel.bl0';
+import 'lib/loader.bl0';
 
 // --- raw memory layout: kernel.bl0's heap counter owns address 0 (see its
 // own doc) - everything else this kernel reserves has to sit AFTER it.
@@ -42,6 +44,16 @@ SYS_MAGIC = 0xAE07C0DE;
 reserve(SYS_INFO_BASE, SYS_INFO_SIZE);
 poke32(SYS_INFO_BASE, SYS_MAGIC);
 initHeap(SYS_INFO_BASE + SYS_INFO_SIZE);
+
+// the boot disk: every program this kernel starts is read from it (the VM cannot
+// read a host file) - kernel programs from sbin/, user programs from bin/
+Disk.init(kalloc(512));
+if (!Fs.mount()) {
+    println 'no boot disk: start with --disk <image> holding sbin/ and bin/ (see aeon-os/README.md)';
+    panic('no boot disk');
+}
+Log.write('boot: aeon-os booting');
+loadLibraries();
 
 println '=== aeon-os booting ===';
 println 'sys info magic: ' + Math.toHex(peek32(SYS_INFO_BASE));
@@ -124,11 +136,7 @@ def class Scheduler {
     // scheduling order doesn't depend on queue order anyway (pickIndex()
     // rescans by priority every time)
     def removeAt(i) {
-        last = len(this.tasks) - 1;
-        if (i != last) {
-            this.tasks[i] = this.tasks[last];
-        }
-        pop(this.tasks);
+        Arr.removeAt(this.tasks, i);
     }
 
     // runs the highest-priority task once. Mutating the run queue
@@ -220,7 +228,7 @@ println 'faults isolated by the scheduler: ' + Kernel.faultCount;
 println '';
 println '--- launching child processes ---';
 
-journalExec('child_hello', 'aeon-os/child_hello.bl0c');
+journalExec('child_hello', 'sbin/child_hello.bl0c');
 
 // child_crash.bl0 fails with an ORDINARY runtime error on purpose (not
 // panic()) - journalExec() catches it right at the exec() call site,
@@ -232,16 +240,16 @@ journalExec('child_hello', 'aeon-os/child_hello.bl0c');
 // instance, panic() anywhere sets the ONE 'panicked' flag and halts
 // everything, no exceptions (see the final integrity check below, and
 // Bl0jv2_jVM's own exec() doc on why that's correct, not a limitation)
-journalExec('child_crash', 'aeon-os/child_crash.bl0c');
+journalExec('child_crash', 'sbin/child_crash.bl0c');
 
 // the interactive shell - a real child process now, not inlined code.
 // With -k, real stdin reaches it directly (see this file's own header
-// comment); without it, the shell's own busy-poll loop just never sees
+// comment); without it, the shell's own idle loop just never sees
 // any input and exits only if something else raises its 'exit' path -
 // running boot.bl0 non-interactively will make this journal entry hang
 // until killed, exactly like launching an interactive shell with no
 // controlling terminal would on a real system
-journalExec('shell', 'aeon-os/shell.bl0c');
+journalExec('shell', 'sbin/shell.bl0c');
 
 println '';
 printJournal();

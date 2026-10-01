@@ -14,6 +14,7 @@
         <module>bl0jv2-runtime</module>
         <module>bl0jv2-compiler</module>
         <module>bl0jv2-cli</module>
+        <module>aeon-os</module>
         <module>bl0jv2-ide</module>
     </modules>
 

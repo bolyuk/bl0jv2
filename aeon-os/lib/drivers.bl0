@@ -1,0 +1,431 @@
+// aeon-os: the drivers - what sits between the hardware and the console and keyboard that
+// kernel.bl0 offers. Kernel-level code (the shell's kernel half, boot) imports this; programs
+// started from the disk do not need it.
+//
+// Two devices carry the terminal. The serial port (a 16550-style UART) brings the keys in, and
+// carries the output too when there is no display. When the host attached a text-mode display
+// (the present port reads 1), console output goes through an ANSI terminal emulator (Tty
+// below) that draws into the display's frame buffer instead - the programs cannot tell, they
+// write the same text with the same escape sequences either way.
+
+import '../kernel.bl0';
+
+// --- the serial port: a 16550-style UART at ports 0x0F40-0x0F47 is how this machine
+// talks to its terminal, both ways. Its registers (offsets from the base):
+//   0 data      1 interrupt enable      2 interrupt cause (read) / FIFO control (write)
+//   3 line control      4 modem control      5 line status      6 modem status      7 scratch
+// initUart() sets it up once (privileged): 8 data bits, no parity, 1 stop bit at the
+// full divisor, 16-byte FIFOs on, and the receive and line-status interrupts enabled.
+//
+// Receive: the interrupt handler reads the cause register until it reports nothing
+// pending; for data it drains the receive FIFO (line status: data ready) into a ring
+// buffer, and an overrun (the FIFO was full when a byte arrived) is counted. Readers take
+// bytes from the ring. What arrives are the bytes the terminal sends - UTF-8 text and
+// ANSI sequences for the arrow keys and so on; turning those into characters and keys
+// is the job of whoever reads (see lib/keys.bl0), the driver only moves bytes.
+//
+// The ring lives in RAW MEMORY, head and tail included, not in static fields: a program
+// started from the disk has its own copy of this file (and so its own statics), but all
+// copies must see one ring, and raw memory is what they share.
+//   +0 head (next slot the handler writes)   +4 tail (next slot a reader takes)
+//   +8 the bytes (Keyboard.size of them)
+// One slot is always left empty so head==tail means "empty"; when the ring is full the
+// newest byte is dropped rather than overwriting unread input.
+//
+// Transmit: writing the data register sends a byte. The chip's transmit FIFO holds 16;
+// "transmit FIFO empty" in the line status says 16 more fit, and a driver that does not
+// look loses bytes - uartPut() looks, and spins until there is room ---
+def class Uart {
+    static field base;
+    static field ready;
+    static field room;       // bytes that may still be written before looking at the line status again
+    static field overruns;
+}
+Uart.base = 0x0F40;
+Uart.ready = false;
+Uart.room = 0;
+Uart.overruns = 0;
+
+def initUart() {
+    if (Uart.ready) { return nil; }
+    base = Uart.base;
+    out8(base + 3, 0x80);   // line control: divisor latch access
+    out8(base, 1);          // divisor 1 = the full 115200 baud
+    out8(base + 1, 0);
+    out8(base + 3, 0x03);   // 8 data bits, no parity, 1 stop bit
+    out8(base + 2, 0x07);   // FIFOs on, both cleared, interrupt at 1 received byte
+    out8(base + 4, 0x0B);   // modem control: terminal ready, request to send, interrupt output on
+    Uart.ready = true;
+}
+
+// takes what the receive FIFO holds into the ring; the cause register says what to do
+def onUartIRQ(vector) {
+    base = Uart.base;
+    while ((in8(base + 2) & 1) == 0) {
+        cause = in8(base + 2) & 0x0E;
+        if (cause == 0x06) {
+            // line status: reading the status register clears it
+            if ((in8(base + 5) & 2) != 0) { Uart.overruns += 1; }
+        } else if (cause == 0x04 || cause == 0x0C) {
+            while ((in8(base + 5) & 1) == 1) {
+                b = in8(base);
+                head = peek32(Keyboard.base);
+                next = (head + 1) % Keyboard.size;
+                if (next != peek32(Keyboard.base + 4)) {
+                    poke8(Keyboard.base + 8 + head, b);
+                    poke32(Keyboard.base, next);
+                }
+            }
+        } else {
+            return nil;
+        }
+    }
+    signalEvent(Keyboard.event);
+}
+
+// call once, privileged, after the importer has reserved whatever fixed regions it
+// needs (it allocates the ring from the kernel heap - NOT at import time, see initHeap)
+def initKeyboard() {
+    initUart();
+    Keyboard.base = kalloc(8 + Keyboard.size);
+    poke32(Keyboard.base, 0);
+    poke32(Keyboard.base + 4, 0);
+    Keyboard.event = newEvent();
+    registerHandler(onUartIRQ, Keyboard.vector, 50);
+    out8(Uart.base + 1, 0x05);   // interrupts: received data, line status
+    // bytes that arrived before the handler existed are in the FIFO but their interrupt was
+    // dropped: take them now
+    onUartIRQ(Keyboard.vector);
+}
+
+// one byte to the terminal, waiting for room in the transmit FIFO when it is full
+def uartPut(b) {
+    if (Uart.room == 0) {
+        while ((in8(Uart.base + 5) & 0x20) == 0) { }
+        Uart.room = 16;
+    }
+    out8(Uart.base, b);
+    Uart.room -= 1;
+}
+
+// ---------------------------------------------------------------------------
+// The terminal emulator: ANSI text -> cells in the display's frame buffer.
+//
+// A cell is 32 bits: bits 0-20 the code point, 24-27 the foreground and 28-31 the
+// background colour (0 black, 1 red, 2 green, 3 brown, 4 blue, 5 magenta, 6 cyan,
+// 7 light grey, +8 bright). It understands what the programs here use: printable text
+// (any Unicode), CR, LF (as CR LF, the way a terminal is normally set up), backspace, tab;
+// the CSI sequences cursor up/down/forward/back (A B C D), position (H f), column (G),
+// erase in display and in line (J K), colours and attributes (m: reset, bold, inverse,
+// 30-37/90-97 foreground, 40-47/100-107 background, 39/49 defaults); cursor visibility
+// (?25h/l) and the alternate screen (?1049h/l), which is the second of two frame buffers.
+// A character written in the last column leaves the cursor there with the wrap pending
+// until the next character, as xterm does. Scrolling is the display's command.
+// ---------------------------------------------------------------------------
+def class Tty {
+    static field on;           // a display is the console
+    static field cols;
+    static field rows;
+    static field mainFb;       // raw address of the normal screen
+    static field altFb;        // and of the alternate one
+    static field fb;           // the one being drawn into (the display shows this one)
+    static field row;
+    static field col;
+    static field pendingWrap;
+    static field fg;           // 0-15
+    static field bg;
+    static field bold;
+    static field inverse;
+    static field attr;         // the attribute the next cell gets (fg and bg after bold and inverse)
+    static field state;        // 0 text, 1 after ESC, 2 inside a CSI sequence
+    static field params;
+    static field number;       // the parameter being read, -1 when none yet
+    static field isPrivate;    // a '?' came right after the '['
+    static field savedRow;
+    static field savedCol;
+    static field inAlt;
+
+    static def init(columns, rowsCount) {
+        Tty.cols = columns;
+        Tty.rows = rowsCount;
+        Tty.mainFb = kalloc(columns * rowsCount * 4);
+        Tty.altFb = kalloc(columns * rowsCount * 4);
+        Tty.fg = 7;
+        Tty.bg = 0;
+        Tty.bold = false;
+        Tty.inverse = false;
+        Tty.state = 0;
+        Tty.inAlt = false;
+        Tty.row = 0;
+        Tty.col = 0;
+        Tty.pendingWrap = false;
+        Tty.useBuffer(Tty.mainFb);
+        Tty.recolour();
+        Tty.clearAll();
+        out8(0x0F60, 1);
+        Tty.on = true;
+        Tty.syncCursor();
+    }
+
+    static def useBuffer(address) {
+        Tty.fb = address;
+        out32(0x0F58, address);
+    }
+
+    static def recolour() {
+        f = Tty.fg;
+        if (Tty.bold && f < 8) { f += 8; }
+        b = Tty.bg;
+        if (Tty.inverse) { Tty.attr = (f << 4) | b; } else { Tty.attr = (b << 4) | f; }
+    }
+
+    static def blank() {
+        return (Tty.attr << 24) | 0x20;
+    }
+
+    static def clearAll() {
+        out32(0x0F6C, Tty.blank());
+        out8(0x0F64, 2);
+    }
+
+    static def syncCursor() {
+        out32(0x0F5C, Tty.row * Tty.cols + Tty.col);
+    }
+
+    static def cellAddr(r, c) {
+        return Tty.fb + (r * Tty.cols + c) * 4;
+    }
+
+    // cells [from, to) of row r get the blank (current background)
+    static def clearCells(r, from, to) {
+        v = Tty.blank();
+        c = from;
+        while (c < to) {
+            poke32(Tty.cellAddr(r, c), v);
+            c += 1;
+        }
+    }
+
+    static def lineFeed() {
+        if (Tty.row == Tty.rows - 1) {
+            out32(0x0F6C, Tty.blank());
+            out32(0x0F68, 1);
+            out8(0x0F64, 1);
+        } else {
+            Tty.row += 1;
+        }
+    }
+
+    static def put(cp) {
+        if (Tty.pendingWrap) {
+            Tty.col = 0;
+            Tty.lineFeed();
+            Tty.pendingWrap = false;
+        }
+        poke32(Tty.cellAddr(Tty.row, Tty.col), (Tty.attr << 24) | cp);
+        if (Tty.col == Tty.cols - 1) { Tty.pendingWrap = true; } else { Tty.col += 1; }
+    }
+
+    // one code point of output
+    static def write(cp) {
+        if (Tty.state == 1) {
+            if (cp == 91) {                  // ESC [
+                Tty.state = 2;
+                Tty.params = [];
+                Tty.number = -1;
+                Tty.isPrivate = false;
+            } else {
+                Tty.state = 0;
+            }
+            return nil;
+        }
+        if (Tty.state == 2) {
+            Tty.csi(cp);
+            return nil;
+        }
+        if (cp == 27) { Tty.state = 1; return nil; }
+        if (cp == 10) { Tty.col = 0; Tty.pendingWrap = false; Tty.lineFeed(); return nil; }
+        if (cp == 13) { Tty.col = 0; Tty.pendingWrap = false; return nil; }
+        if (cp == 8) { if (Tty.col > 0) { Tty.col -= 1; } Tty.pendingWrap = false; return nil; }
+        if (cp == 9) {
+            Tty.col = ((Tty.col / 8) + 1) * 8;
+            if (Tty.col > Tty.cols - 1) { Tty.col = Tty.cols - 1; }
+            Tty.pendingWrap = false;
+            return nil;
+        }
+        if (cp < 32) { return nil; }
+        Tty.put(cp);
+    }
+
+    static def csi(cp) {
+        if (cp >= 48 && cp <= 57) {
+            Tty.number = (Tty.number < 0 ? 0 : Tty.number) * 10 + (cp - 48);
+        } else if (cp == 59) {
+            push(Tty.params, Tty.number);
+            Tty.number = -1;
+        } else if (cp == 63) {
+            Tty.isPrivate = true;
+        } else if (cp >= 64 && cp <= 126) {
+            push(Tty.params, Tty.number);
+            Tty.state = 0;
+            Tty.dispatch(cp);
+        }
+        // anything else inside a sequence (intermediate bytes) is ignored
+    }
+
+    // parameter i, or 'fallback' when it was left out
+    static def param(i, fallback) {
+        if (i >= len(Tty.params) || Tty.params[i] < 0) { return fallback; }
+        return Tty.params[i];
+    }
+
+    static def clampCursor() {
+        if (Tty.row < 0) { Tty.row = 0; }
+        if (Tty.row > Tty.rows - 1) { Tty.row = Tty.rows - 1; }
+        if (Tty.col < 0) { Tty.col = 0; }
+        if (Tty.col > Tty.cols - 1) { Tty.col = Tty.cols - 1; }
+        Tty.pendingWrap = false;
+    }
+
+    static def dispatch(finalByte) {
+        if (Tty.isPrivate) {
+            Tty.privateMode(finalByte);
+            return nil;
+        }
+        n = Tty.param(0, 1);
+        if (finalByte == 65) { Tty.row -= n; Tty.clampCursor(); }                       // A up
+        else if (finalByte == 66) { Tty.row += n; Tty.clampCursor(); }                  // B down
+        else if (finalByte == 67) { Tty.col += n; Tty.clampCursor(); }                  // C forward
+        else if (finalByte == 68) { Tty.col -= n; Tty.clampCursor(); }                  // D back
+        else if (finalByte == 71) { Tty.col = n - 1; Tty.clampCursor(); }               // G column
+        else if (finalByte == 72 || finalByte == 102) {                                      // H f position
+            Tty.row = Tty.param(0, 1) - 1;
+            Tty.col = Tty.param(1, 1) - 1;
+            Tty.clampCursor();
+        }
+        else if (finalByte == 74) { Tty.eraseDisplay(Tty.param(0, 0)); }                // J
+        else if (finalByte == 75) { Tty.eraseLine(Tty.param(0, 0)); }                   // K
+        else if (finalByte == 109) { Tty.sgr(); }                                        // m
+    }
+
+    static def eraseLine(mode) {
+        if (mode == 0) { Tty.clearCells(Tty.row, Tty.col, Tty.cols); }
+        else if (mode == 1) { Tty.clearCells(Tty.row, 0, Tty.col + 1); }
+        else { Tty.clearCells(Tty.row, 0, Tty.cols); }
+    }
+
+    static def eraseDisplay(mode) {
+        if (mode == 2 || mode == 3) { Tty.clearAll(); return nil; }
+        if (mode == 0) {
+            Tty.clearCells(Tty.row, Tty.col, Tty.cols);
+            r = Tty.row + 1;
+            while (r < Tty.rows) { Tty.clearCells(r, 0, Tty.cols); r += 1; }
+        } else {
+            r = 0;
+            while (r < Tty.row) { Tty.clearCells(r, 0, Tty.cols); r += 1; }
+            Tty.clearCells(Tty.row, 0, Tty.col + 1);
+        }
+    }
+
+    static def sgr() {
+        i = 0;
+        count = len(Tty.params);
+        while (i < count) {
+            p = Tty.params[i] < 0 ? 0 : Tty.params[i];
+            if (p == 0) { Tty.fg = 7; Tty.bg = 0; Tty.bold = false; Tty.inverse = false; }
+            else if (p == 1) { Tty.bold = true; }
+            else if (p == 22) { Tty.bold = false; }
+            else if (p == 7) { Tty.inverse = true; }
+            else if (p == 27) { Tty.inverse = false; }
+            else if (p >= 30 && p <= 37) { Tty.fg = p - 30; }
+            else if (p == 39) { Tty.fg = 7; }
+            else if (p >= 40 && p <= 47) { Tty.bg = p - 40; }
+            else if (p == 49) { Tty.bg = 0; }
+            else if (p >= 90 && p <= 97) { Tty.fg = p - 90 + 8; }
+            else if (p >= 100 && p <= 107) { Tty.bg = p - 100 + 8; }
+            i += 1;
+        }
+        Tty.recolour();
+    }
+
+    static def privateMode(finalByte) {
+        mode = Tty.param(0, 0);
+        enable = finalByte == 104;
+        if (finalByte != 104 && finalByte != 108) { return nil; }
+        if (mode == 25) {
+            out8(0x0F60, enable ? 1 : 0);
+        } else if (mode == 1049) {
+            if (enable && !Tty.inAlt) {
+                Tty.savedRow = Tty.row;
+                Tty.savedCol = Tty.col;
+                Tty.inAlt = true;
+                Tty.useBuffer(Tty.altFb);
+                Tty.clearAll();
+                Tty.row = 0;
+                Tty.col = 0;
+                Tty.pendingWrap = false;
+            } else if (!enable && Tty.inAlt) {
+                Tty.inAlt = false;
+                Tty.useBuffer(Tty.mainFb);
+                Tty.row = Tty.savedRow;
+                Tty.col = Tty.savedCol;
+                Tty.pendingWrap = false;
+            }
+        }
+    }
+}
+Tty.on = false;
+
+// ---------------------------------------------------------------------------
+// Console output: to the terminal emulator when a display is attached, else straight to the
+// serial line as UTF-8.
+// ---------------------------------------------------------------------------
+
+// runs ELEVATED (syscall()'s trap gate - see invokeAsTrap), regardless of which ring the
+// caller was in
+def sysConsoleWrite(text) {
+    n = len(text);
+    i = 0;
+    while (i < n) {
+        c = int(text[i]);
+        i += 1;
+        // a UTF-16 surrogate pair is one code point; a lone surrogate is U+FFFD
+        if (c >= 0xD800 && c <= 0xDBFF) {
+            if (i < n && int(text[i]) >= 0xDC00 && int(text[i]) <= 0xDFFF) {
+                c = 0x10000 + ((c - 0xD800) << 10) + (int(text[i]) - 0xDC00);
+                i += 1;
+            } else {
+                c = 0xFFFD;
+            }
+        } else if (c >= 0xDC00 && c <= 0xDFFF) {
+            c = 0xFFFD;
+        }
+        if (Tty.on) {
+            Tty.write(c);
+        } else if (c < 0x80) {
+            uartPut(c);
+        } else if (c < 0x800) {
+            uartPut(0xC0 | (c >> 6));
+            uartPut(0x80 | (c & 0x3F));
+        } else if (c < 0x10000) {
+            uartPut(0xE0 | (c >> 12));
+            uartPut(0x80 | ((c >> 6) & 0x3F));
+            uartPut(0x80 | (c & 0x3F));
+        } else {
+            uartPut(0xF0 | (c >> 18));
+            uartPut(0x80 | ((c >> 12) & 0x3F));
+            uartPut(0x80 | ((c >> 6) & 0x3F));
+            uartPut(0x80 | (c & 0x3F));
+        }
+    }
+    if (Tty.on) { Tty.syncCursor(); }
+}
+
+// call once, privileged: the serial port, the display if there is one, and the write syscall
+def initConsole() {
+    initUart();
+    Console.columns = in16(0x0F50);
+    Console.rows = in16(0x0F52);
+    if (in8(0x0F54) == 1) { Tty.init(Console.columns, Console.rows); }
+    registerHandler(sysConsoleWrite, Console.sysWriteVector, 1);
+}

@@ -1,0 +1,19 @@
+// aeon-os program: size and kind of a file or folder
+// Loaded from the virtual disk by the shell (bin/stat.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: stat <path>'); return nil; }
+    name = inCwd(words[1]);
+    size = Fs.size(name);
+    if (size >= 0) {
+        say(Fmt.format('{}: file, {} bytes, {} sectors', [name, size, (size + 511) >> 9]));
+    } else if (Dirs.isDir(name)) {
+        say(Fmt.format('{}: folder, {} entries', [name == '' ? '/' : name, len(Dirs.list(name))]));
+    } else {
+        sayErr(words[1] + ': no such file or folder');
+    }
+}
+
+programMain(main);

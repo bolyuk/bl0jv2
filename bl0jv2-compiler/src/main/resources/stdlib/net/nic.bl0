@@ -8,15 +8,14 @@
 // parses.
 //
 // Modeled with the same interrupt-driven shape as kernel.bl0's Keyboard
-// driver: Nic.send() stages exactly one frame and raises an interrupt;
-// onNicIRQ() (the "device"'s own ISR) is what actually moves it into the
-// RX queue Nic.recv() drains from - not Nic.send() itself. Staging is a
-// single slot, not a real TX queue, the same "one data register"
-// simplification the keyboard driver already accepts (see its own doc):
-// sending a second frame before the ISR has drained the first overwrites
-// it. Fine for this project's demos (cooperative, cooperative senders take
-// turns) - a real multi-frame TX queue is a natural extension, not
-// implemented here.
+// driver: Nic.send() queues the frame on a TX queue and raises an
+// interrupt; onNicIRQ() (the "device"'s own ISR) is what actually moves
+// everything queued into the RX queue Nic.recv() drains from - not
+// Nic.send() itself. The TX side is a real queue, not a single slot: an
+// earlier single-slot version silently lost a frame whenever two cores
+// sent before the ISR ran (the second overwrote the first), and with no
+// retransmission above this layer that showed up as an occasionally hung
+// TCP handshake in multi-core runs.
 //
 // Unlike out8()/in8()/registerHandler() (all privileged - see
 // requirePrivileged's own doc), Nic.send()/Nic.hasFrame()/Nic.recv() are
@@ -29,7 +28,7 @@
 // registerHandler()) is the one function in this file real kernel code
 // still has to run before dropping to user mode.
 //
-// lock guards every read/write of txStaged/rxQueue - real hardware, and
+// lock guards every read/write of txQueue/rxQueue - real hardware, and
 // every other device driver in aeon-os, only ever has ONE core polling it
 // (see smp_boot.bl0's own header comment: userspace tasks are real worker
 // threads, but this VM has no per-core NIC, just one shared one). Once a
@@ -93,9 +92,16 @@
 // restriction applying.
 def class Nic {
     static field vector;
-    static field txStaged; // nil, or a pending frame array
-    static field rxQueue;  // array of already-delivered frame arrays
+    static field txQueue;  // frames sent but not yet moved to rxQueue by the ISR
+    static field rxQueue;  // already-delivered frames; the live ones start at rxHead
+    static field rxHead;   // index of the oldest unread frame (popping advances this instead of copying the array)
     static field lock;
+    static field dropNext; // test hook / lossy-link simulation: silently discard the next N sent frames
+    static field txCount;  // frames sent / received (not counting ones dropped by Nic.dropNext)
+    static field rxCount;
+    static field hostBridgePresentPort;
+    static field hostSendVector;
+    static field rxEvent;  // signalled whenever the network state may have changed (a frame queued, a TCP segment handled) - see recvWait()
 
     static field hostBridgeEnabled;
     static field maxFrameBytes;
@@ -124,7 +130,23 @@ def class Nic {
     static def initWithHostBridge() {
         Nic.init();
         registerHandler(onHostNicIRQ, Nic.hostRxVector, 50);
+        // sending to the host writes ports (privileged); this syscall lets user-mode
+        // code do it through the kernel - see send()
+        registerHandler(onHostSendSyscall, Nic.hostSendVector, 1);
         Nic.hostBridgeEnabled = true;
+    }
+
+    // init() or initWithHostBridge(), whichever fits what is on the other side:
+    // the host sets a port when it attaches any bridge (the CLI's -b / --bridge-tcp /
+    // --bridge-outbound), so a program need not know how it was launched. Without
+    // a bridge, hostSend() would wait out its 2 s ack timeout for every frame.
+    // Privileged (reads a port, registers handlers) - call it before dropToUserMode().
+    static def initAuto() {
+        if (in16(Nic.hostBridgePresentPort) == 1) {
+            Nic.initWithHostBridge();
+        } else {
+            Nic.init();
+        }
     }
 
     // mirrors 'frame' out through the TX ports for a host bridge to relay
@@ -173,43 +195,88 @@ def class Nic {
     // syscall() instead, which is exactly where this is heading, not a
     // finished design yet.
     static def send(frame) {
+        if (Nic.dropNext > 0) {
+            Nic.dropNext = Nic.dropNext - 1;
+            return nil;
+        }
         lock(Nic.lock);
-        Nic.txStaged = frame;
+        push(Nic.txQueue, frame);
+        Nic.txCount = Nic.txCount + 1;
         unlock(Nic.lock);
         raiseInterrupt(Nic.vector);
         if (Nic.hostBridgeEnabled) {
-            Nic.hostSend(frame);
+            if (isPrivileged()) {
+                Nic.hostSend(frame);
+            } else {
+                syscall(Nic.hostSendVector, frame); // the kernel's handler (onHostSendSyscall) does the port writes
+            }
         }
     }
 
-    static def hasFrame() {
+    // number of frames waiting to be received
+    static def pending() {
         lock(Nic.lock);
-        result = len(Nic.rxQueue) > 0;
+        result = len(Nic.rxQueue) - Nic.rxHead;
         unlock(Nic.lock);
         return result;
     }
 
-    // FIFO: pops the OLDEST frame, not the newest - Bl0jArray's own pop()
-    // only ever removes from the back (LIFO), wrong order for a receive
-    // queue, so this rebuilds the array shifted down by one instead.
-    // Caller must check hasFrame() first, same contract kbReadChar()
-    // already has for an empty keyboard buffer - fine under single-core
-    // use, but with two real cores polling, hasFrame() and recv() are two
-    // separate locked sections, so another core can still drain the queue
-    // in between them; use tryRecv() instead of this pair when that
+    static def hasFrame() {
+        return Nic.pending() > 0;
+    }
+
+    // FIFO: pops the OLDEST frame, not the newest. Popping advances rxHead (and
+    // clears the slot) - it used to rebuild the whole array shifted down by
+    // one, O(queue length) per frame. Once everything has been read the array
+    // is replaced by an empty one. Caller must check hasFrame() first, same
+    // contract kbReadChar() already has for an empty keyboard buffer - fine
+    // under single-core use, but with two real cores polling, hasFrame() and
+    // recv() are two separate locked sections, so another core can still drain
+    // the queue in between them; use tryRecv() instead of this pair when that
     // matters.
     static def recv() {
         lock(Nic.lock);
-        frame = Nic.rxQueue[0];
-        rest = [];
-        i = 1;
-        while (i < len(Nic.rxQueue)) {
-            push(rest, Nic.rxQueue[i]);
-            i = i + 1;
-        }
-        Nic.rxQueue = rest;
+        frame = Nic.popLocked();
         unlock(Nic.lock);
         return frame;
+    }
+
+    // the pop itself; the caller holds Nic.lock and has checked the queue is not empty
+    static def popLocked() {
+        frame = Nic.rxQueue[Nic.rxHead];
+        Nic.rxQueue[Nic.rxHead] = nil;
+        Nic.rxHead = Nic.rxHead + 1;
+        if (Nic.rxHead == len(Nic.rxQueue)) {
+            Nic.rxQueue = [];
+            Nic.rxHead = 0;
+        }
+        return frame;
+    }
+
+    // blocking receive: sleeps on Nic.rxEvent until a frame is queued, with
+    // no polling - the RX ISRs below signal it right after pushing. Returns
+    // the oldest frame, or nil if timeoutMs elapsed first (a negative
+    // timeout waits forever). Safe from any core: the actual pop is
+    // tryRecv()'s atomic one. The event's generation is read BEFORE the
+    // queue check, so a frame that lands between the check and the wait
+    // still ends the wait immediately instead of being slept through -
+    // and the loop re-checks after every wakeup, because waitEvent() only
+    // means "something happened" (another core may have taken the frame,
+    // or a pending interrupt cut the wait short).
+    static def recvWait(timeoutMs) {
+        deadline = ticks() + timeoutMs;
+        while (true) {
+            gen = eventGen(Nic.rxEvent);
+            frame = Nic.tryRecv();
+            if (frame != nil) { return frame; }
+            if (timeoutMs < 0) {
+                waitEvent(Nic.rxEvent, gen, -1);
+            } else {
+                remaining = deadline - ticks();
+                if (remaining <= 0) { return nil; }
+                waitEvent(Nic.rxEvent, gen, remaining);
+            }
+        }
     }
 
     // atomic "pop the oldest frame if there is one" - nil if the queue was
@@ -218,26 +285,26 @@ def class Nic {
     // separate calls (see recv()'s own doc)
     static def tryRecv() {
         lock(Nic.lock);
-        if (len(Nic.rxQueue) == 0) {
+        if (len(Nic.rxQueue) == Nic.rxHead) {
             unlock(Nic.lock);
             return nil;
         }
-        frame = Nic.rxQueue[0];
-        rest = [];
-        i = 1;
-        while (i < len(Nic.rxQueue)) {
-            push(rest, Nic.rxQueue[i]);
-            i = i + 1;
-        }
-        Nic.rxQueue = rest;
+        frame = Nic.popLocked();
         unlock(Nic.lock);
         return frame;
     }
 }
 Nic.vector = 3; // distinct from kernel.bl0's Keyboard.vector=2 and Console.sysWriteVector=1
-Nic.txStaged = nil;
+Nic.txQueue = [];
 Nic.rxQueue = [];
+Nic.rxHead = 0;
+Nic.txCount = 0;
+Nic.rxCount = 0;
+Nic.hostBridgePresentPort = 3602; // set to 1 by the host when it attaches a bridge (NicFrame.HOST_BRIDGE_PRESENT_PORT)
+Nic.hostSendVector = 5;           // distinct from 1 (console), 2 (keyboard), 3 (nic), 4 (host rx)
 Nic.lock = newMutex();
+Nic.rxEvent = newEvent();
+Nic.dropNext = 0;
 
 Nic.hostBridgeEnabled = false;
 Nic.maxFrameBytes = 1500; // a conventional Ethernet-ish MTU - plenty for this toy stack's own headers+payload
@@ -255,9 +322,14 @@ Nic.txSeq = 0;
 // the "device" ISR: loops whatever was just staged back into the RX queue
 def onNicIRQ(vector) {
     lock(Nic.lock);
-    if (Nic.txStaged != nil) {
-        push(Nic.rxQueue, Nic.txStaged);
-        Nic.txStaged = nil;
+    batch = Nic.txQueue;
+    Nic.txQueue = [];
+    i = 0;
+    while (i < len(batch)) {
+        push(Nic.rxQueue, batch[i]);
+        Nic.rxCount = Nic.rxCount + 1;
+        signalEvent(Nic.rxEvent);
+        i = i + 1;
     }
     unlock(Nic.lock);
 }
@@ -283,6 +355,13 @@ def onHostNicIRQ(vector) {
     }
     lock(Nic.lock);
     push(Nic.rxQueue, frame);
+    Nic.rxCount = Nic.rxCount + 1;
+    signalEvent(Nic.rxEvent);
     unlock(Nic.lock);
     out16(Nic.hostRxAckPort, in16(Nic.hostRxSeqPort));
+}
+
+// syscall handler (runs elevated, whatever ring the caller is in): relays one frame to the host bridge
+def onHostSendSyscall(frame) {
+    Nic.hostSend(frame);
 }

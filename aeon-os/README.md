@@ -1,0 +1,127 @@
+# aeon-os
+
+An operating system written in bl0, run by the bl0jv2 VM. This is a Maven module
+(`mvn -pl aeon-os -am test`); the only Java in it is the tests, which boot the OS
+and type on its keyboard.
+
+```
+aeon-os/
+  kernel.bl0        heap, keyboard driver, console (syscall gate)
+  init.bl0          the smallest boot: loads the shared libraries and the shell from the disk
+  boot.bl0          the same after a demo scheduler and fault isolation show
+  libs.txt          the shared libraries, in load order
+  smp_boot.bl0      the same on several cores
+  shell.bl0         the shell: built-ins, the network commands, program launcher
+  child_*.bl0       small programs boot starts
+  lib/              log, loader, drivers (UART, terminal emulator), userland (what a program imports), input (stdin),
+                    term/keys/lineedit (terminal output, key parsing, the line editor), cmdline (parser)
+  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir edit
+```
+
+## There is no host filesystem
+
+Nothing the OS runs can read a host file. The VM's only storage is a **block
+device** (`--disk image`: 512-byte sectors behind five ports, see the main
+README), and everything above it is bl0: the filesystem (`stdlib/fs`), the
+loader, the commands.
+
+* `sbin/` on the disk holds the kernel programs boot starts (`shell`,
+  `child_hello`, ...); `bin/` holds the commands; `var/log/aeon.log` is the
+  system log (boot, every shell command, programs started and how they ended;
+  it rotates to `aeon.log.1` at 16 KiB).
+* The shell has only what changes its own state built in (`cd`, `pwd`, `echo >`,
+  `format`, `exec`, `help`, `exit`, ... and the network commands, whose state
+  lives in the shell). Any other word is looked up as `bin/<word>.bl0c` on the
+  disk, read with `Fs`, placed in raw memory and run with `execMem` - **in user
+  mode**, relocated to wherever there is room, and unloaded when it returns.
+* A program is linked to the **shared libraries** (below): its command line, working folder and
+  redirections are variables of those libraries that the shell sets, and it reaches the machine
+  only through syscalls.
+
+## Shared libraries
+
+The code every program needs - the filesystem, UTF-8, the line editor, the keyboard driver, the
+helpers - is not in the programs. `libs.txt` lists the shared libraries in load order. They are
+compiled once (`--shared aeon-os/libs.txt` does it when it builds the disk), stored as
+`lib/NAME.bl0c` with `lib/MANIFEST`, and loaded once at boot by `loadLibraries()` (`execMem` mode
+2): each runs its top level and **exports** the functions and classes it defines. A program built
+against them contains only its own code, and its references to library things are names that the
+loader links to the loaded copies when it starts. The compiler still checks calls to them (arity,
+members) from the library's source. Consequences: a command is 300 bytes to 1.3 KB instead of 40-60
+KB, and a library's state is one for the whole system - `Fs.mounted`, the disk driver, the
+keyboard ring, the redirections - not a copy per program.
+
+Rules: a library may import only libraries that come before it in the manifest; a program may not
+define a name a library defines; two libraries may not export one name. `init.bl0` and `boot.bl0`
+are built with the filesystem and loader inside (they are what reads the libraries in) and so are
+not linked to anything.
+
+## Running
+
+```
+mvn -q package -DskipTests
+aeon-os/aeon.sh                 # builds aeon.img from the sources and boots it
+```
+
+`aeon.sh` is just the CLI with `--disk aeon.img` and a `--disk-put` per part
+(`--disk-put aeon-os/bin:bin` copies a folder, compiling every `.bl0` to a
+`.bl0c`). The image keeps its files between runs; `--disk-put` rewrites what it
+names.
+
+## The terminal
+
+Two paths lead to the same programs, which cannot tell them apart: the **serial line**
+(a UART; the default) and a **text-mode display** (`--display`). `lib/drivers.bl0` holds the
+drivers - the UART (initialised once; the receive interrupt drains the FIFO into the keyboard
+ring; transmit waits for room), and an **ANSI terminal emulator** that turns the text and escape
+sequences programs write into cells in the display's frame buffer (text, wrapping with the
+xterm deferred wrap, scrolling by the display's command, cursor movement, erase, colours and
+attributes, cursor visibility, the alternate screen as a second frame buffer). Programs only
+see `kernel.bl0`: `consoleWrite()` (a syscall) and the keyboard ring.
+
+The console is a serial terminal, modelled as two devices (see the main README): the
+guest writes UTF-8 bytes - with ANSI escape sequences for the cursor and the screen -
+to a port, and reads the bytes the terminal sends from a FIFO behind another. So the
+OS needs nothing from the host but a terminal: `-k` puts the host terminal in raw mode
+(Unix: via `stty`; elsewhere it stays in line mode and shows its own echo too) and
+passes size and keys through.
+
+* **Line editor** (`lib/lineedit.bl0`): any Unicode, Backspace/Delete, arrows, Home/End,
+  Ctrl-A/E/U/K/W, Ctrl-Left/Right and Alt-B/F by word, Ctrl-L, history (Up/Down, kept in
+  `var/history`), Tab completion of commands and paths (a second Tab lists), Ctrl-C,
+  Ctrl-D. A line longer than the screen wraps and edits correctly.
+* **Quoting, pipes, redirection**: `'literal'`, `"with \n \t \" \\"`, `\` before a
+  character; `a | b | c`, `< in`, `> out`, `>> out`. A pipe is a temporary file
+  (`var/tmp/pipe<N>`): stages run one after another, the output of one is the input of
+  the next. Programs write with `say()`, read with `inputText()` (`cat`, `grep`, `wc`,
+  `head`, `tail`, `hexdump` are filters; with no file and no redirection they read the
+  terminal until Ctrl-D) and report problems with `sayErr()`, which is always the
+  terminal.
+* **`edit <file>`**: a full-screen editor on the alternate screen: arrows, PgUp/PgDn,
+  Home/End, typing, Enter, Backspace/Delete, Ctrl-S save, Ctrl-X exit (twice to discard),
+  Ctrl-K/Ctrl-Y cut and paste a line, Ctrl-F find. Works on `host/` paths too.
+
+Limits: one terminal cell per character (no double-width or combining marks), no job
+control, stages of a pipeline do not run concurrently.
+
+## Moving files in and out
+
+`aeon.sh` shares `./share` (override with `SHARE=dir`) with `--bridge-fs`. It
+shows up as the directory `host/`, part of the same tree as the disk: `ls host`,
+`cat host/notes.txt`, `cp host/a.txt a.txt`, `cp report.txt host/`,
+`mv a.txt host/b.txt`, `mkdir host/out`, `rm host/old.txt` - the same programs,
+the same library calls (`Fs.read('host/x')`), no separate commands. The host
+exposes only that one folder.
+
+## Adding a command
+
+```
+// aeon-os/bin/hello.bl0
+import '../lib/userland.bl0';
+def main(words) { say('hello ' + restOf(words, 1)); }
+programMain(main);
+```
+
+Put it on the disk (`--shared aeon-os/libs.txt --disk-put aeon-os/bin/hello.bl0:bin/hello.bl0c`) and
+type `hello world`. The network commands stay in the shell because their state (the NIC, the
+connections) is the shell's own and not a library's.

@@ -1,0 +1,145 @@
+// The host folder the CLI's --bridge-fs shows the guest, through the share
+// ports 0x0F10-0x0F28 (see ShareController in the runtime). Paths are relative
+// to that one folder and '/'-separated; the host refuses anything that leaves
+// it. Like disk.bl0 this is a driver: the guest sets a path and a buffer, writes
+// a command and has the result when the out8 returns.
+//
+// Hfs.init() runs once, privileged. From user mode the port writes go through a
+// syscall (vector 8), while the path and the data travel in raw memory with
+// peek/poke, which any ring may use. Errors are exceptions "hostfs: ...".
+
+import '../str/utf8.bl0';
+import '../str/split.bl0';
+
+def class Hfs {
+    static field pathAddr;   // 260 bytes
+    static field dataAddr;   // Hfs.chunk bytes
+    static field present;
+    static field vector;
+    static field chunk;
+
+    // privileged
+    static def init(pathBuffer, dataBuffer) {
+        Hfs.pathAddr = pathBuffer;
+        Hfs.dataAddr = dataBuffer;
+        Hfs.present = in8(0x0F10) == 1;
+        registerHandler(onHfsSyscall, Hfs.vector, 1);
+    }
+
+    // for a program the kernel started (it carries its own copy of this class)
+    static def attach(pathBuffer, dataBuffer, vector, present) {
+        Hfs.pathAddr = pathBuffer;
+        Hfs.dataAddr = dataBuffer;
+        Hfs.vector = vector;
+        Hfs.present = present;
+    }
+
+    // privileged: one command; nil if the host refused
+    static def command(cmd, length, offset) {
+        out32(0x0F14, Hfs.pathAddr);
+        out32(0x0F18, Hfs.dataAddr);
+        out32(0x0F1C, length);
+        out32(0x0F20, offset);
+        out8(0x0F24, cmd);
+        if (in8(0x0F25) != 0) { return nil; }
+        return in32(0x0F28);
+    }
+
+    static def run(path, cmd, length, offset) {
+        if (!Hfs.present) { throw('hostfs: no host folder attached (start with --bridge-fs <folder>)'); }
+        Hfs.setPath(path);
+        if (isPrivileged()) {
+            result = Hfs.command(cmd, length, offset);
+        } else {
+            request = [cmd, length, offset];
+            result = syscall(Hfs.vector, request);
+            free(request);
+        }
+        if (result == nil) { throw('hostfs: ' + path + ': refused by the host'); }
+        return result;
+    }
+
+    static def setPath(path) {
+        bytes = Utf8.encode(path);
+        if (len(bytes) > 255) {
+            free(bytes);
+            throw('hostfs: path longer than 255 bytes');
+        }
+        i = 0;
+        while (i < len(bytes)) {
+            poke8(Hfs.pathAddr + i, bytes[i]);
+            i += 1;
+        }
+        poke8(Hfs.pathAddr + len(bytes), 0);
+        free(bytes);
+    }
+
+    // bytes; -1 if there is no such file, -2 if it is a folder
+    static def size(path) {
+        return Hfs.run(path, 1, 0, 0);
+    }
+
+    // the file as an array of bytes
+    static def read(path) {
+        size = Hfs.size(path);
+        if (size == -1) { throw('hostfs: ' + path + ': no such file'); }
+        if (size == -2) { throw('hostfs: ' + path + ' is a folder'); }
+        out = [];
+        offset = 0;
+        while (offset < size) {
+            n = Hfs.run(path, 2, Hfs.chunk, offset);
+            if (n == 0) { break; }
+            i = 0;
+            while (i < n) {
+                push(out, peek8(Hfs.dataAddr + i));
+                i += 1;
+            }
+            offset += n;
+        }
+        return out;
+    }
+
+    // creates the file or replaces it with 'bytes' (an array of ints 0-255)
+    static def write(path, bytes) {
+        total = len(bytes);
+        offset = 0;
+        if (total == 0) { Hfs.run(path, 3, 0, 0); } // the write at offset 0 creates/empties the file
+        while (offset < total) {
+            k = total - offset;
+            if (k > Hfs.chunk) { k = Hfs.chunk; }
+            i = 0;
+            while (i < k) {
+                poke8(Hfs.dataAddr + i, bytes[offset + i]);
+                i += 1;
+            }
+            Hfs.run(path, 3, k, offset);
+            offset += k;
+        }
+    }
+
+    // names in a folder ('' = the shared folder itself); folders end with '/'
+    static def list(path) {
+        n = Hfs.run(path, 4, Hfs.chunk, 0);
+        bytes = [];
+        i = 0;
+        while (i < n) {
+            push(bytes, peek8(Hfs.dataAddr + i));
+            i += 1;
+        }
+        text = Utf8.decode(bytes);
+        free(bytes);
+        if (text == '') { return []; }
+        return Split.split(text, strChar(10));
+    }
+
+    static def remove(path) { Hfs.run(path, 5, 0, 0); }
+    static def mkdir(path) { Hfs.run(path, 6, 0, 0); }
+}
+Hfs.vector = 8;
+Hfs.chunk = 4096;
+Hfs.present = false;
+
+// runs elevated, whatever ring the caller is in: request = [command, length, offset]
+def onHfsSyscall(request) {
+    return Hfs.command(request[0], request[1], request[2]);
+}

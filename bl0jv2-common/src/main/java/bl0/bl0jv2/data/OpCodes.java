@@ -160,5 +160,10 @@ public final class OpCodes {
     // trick as POKE
     public static final byte ATOMIC_CAS = 0x42;
 
+    // a <= b, a >= b: their own opcodes (they used to compile to the opposite
+    // comparison plus NOT, which is wrong for NaN - 'NaN <= 1' came out true)
+    public static final byte LESS_EQ = 0x43;
+    public static final byte GREATER_EQ = 0x44;
+
     public static final byte HALT = (byte) 0xFF;
 }

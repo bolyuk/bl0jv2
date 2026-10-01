@@ -5,6 +5,14 @@ import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Panic;
 import bl0.bl0jv2.runtime.arithmetic.ArithmeticOperators;
 import bl0.bl0jv2.runtime.interrupt.InterruptController;
+import bl0.bl0jv2.runtime.interrupt.TimerService;
+import bl0.bl0jv2.runtime.device.BlockDevice;
+import bl0.bl0jv2.runtime.device.DisplayController;
+import bl0.bl0jv2.runtime.device.DiskController;
+import bl0.bl0jv2.runtime.device.UartController;
+import bl0.bl0jv2.runtime.device.PortDevice;
+import bl0.bl0jv2.runtime.device.HostShare;
+import bl0.bl0jv2.runtime.device.ShareController;
 import bl0.bl0jv2.runtime.memory.PortIO;
 import bl0.bl0jv2.runtime.memory.RawMemory;
 import bl0.bl0jv2.runtime.values.*;
@@ -13,8 +21,6 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -37,12 +43,7 @@ public final class Bl0jv2_jVM {
         public String toString() { return "nil"; }
     };
 
-    // marks a freed heap slot - distinct from NIL_OBJECT so a freed value
-    // is never confused with a field that legitimately holds nil
-    private static final Object FREED = new Object() {
-        @Override
-        public String toString() { return "<freed>"; }
-    };
+    private static final Object FREED = Heap.FREED;
 
     private static final long[] EMPTY_CELLS = new long[0];
 
@@ -59,7 +60,20 @@ public final class Bl0jv2_jVM {
     // a second, port-addressed bus - see PortIO's own javadoc for why this
     // is deliberately separate from rawMemory
     private final PortIO portIO = new PortIO();
+    private final DiskController disk = new DiskController(portIO, rawMemory);
+    private final ShareController share = new ShareController(portIO, rawMemory);
+    // set_out_writer() may replace the writer after this is built, hence the indirection
+    private final UartController uart = new UartController(text -> {
+        try {
+            if (out != null) out.write(text);
+        } catch (IOException e) {
+            throw new Bl0j_VM_Exception("console write failed: " + e.getMessage());
+        }
+    }, () -> this.interrupts.raiseInterrupt(2));
+    private final DisplayController display = new DisplayController(portIO, rawMemory);
+    private final PortDevice[] devices = {disk, share, uart, display};
     private final InterruptController interrupts = new InterruptController();
+    private final TimerService timers = new TimerService(interrupts);
 
     // one call stack / try-catch handler stack per core (Java thread) - see
     // CoreContext. Bound lazily as core 0 the first time an unregistered
@@ -81,23 +95,13 @@ public final class Bl0jv2_jVM {
     private Map<Byte, Function<Object, Object>> nativeMethods = new HashMap<>();
 
     // reference-typed values (strings, FunDefs, ...) that registers/consts
-    // hold as a NanBox REF index rather than inline. Shared across cores,
-    // so boxRef()/FREE's mutations take heapLock's write lock and unbox()'s
-    // read takes its read lock - boxRef() is the least-hot heap path (one
-    // call per allocation) so a coarser lock than RawMemory's disjoint-state
-    // split is fine here; unbox() is the hottest path in the whole
-    // interpreter, which is exactly why read/write (not one coarse lock)
-    // matters for this specific structure.
-    private final List<Object> heap = new ArrayList<>();
-    // indices freed via free() - boxRef() reuses these before growing heap,
-    // so alloc/free cycles don't exhaust maxHeapEntries even with zero
-    // actual leaks
-    private final ArrayDeque<Integer> freeHeapSlots = new ArrayDeque<>();
-    // 0 = unlimited, matching this VM's historical (unbounded) behavior
-    private long maxHeapEntries = 0;
-    private final ReentrantReadWriteLock heapLock = new ReentrantReadWriteLock();
+    // hold as a NanBox REF index rather than inline - see Heap
+    private final Heap heap = new Heap();
 
     private long[] consts;
+    // parallel to consts: the interned symbol id of a string constant, else -1
+    private int[] constSymbols = new int[0];
+    private final SymbolTable symbols = new SymbolTable();
     private byte[] instructions;
 
     // set fresh in feed_compiled_file(); ticks() reads elapsed time against
@@ -175,6 +179,85 @@ public final class Bl0jv2_jVM {
             interrupts.raiseInterrupt((int) v);
             return null;
         });
+        // raiseInterruptOn(core, vector): arrives as a 2-element array [core,
+        // vector] (see Bl0jv2_Compiler's compileRaiseInterruptOn). An IPI -
+        // only that core's own poll will ever deliver it. Ungated, same as
+        // raiseInterrupt().
+        nativeMethods.put(NativeMethods.RAISE_INTERRUPT_ON, (arg) -> {
+            if (!(arg instanceof Bl0jArray args) || args.length() != 2)
+                throw new Bl0j_VM_Exception("raiseInterruptOn: expected (core, vector)");
+            if (!(unbox(args.getRaw(0)) instanceof Integer core) || !(unbox(args.getRaw(1)) instanceof Integer vector))
+                throw new Bl0j_VM_Exception("raiseInterruptOn: core and vector must be ints");
+            if (core < 0 || core >= coreCount)
+                throw new Bl0j_VM_Exception("raiseInterruptOn: no such core " + core + " (core count " + coreCount + ")");
+            interrupts.raiseInterruptOn(core, vector);
+            return null;
+        });
+        // throw(message) raises an error exactly like a runtime failure does: a
+        // surrounding try/catch receives the message, uncaught it ends the
+        // program. throw(e) with an err value (what catch hands you, or err())
+        // re-raises that error's own message.
+        nativeMethods.put(NativeMethods.THROW, (arg) -> {
+            String message = arg instanceof Bl0jError error ? error.message() : String.valueOf(arg);
+            throw new Bl0j_VM_Exception(message);
+        });
+        // string helpers (see NativeMethods.STR_SUB) - one allocation for the
+        // result instead of one per character the bl0jv2 version built
+        nativeMethods.put(NativeMethods.STR_SUB, (arg) -> {
+            Object[] a = nativeArgs(arg, 3, "strSub(string, from, to)");
+            String s = requireString(a[0], "strSub");
+            int from = requireInt(a[1], "strSub"), to = requireInt(a[2], "strSub");
+            if (from < 0 || to > s.length() || from > to)
+                throw new Bl0j_VM_Exception("strSub: range [" + from + ", " + to + ") is outside the string (length " + s.length() + ")");
+            return s.substring(from, to);
+        });
+        nativeMethods.put(NativeMethods.STR_FIND, (arg) -> {
+            Object[] a = nativeArgs(arg, 3, "strFind(string, sub, from)");
+            String s = requireString(a[0], "strFind"), sub = requireString(a[1], "strFind");
+            int from = requireInt(a[2], "strFind");
+            if (from < 0 || from > s.length())
+                throw new Bl0j_VM_Exception("strFind: start " + from + " is outside the string (length " + s.length() + ")");
+            return s.indexOf(sub, from);
+        });
+        nativeMethods.put(NativeMethods.STR_CHAR, (arg) -> {
+            int cp = requireInt(arg, "strChar");
+            if (!Character.isValidCodePoint(cp))
+                throw new Bl0j_VM_Exception("strChar: " + cp + " is not a Unicode code point");
+            return new String(Character.toChars(cp));
+        });
+        nativeMethods.put(NativeMethods.STR_UPPER, (arg) -> asciiCase(requireString(arg, "strUpper"), true));
+        nativeMethods.put(NativeMethods.STR_LOWER, (arg) -> asciiCase(requireString(arg, "strLower"), false));
+        nativeMethods.put(NativeMethods.STR_JOIN, (arg) -> {
+            Object[] a = nativeArgs(arg, 2, "strJoin(array, separator)");
+            if (!(a[0] instanceof Bl0jArray items))
+                throw new Bl0j_VM_Exception("strJoin: expected an array, got " + typeName(a[0]));
+            String sep = requireString(a[1], "strJoin");
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < items.length(); i++) {
+                if (i > 0) sb.append(sep);
+                sb.append(unbox(items.getRaw(i)));
+                if (sb.length() > ops.maxStringLength())
+                    throw new Bl0j_VM_Exception("string too long: strJoin would exceed " + ops.maxStringLength() + " characters");
+            }
+            return sb.toString();
+        });
+        // setTimer/setInterval(ms, vector) -> timer id; cancelTimer(id) ->
+        // true if it was still pending. Packed [ms, vector, periodic] -
+        // see Bl0jv2_Compiler's compileSetTimer. The vector's handler runs
+        // through the ordinary cooperative interrupt poll when it fires.
+        nativeMethods.put(NativeMethods.SET_TIMER, (arg) -> {
+            if (!(arg instanceof Bl0jArray args) || args.length() != 3)
+                throw new Bl0j_VM_Exception("setTimer: expected (ms, vector, periodic)");
+            if (!(unbox(args.getRaw(0)) instanceof Integer ms) || !(unbox(args.getRaw(1)) instanceof Integer vector)
+                    || !(unbox(args.getRaw(2)) instanceof Integer periodic))
+                throw new Bl0j_VM_Exception("setTimer: ms and vector must be ints");
+            return timers.start(ms, vector, periodic != 0);
+        });
+        nativeMethods.put(NativeMethods.CANCEL_TIMER, (id) -> {
+            if (!(id instanceof Integer timerId))
+                throw new Bl0j_VM_Exception("cancelTimer: timer id must be an int");
+            return timers.cancel(timerId);
+        });
         // masking is per-core state (see CoreContext.disableDepth's own
         // comment) - a counter, not a flag, so nested disable/enable pairs
         // nest safely; an unbalanced enableInterrupts() is a permissive
@@ -228,6 +311,40 @@ public final class Bl0jv2_jVM {
             ((Bl0jMutex) m).unlock();
             return null;
         });
+        nativeMethods.put(NativeMethods.NEW_EVENT, (ignored) -> new Bl0jEvent(interrupts));
+        nativeMethods.put(NativeMethods.SIGNAL_EVENT, (e) -> {
+            requireEvent(e).signal();
+            return null;
+        });
+        nativeMethods.put(NativeMethods.EVENT_GEN, (e) -> requireEvent(e).generation());
+        // waitEvent(e, gen, timeoutMs): arrives as a 3-element array (a
+        // native takes exactly one operand - see Bl0jv2_Compiler's
+        // compileWaitEvent). true = the event was signalled since the
+        // eventGen() snapshot 'gen'; false = timed out, or an interrupt this
+        // core can actually take right now is pending (return so the
+        // cooperative poll can deliver it - see Bl0jEvent's own doc on why
+        // that matters). A masked core ignores pending interrupts here, same
+        // as the poll itself does, otherwise it would spin on an interrupt
+        // it is not allowed to take. The generation is an int that wraps -
+        // only ever compared for equality, which a wrap doesn't break.
+        nativeMethods.put(NativeMethods.WAIT_EVENT, (arg) -> {
+            if (!(arg instanceof Bl0jArray args) || args.length() != 3)
+                throw new Bl0j_VM_Exception("waitEvent: expected (event, gen, timeoutMs)");
+            Bl0jEvent event = requireEvent(unbox(args.getRaw(0)));
+            Object gen = unbox(args.getRaw(1));
+            Object ms = unbox(args.getRaw(2));
+            if (!(gen instanceof Integer seenGen))
+                throw new Bl0j_VM_Exception("waitEvent: gen must be the int returned by eventGen()");
+            if (!(ms instanceof Integer timeout))
+                throw new Bl0j_VM_Exception("waitEvent: timeout must be an int (ms, negative = forever)");
+            CoreContext ctx = currentContext();
+            try {
+                return event.await(seenGen,
+                        timeout, () -> panicked || (ctx.disableDepth == 0 && interrupts.hasPending(ctx.coreId)));
+            } catch (InterruptedException e) {
+                return false;
+            }
+        });
         // one-way: lowers this core's own privilege, never raises it - see
         // CoreContext.privileged's own doc. Throws if already unprivileged,
         // the same "not held"-style strictness as Bl0jMutex.unlock(): a
@@ -253,7 +370,7 @@ public final class Bl0jv2_jVM {
         nativeMethods.put(NativeMethods.HALT_CORE, (ignored) -> {
             CoreContext ctx = currentContext();
             requirePrivileged(ctx, "haltCore");
-            while (!interrupts.hasPending() && !panicked) {
+            while (!interrupts.hasPending(ctx.coreId) && !panicked) {
                 try {
                     Thread.sleep(1);
                 } catch (InterruptedException e) {
@@ -262,103 +379,120 @@ public final class Bl0jv2_jVM {
             }
             return null;
         });
-        // loads a SEPARATE compiled (.bl0c) file from disk and runs it to
-        // completion IN THIS SAME Bl0jv2_jVM instance - same managed heap,
-        // raw memory, port space, interrupt table and cores as whatever
-        // called exec(). An earlier version of this spun up a second
-        // Bl0jv2_jVM instance per call instead; that's not how real
-        // hardware works (a real kernel loads a new process into its OWN
-        // address space, on the SAME machine - it never boots a second
-        // computer to run one program) and wouldn't port to a future
-        // non-JVM backend, which is the whole point of this VM being a
-        // reference implementation. loadRelocated() is what makes sharing
-        // possible: it appends the new program's constants/instructions to
-        // this VM's own, shifting every embedded address by however much
-        // was already there - see its own doc for exactly which operands
-        // need that and why.
+        // execMem(addr, size, mode): loads a compiled program that sits in raw
+        // memory and runs it to completion IN THIS SAME VM - same heap, raw
+        // memory, ports, interrupt table and cores as the caller. The VM never
+        // reads a host file: a kernel gets the bytes from whatever device it
+        // has (a disk, a network) and puts them in memory first. That is what
+        // makes the loader something a real machine can have.
         //
-        // Because everything really is shared now, so are the
-        // consequences: a panic() anywhere in the loaded program sets this
-        // VM's ONE 'panicked' flag, same as a panic() anywhere else - it
-        // halts the whole machine, not just "the thing that called exec()"
-        // (see execute()'s own Bl0j_VM_Panic handling, and the dedicated
-        // catch clause below that lets it through unwrapped rather than
-        // treating it as an ordinary failure). That's the correct behavior
-        // for code sharing the kernel's own privilege and address space,
-        // not a limitation: it's exactly why untrusted code has no
-        // business running with kernel privilege to begin with. An
-        // ordinary (non-panic) error still propagates as a normal,
-        // catchable Bl0j_VM_Exception, the same as any other exec()
-        // failure.
+        // The program is appended to the VM's constant pool and instruction
+        // stream with every embedded address shifted (loadRelocated(): jump
+        // targets, constant indices, FUN entry addresses, class member
+        // indices), the way a relocating loader places a program wherever
+        // there is room.
         //
-        // Runs as a nested, poll-eligible execute() call - like a worker
-        // core's own dispatched top-level task (see invokeDispatchedWork),
-        // NOT like a plain invoke(): the loaded program is a genuine new
-        // top-level task in its own right and needs the normal cooperative
-        // interrupt poll to keep running while it executes (its own
-        // registerHandler()'d keyboard/console/etc), not the "never poll
-        // inside a nested call" rule a handler body or a toString()
-        // override follows.
+        // mode 2 = a shared library: like a kernel program, but what it defines (functions and
+        // classes, by name) is exported, and programs loaded afterwards whose compiler was told
+        // the library is shared have their EXTERN constants linked to those definitions.
+        // mode 0 = a user program: it runs UNPRIVILEGED, and when it returns
+        // everything the load added is taken back out (the pool is indexed by 16
+        // bits, so programs that stayed forever would run it out after a few
+        // dozen runs) - heap entries made for its constants are freed, which
+        // means a program must not leave values behind that something else
+        // keeps. mode 1 = a kernel program (a child the boot code starts): it
+        // keeps the caller's privilege and stays loaded, since it may register
+        // handlers that point into it. Only privileged code may call this at
+        // all; a user-mode shell reaches it through a syscall.
         //
-        // Privileged: loading and running new code at the current
-        // privilege level is a kernel resource allocation, the same
-        // category as dispatch()/reserve(). Returns 0 on success; a
-        // missing/malformed file or an ordinary in-program failure both
-        // throw directly (bypassing CALL_NATIVE's generic -1 sentinel, the
-        // same way PANIC above does) with a message that actually says
-        // which, instead of the generic "native method N returned error"
-        // every other native's failure shares.
-        nativeMethods.put(NativeMethods.EXEC, (pathObj) -> {
-            CoreContext ctx = currentContext();
-            requirePrivileged(ctx, "exec");
-            String path = String.valueOf(pathObj);
-
-            byte[] fileBytes;
-            try {
-                fileBytes = Files.readAllBytes(Path.of(path));
-            } catch (IOException e) {
-                throw new Bl0j_VM_Exception("exec: cannot read '" + path + "': " + e.getMessage());
-            }
-
-            int entryAddr;
-            int registersLength;
-            try {
-                int[] loaded = loadRelocated(fileBytes);
-                entryAddr = loaded[0] * C.INSTR_WIDTH;
-                registersLength = loaded[1];
-            } catch (Bl0j_VM_Exception e) {
-                throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': " + e.getMessage());
-            }
-
-            int stackDepthBefore = ctx.callStack.size();
-            boolean privilegedBefore = ctx.privileged;
-            ctx.callStack.push(new Frame(new long[registersLength], -1, -1));
-            try {
-                execute(entryAddr, stackDepthBefore, true);
-                return 0;
-            } catch (Bl0j_VM_Panic e) {
-                // never wrapped, never treated as an ordinary failure -
-                // propagates exactly as if panic() had been called
-                // directly here, see this method's own doc on why
-                throw e;
-            } catch (Bl0j_VM_Exception | IOException e) {
-                throw new Bl0j_VM_Exception("exec: '" + path + "' failed: " + e.getMessage());
-            } finally {
-                while (ctx.callStack.size() > stackDepthBefore)
-                    ctx.callStack.pop();
-                // a loaded program that called dropToUserMode() (aeon-os's
-                // own shell.bl0 does - see its own doc) must not leave the
-                // CALLER permanently de-privileged: this core's
-                // ctx.privileged is one flag shared across the whole call
-                // stack, not scoped per-frame, so without restoring it here
-                // the kernel that exec()'d a child would itself be stuck in
-                // user mode for everything it does afterward, the same IRET
-                // ("privilege restored to whatever it was before", not
-                // unconditionally reset to kernel) rule invokeAsTrap()
-                // already applies to interrupt/syscall handlers
-                ctx.privileged = privilegedBefore;
-            }
+        // A panic() inside the program halts the whole machine (one shared
+        // 'panicked' flag); any other error is an ordinary catchable error at
+        // the call. Returns 0.
+        nativeMethods.put(NativeMethods.EXEC_MEM, (arg) -> {
+            requirePrivileged(currentContext(), "execMem");
+            Object[] a = nativeArgs(arg, 3, "execMem(addr, size, mode)");
+            int addr = requireInt(a[0], "execMem"), size = requireInt(a[1], "execMem");
+            int mode = requireInt(a[2], "execMem");
+            if (size <= 0)
+                throw new Bl0j_VM_Exception("execMem: size must be positive");
+            if (mode < 0 || mode > 2)
+                throw new Bl0j_VM_Exception("execMem: mode must be 0 (user program), 1 (kernel program) or 2 (shared library)");
+            byte[] fileBytes = new byte[size];
+            rawMemory.readBytes(addr, fileBytes);
+            return execBytes(fileBytes, "memory at " + addr, mode);
         });
+    }
+
+    // loads and runs a compiled program in this VM (see the exec() doc above);
+    // 'label' only names it in error messages
+    private Object execBytes(byte[] fileBytes, String path, int mode) {
+        boolean unprivileged = mode == 0;
+        CoreContext ctx = currentContext();
+        long[] constsBefore = consts;
+        int[] symbolsBefore = constSymbols;
+        byte[] instructionsBefore = instructions;
+        int entryAddr;
+        int registersLength;
+        try {
+            int[] loaded = loadRelocated(fileBytes);
+            entryAddr = loaded[0] * C.INSTR_WIDTH;
+            registersLength = loaded[1];
+        } catch (Bl0j_VM_Exception e) {
+            throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': " + e.getMessage());
+        }
+        if (mode == 2) {
+            // a shared library: what it defines becomes linkable by the programs loaded after it
+            for (Object[] defined : definedNames) {
+                String name = (String) defined[0];
+                if (exports.containsKey(name))
+                    throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': it defines '" + name + "', which another shared library already exports");
+            }
+            for (Object[] defined : definedNames) exports.put((String) defined[0], (Long) defined[1]);
+        }
+
+        int stackDepthBefore = ctx.callStack.size();
+        boolean privilegedBefore = ctx.privileged;
+        ctx.callStack.push(new Frame(newRegisters(registersLength), -1, -1));
+        if (unprivileged) ctx.privileged = false;
+        try {
+            execute(entryAddr, stackDepthBefore, true);
+            return 0;
+        } catch (Bl0j_VM_Panic e) {
+            // never wrapped, never treated as an ordinary failure -
+            // propagates exactly as if panic() had been called
+            // directly here, see this method's own doc on why
+            throw e;
+        } catch (Bl0j_VM_Exception | IOException e) {
+            throw new Bl0j_VM_Exception("exec: '" + path + "' failed: " + e.getMessage());
+        } finally {
+            while (ctx.callStack.size() > stackDepthBefore)
+                ctx.callStack.pop();
+            // a loaded program that called dropToUserMode() (aeon-os's
+            // own shell.bl0 does - see its own doc) must not leave the
+            // CALLER permanently de-privileged: this core's
+            // ctx.privileged is one flag shared across the whole call
+            // stack, not scoped per-frame, so without restoring it here
+            // the kernel that exec()'d a child would itself be stuck in
+            // user mode for everything it does afterward, the same IRET
+            // ("privilege restored to whatever it was before", not
+            // unconditionally reset to kernel) rule invokeAsTrap()
+            // already applies to interrupt/syscall handlers
+            ctx.privileged = privilegedBefore;
+            // a user program leaves nothing loaded behind (see EXEC_MEM's doc). Not
+            // with several cores running: another core may be executing code
+            // out of the pool this would shrink.
+            if (unprivileged && coreCount == 1 && consts != constsBefore) {
+                for (int i = constsBefore.length; i < consts.length; i++) {
+                    long v = consts[i];
+                    if (NanBox.isBoxed(v) && NanBox.tagOf(v) == NanBox.TAG_REF && !externConsts.get(i))
+                        heap.free(NanBox.asRefIndex(v));
+                }
+                externConsts.clear(constsBefore.length, consts.length);
+                consts = constsBefore;
+                constSymbols = symbolsBefore;
+                instructions = instructionsBefore;
+            }
+        }
     }
 
     private static double toDouble(Object numeric) {
@@ -378,8 +512,14 @@ public final class Bl0jv2_jVM {
     public static boolean valuesEqual(Object left, Object right) {
         if (isNumeric(left) && isNumeric(right))
             return toDouble(left) == toDouble(right);
-        if (left instanceof Bl0jInstance li && li.cls.hasMethod("equals")) {
-            Object result = li.owner.invoke(li.cls.method("equals"), li.owner.box(li), li.owner.box(right));
+        // s[i] is a char and 'a' is a string, but a one-character string and
+        // that character are the same thing to a program: s[0] == 'a'
+        if (left instanceof Character lc && right instanceof String rs)
+            return rs.length() == 1 && rs.charAt(0) == lc;
+        if (left instanceof String ls && right instanceof Character rc)
+            return ls.length() == 1 && ls.charAt(0) == rc;
+        if (left instanceof Bl0jInstance li && li.cls.equalsMethod() != null) {
+            Object result = li.owner.invoke(li.cls.equalsMethod(), li.owner.box(li), li.owner.box(right));
             return result instanceof Boolean b && b;
         }
         return Objects.equals(left, right);
@@ -404,6 +544,52 @@ public final class Bl0jv2_jVM {
         if (target instanceof Bl0jArray arr)
             return arr;
         throw new Bl0j_VM_Exception("expected an array, got " + target.getClass().getSimpleName());
+    }
+
+    private static final int COMPARE_LESS = 0, COMPARE_GREATER = 1, COMPARE_LESS_EQ = 2, COMPARE_GREATER_EQ = 3;
+
+    // a < b, a > b, a <= b, a >= b. Ints and doubles compare numerically (a
+    // NaN on either side makes every one of the four false, as in IEEE754);
+    // strings and chars compare by character order; anything else is an
+    // error naming both types rather than a ClassCastException.
+    private boolean compare(long lbits, long rbits, int kind) {
+        if (NanBox.isInt(lbits) && NanBox.isInt(rbits)) {
+            int l = NanBox.asInt(lbits), r = NanBox.asInt(rbits);
+            return switch (kind) {
+                case COMPARE_LESS -> l < r;
+                case COMPARE_GREATER -> l > r;
+                case COMPARE_LESS_EQ -> l <= r;
+                default -> l >= r;
+            };
+        }
+        Object lo = unbox(lbits), ro = unbox(rbits);
+        if (isNumeric(lo) && isNumeric(ro)) {
+            double l = toDouble(lo), r = toDouble(ro);
+            return switch (kind) {
+                case COMPARE_LESS -> l < r;
+                case COMPARE_GREATER -> l > r;
+                case COMPARE_LESS_EQ -> l <= r;
+                default -> l >= r;
+            };
+        }
+        if ((lo instanceof String || lo instanceof Character) && (ro instanceof String || ro instanceof Character)) {
+            int order = lo.toString().compareTo(ro.toString());
+            return switch (kind) {
+                case COMPARE_LESS -> order < 0;
+                case COMPARE_GREATER -> order > 0;
+                case COMPARE_LESS_EQ -> order <= 0;
+                default -> order >= 0;
+            };
+        }
+        throw new Bl0j_VM_Exception("cannot compare " + typeName(lo) + " with " + typeName(ro));
+    }
+
+    // a condition, '!' operand, ... must be a bool - 'if (5)' and 'while
+    // (nil)' are errors, not truthiness
+    private boolean truth(long bits, String what) {
+        if (NanBox.isBool(bits))
+            return NanBox.asBoolean(bits);
+        throw new Bl0j_VM_Exception(what + " must be a bool, got " + typeName(unbox(bits)));
     }
 
     private static int bitNot(Object value) {
@@ -462,8 +648,94 @@ public final class Bl0jv2_jVM {
         if (value instanceof Bl0jClass) return "class";
         if (value instanceof Bl0jInstance instance) return instance.cls.name;
         if (value instanceof Bl0jMutex) return "mutex";
+        if (value instanceof Bl0jEvent) return "event";
         if (value == NIL_OBJECT) return "nil";
         throw new Bl0j_VM_Exception("unknown type: " + value.getClass().getSimpleName());
+    }
+
+    // the receiver of a field/method access must be a class instance;
+    // anything else (nil above all - an uninitialised or failed lookup) gets
+    // a message naming the member, not a Java ClassCastException
+    // "A.inc expects 0 arguments, got 1" - counts only what the caller
+    // wrote: a closure's captured cells and a method's 'this' are implicit
+    private static Bl0j_VM_Exception arityError(FunDef fun, int captured, int passed) {
+        int implicit = fun.receiver() ? 1 : 0;
+        int expected = fun.arity() - captured - implicit;
+        int got = passed - implicit;
+        String name = fun.name().startsWith("<lambda") ? "lambda" : "function " + fun.name();
+        return new Bl0j_VM_Exception(name + " expects " + expected + " argument" + (expected == 1 ? "" : "s") + ", got " + got);
+    }
+
+    private Bl0jInstance requireInstance(long bits, String action, int nameConst) {
+        Object value = unbox(bits);
+        if (value instanceof Bl0jInstance instance)
+            return instance;
+        throw new Bl0j_VM_Exception("cannot " + action + " '" + unbox(consts[nameConst]) + "' on " + typeName(value));
+    }
+
+    private Bl0j_VM_Exception noSuchMember(Bl0jClass cls, String kind, int nameConst) {
+        return new Bl0j_VM_Exception("class " + cls.name + " has no " + kind + " '" + unbox(consts[nameConst]) + "'");
+    }
+
+    // the packed argument array of a multi-argument native (see
+    // Bl0jv2_Compiler.compileValueNative), unboxed
+    private Object[] nativeArgs(Object arg, int count, String signature) {
+        if (!(arg instanceof Bl0jArray packed) || packed.length() != count)
+            throw new Bl0j_VM_Exception("expected " + signature);
+        Object[] values = new Object[count];
+        for (int i = 0; i < count; i++)
+            values[i] = unbox(packed.getRaw(i));
+        return values;
+    }
+
+    private static String requireString(Object value, String function) {
+        if (value instanceof String s)
+            return s;
+        if (value instanceof Character c)
+            return c.toString();
+        throw new Bl0j_VM_Exception(function + ": expected a string, got " + typeName(value));
+    }
+
+    private static int requireInt(Object value, String function) {
+        if (value instanceof Integer i)
+            return i;
+        throw new Bl0j_VM_Exception(function + ": expected an int, got " + typeName(value));
+    }
+
+    // only a-z / A-Z are changed - the same set the bl0jv2 Case library
+    // handled - so results don't depend on the JVM's locale or Unicode tables
+    private static String asciiCase(String s, boolean upper) {
+        char[] chars = s.toCharArray();
+        for (int i = 0; i < chars.length; i++) {
+            char c = chars[i];
+            if (upper && c >= 'a' && c <= 'z') chars[i] = (char) (c - 32);
+            else if (!upper && c >= 'A' && c <= 'Z') chars[i] = (char) (c + 32);
+        }
+        return new String(chars);
+    }
+
+    // one permanent heap entry per distinct word ("int", "true", "nil", ...),
+    // shared by every call that wants it - see TO_STRING/TYPE_OF. Cleared when a
+    // new program replaces the heap.
+    private final Map<String, Long> internedStrings = new HashMap<>();
+
+    // what the shared libraries loaded so far define, by name: the values (boxed FunDefs and
+    // classes) that an EXTERN constant of a later program is replaced with
+    private final Map<String, Long> exports = new HashMap<>();
+    // constants of the pool that were linked to a library's own function or class: they belong
+    // to the library, so unloading a program must not free them
+    private final java.util.BitSet externConsts = new java.util.BitSet();
+    // functions and classes the file being loaded defines, collected by loadConstants
+    private final java.util.List<Object[]> definedNames = new java.util.ArrayList<>();
+
+    private synchronized long internedString(String text) {
+        return internedStrings.computeIfAbsent(text, this::boxRef);
+    }
+
+    private static Bl0jEvent requireEvent(Object value) {
+        if (value instanceof Bl0jEvent e)
+            return e;
+        throw new Bl0j_VM_Exception("expected an event, got " + (value == null ? "nil" : value.getClass().getSimpleName()));
     }
 
     private String readLine() {
@@ -474,6 +746,89 @@ public final class Bl0jv2_jVM {
                 return stdin.readLine(); // null on EOF
             } catch (IOException e) {
                 throw new Bl0j_VM_Exception("read failed: " + e.getMessage());
+            }
+        }
+    }
+
+    // reads 'count' constants from the file into target[constOffset ..]
+    // (shared by feed_compiled_file(), where both offsets are 0, and
+    // loadRelocated(), where a later program is appended to this VM's own
+    // pool). Every index stored INSIDE a constant (a class's field default
+    // and method FunDef) is local to the file being loaded, so it is shifted
+    // by constOffset; a FUN constant's own entry address is an instruction
+    // index local to the file, shifted by instrOffset.
+    //
+    // targetSymbols[i] is the interned symbol id of constant i when it is a
+    // string (-1 otherwise): GET_FIELD/SET_FIELD/LOOKUP_METHOD name their
+    // member by a string constant's index, and a class finds the member by
+    // symbol id, so this is the one array read that connects the two.
+    private void loadConstants(ByteBuffer bytes, int count, long[] target, int[] targetSymbols,
+                               int constOffset, int instrOffset) {
+        for (int i = 0; i < count; i++) {
+            int idx = constOffset + i;
+            targetSymbols[idx] = -1;
+            byte type = bytes.get();
+            switch (type) {
+                case Constants.INT -> target[idx] = NanBox.ofInt(bytes.getInt());
+                case Constants.STRING -> {
+                    String str = get_str(bytes);
+                    target[idx] = boxRef(str);
+                    targetSymbols[idx] = symbols.intern(str);
+                }
+                case Constants.BOOL -> target[idx] = NanBox.ofBoolean(bytes.get() != 0);
+                case Constants.EXTERN -> {
+                    String name = get_str(bytes);
+                    Long linked = exports.get(name);
+                    if (linked == null)
+                        throw new Bl0j_VM_Exception("unresolved external '" + name + "': no loaded library defines it");
+                    target[idx] = linked;
+                    externConsts.set(idx);
+                }
+                case Constants.FUN -> {
+                    FunDef def = new FunDef(
+                            get_str(bytes),
+                            (bytes.getInt() & 0xFFFF) + instrOffset,
+                            bytes.getShort(),
+                            bytes.getShort(),
+                            bytes.get() != 0);
+                    target[idx] = boxRef(def);
+                    if (!def.name().startsWith("<lambda")) definedNames.add(new Object[]{def.name(), target[idx]});
+                }
+                case Constants.BYTE -> target[idx] = NanBox.ofInt(bytes.get());
+                case Constants.FLOAT -> target[idx] = Double.doubleToLongBits(bytes.getDouble());
+                // methods are always registered (and thus loaded) before
+                // the class itself, so target[methodConstIdx] is already
+                // populated whenever we get here - see ClassDef's javadoc
+                case Constants.CLASS -> {
+                    String className = get_str(bytes);
+                    int fieldCount = bytes.getShort() & 0xFFFF;
+                    String[] fieldNames = new String[fieldCount];
+                    int[] fieldSymbols = new int[fieldCount];
+                    long[] fieldDefaults = new long[fieldCount];
+                    Arrays.fill(fieldDefaults, NanBox.NIL);
+                    for (int f = 0; f < fieldCount; f++) {
+                        fieldNames[f] = get_str(bytes);
+                        fieldSymbols[f] = symbols.intern(fieldNames[f]);
+                        if (bytes.get() != 0) // hasDefault
+                            fieldDefaults[f] = target[constOffset + (bytes.getShort() & 0xFFFF)];
+                    }
+                    int methodCount = bytes.getShort() & 0xFFFF;
+                    String[] methodNames = new String[methodCount];
+                    int[] methodSymbols = new int[methodCount];
+                    FunDef[] methodDefs = new FunDef[methodCount];
+                    long[] methodRefs = new long[methodCount];
+                    for (int m = 0; m < methodCount; m++) {
+                        methodNames[m] = get_str(bytes);
+                        methodSymbols[m] = symbols.intern(methodNames[m]);
+                        methodRefs[m] = target[constOffset + (bytes.getShort() & 0xFFFF)];
+                        methodDefs[m] = (FunDef) unbox(methodRefs[m]);
+                    }
+                    int staticFieldCount = bytes.getShort() & 0xFFFF;
+                    target[idx] = boxRef(new Bl0jClass(className, fieldNames, fieldSymbols, fieldDefaults,
+                            methodNames, methodSymbols, methodDefs, methodRefs, staticFieldCount));
+                    definedNames.add(new Object[]{className, target[idx]});
+                }
+                default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
             }
         }
     }
@@ -491,8 +846,8 @@ public final class Bl0jv2_jVM {
             throw new Bl0j_VM_Exception("Incompatible Bl0jv2_jVM version: [ " + C.VERSION + " != " + version+" ]");
         }
 
-        short constants_length = bytes.getShort();
-        short registers_length = bytes.getShort();
+        int constants_length = bytes.getShort() & 0xFFFF;
+        int registers_length = bytes.getShort() & 0xFFFF;
 
         // seeds core 0's context specifically - feed_compiled_file() is
         // always called from the "main" thread, which is exactly the
@@ -501,55 +856,24 @@ public final class Bl0jv2_jVM {
         CoreContext ctx = currentContext();
         ctx.callStack.clear();
         heap.clear();
-        freeHeapSlots.clear();
+        synchronized (this) {
+            internedStrings.clear();
+        }
         ctx.handlerStack.clear();
-        ctx.callStack.add(new Frame(new long[registers_length], -1, -1));
+        exports.clear();
+        externConsts.clear();
+        definedNames.clear();
+        ctx.callStack.add(new Frame(newRegisters(registers_length), -1, -1));
         consts = new long[constants_length];
 
         rawMemory.reset();
+        timers.cancelAll();
         interrupts.reset();
         programStartNanos = System.nanoTime();
 
-        for (int i = 0; i < constants_length; i++) {
-            byte type = bytes.get();
-            switch (type) {
-                case Constants.INT -> consts[i] = NanBox.ofInt(bytes.getInt());
-                case Constants.STRING -> consts[i] = boxRef(get_str(bytes));
-                case Constants.BOOL -> consts[i] = NanBox.ofBoolean(bytes.get() != 0);
-                case Constants.FUN -> consts[i] = boxRef(new FunDef(
-                        get_str(bytes),
-                        bytes.getInt() & 0xFFFF,
-                        bytes.getShort(),
-                        bytes.getShort()));
-                case Constants.BYTE -> consts[i] = NanBox.ofInt(bytes.get());
-                case Constants.FLOAT -> consts[i] = Double.doubleToLongBits(bytes.getDouble());
-                // methods are always registered (and thus loaded) before
-                // the class itself, so consts[methodConstIdx] is already
-                // populated whenever we get here - see ClassDef's javadoc
-                case Constants.CLASS -> {
-                    String className = get_str(bytes);
-                    int fieldCount = bytes.getShort() & 0xFFFF;
-                    List<String> fieldNames = new ArrayList<>();
-                    long[] fieldDefaults = new long[fieldCount];
-                    Arrays.fill(fieldDefaults, NanBox.NIL);
-                    for (int f = 0; f < fieldCount; f++) {
-                        fieldNames.add(get_str(bytes));
-                        if (bytes.get() != 0) // hasDefault
-                            fieldDefaults[f] = consts[bytes.getShort() & 0xFFFF];
-                    }
-                    int methodCount = bytes.getShort() & 0xFFFF;
-                    Map<String, FunDef> methods = new HashMap<>();
-                    for (int m = 0; m < methodCount; m++) {
-                        String methodName = get_str(bytes);
-                        int methodConstIdx = bytes.getShort() & 0xFFFF;
-                        methods.put(methodName, (FunDef) unbox(consts[methodConstIdx]));
-                    }
-                    int staticFieldCount = bytes.getShort() & 0xFFFF;
-                    consts[i] = boxRef(new Bl0jClass(className, fieldNames, fieldDefaults, methods, staticFieldCount));
-                }
-                default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
-            }
-        }
+        symbols.clear();
+        constSymbols = new int[constants_length];
+        loadConstants(bytes, constants_length, consts, constSymbols, 0, 0);
 
         int remaining = bytes.remaining();
 
@@ -600,57 +924,17 @@ public final class Bl0jv2_jVM {
         if (version != C.VERSION)
             throw new Bl0j_VM_Exception("Incompatible Bl0jv2_jVM version: [ " + C.VERSION + " != " + version + " ]");
 
-        short constants_length = bytes.getShort();
-        short registers_length = bytes.getShort();
+        int constants_length = bytes.getShort() & 0xFFFF;
+        int registers_length = bytes.getShort() & 0xFFFF;
 
         int constOffset = consts.length;
         int instrOffset = instructions.length / C.INSTR_WIDTH;
+        definedNames.clear();
+        externConsts.clear(constOffset, constOffset + constants_length);   // a failed earlier load may have left marks here
 
         long[] newConsts = Arrays.copyOf(consts, consts.length + constants_length);
-
-        for (int i = 0; i < constants_length; i++) {
-            byte type = bytes.get();
-            switch (type) {
-                case Constants.INT -> newConsts[constOffset + i] = NanBox.ofInt(bytes.getInt());
-                case Constants.STRING -> newConsts[constOffset + i] = boxRef(get_str(bytes));
-                case Constants.BOOL -> newConsts[constOffset + i] = NanBox.ofBoolean(bytes.get() != 0);
-                // + instrOffset: this function's own entry address, an
-                // instruction index local to the file being loaded
-                case Constants.FUN -> newConsts[constOffset + i] = boxRef(new FunDef(
-                        get_str(bytes),
-                        (bytes.getInt() & 0xFFFF) + instrOffset,
-                        bytes.getShort(),
-                        bytes.getShort()));
-                case Constants.BYTE -> newConsts[constOffset + i] = NanBox.ofInt(bytes.get());
-                case Constants.FLOAT -> newConsts[constOffset + i] = Double.doubleToLongBits(bytes.getDouble());
-                case Constants.CLASS -> {
-                    String className = get_str(bytes);
-                    int fieldCount = bytes.getShort() & 0xFFFF;
-                    List<String> fieldNames = new ArrayList<>();
-                    long[] fieldDefaults = new long[fieldCount];
-                    Arrays.fill(fieldDefaults, NanBox.NIL);
-                    for (int f = 0; f < fieldCount; f++) {
-                        fieldNames.add(get_str(bytes));
-                        // + constOffset: the default value's own index,
-                        // local to the file being loaded
-                        if (bytes.get() != 0)
-                            fieldDefaults[f] = newConsts[constOffset + (bytes.getShort() & 0xFFFF)];
-                    }
-                    int methodCount = bytes.getShort() & 0xFFFF;
-                    Map<String, FunDef> methods = new HashMap<>();
-                    for (int m = 0; m < methodCount; m++) {
-                        String methodName = get_str(bytes);
-                        // + constOffset: same reasoning as the field
-                        // default above
-                        int methodConstIdx = constOffset + (bytes.getShort() & 0xFFFF);
-                        methods.put(methodName, (FunDef) unbox(newConsts[methodConstIdx]));
-                    }
-                    int staticFieldCount = bytes.getShort() & 0xFFFF;
-                    newConsts[constOffset + i] = boxRef(new Bl0jClass(className, fieldNames, fieldDefaults, methods, staticFieldCount));
-                }
-                default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
-            }
-        }
+        int[] newConstSymbols = Arrays.copyOf(constSymbols, consts.length + constants_length);
+        loadConstants(bytes, constants_length, newConsts, newConstSymbols, constOffset, instrOffset);
 
         int remaining = bytes.remaining();
         if (remaining % C.INSTR_WIDTH != 0)
@@ -671,27 +955,15 @@ public final class Bl0jv2_jVM {
                 // sits in 'a', a register, never relocated)
                 case OpCodes.LOAD_CONST, OpCodes.GET_FIELD, OpCodes.LOOKUP_METHOD ->
                         relocateOperand(newInstructions, addr + 3, constOffset);
-                // SET_FIELD's own 'b' is a register, not a direct operand -
-                // it holds a field name's const-pool index packed there by
-                // a SET two instructions earlier (compileAssign's own
-                // fixed SET;MOV;SET_FIELD emission, nothing else in
-                // between - see its own comment), NOT by LOAD_CONST, so
-                // it's invisible to the case above. SET's own immediate
-                // otherwise means a plain literal (POKE/PORT_OUT widths)
-                // or a per-class field index (SET_STATIC_FIELD) that must
-                // NOT be relocated, so this has to be keyed off SET_FIELD
-                // specifically, not off every SET
-                case OpCodes.SET_FIELD -> {
-                    int setAddr = addr - 2 * C.INSTR_WIDTH;
-                    if (setAddr >= instructions.length && newInstructions[setAddr] == OpCodes.SET)
-                        relocateOperand(newInstructions, setAddr + 3, constOffset);
-                }
+                // SET_FIELD's own field name is operand 'c'
+                case OpCodes.SET_FIELD -> relocateOperand(newInstructions, addr + 5, constOffset);
                 default -> { }
             }
         }
 
         int entryAddr = instrOffset;
         consts = newConsts;
+        constSymbols = newConstSymbols;
         instructions = newInstructions;
         return new int[]{entryAddr, registers_length};
     }
@@ -720,8 +992,80 @@ public final class Bl0jv2_jVM {
 
     // takes effect on the next boxRef() call - no need to call this before
     // feed_compiled_file() the way set_max_raw_bytes() does
+    /** longest string (in chars) a '+' or '*' may produce - default 64M; beyond it the operation is an error */
+    public void set_max_string_length(int chars) {
+        ops.setMaxStringLength(chars);
+    }
+
+    // ---- recursion limits ----
+    //
+    // Each bl0jv2 call pushes a frame (a heap-allocated long[]), so runaway
+    // recursion used to run until the JVM died; and a native that calls back
+    // into bl0jv2 (printing an instance calls its toString(), == calls
+    // equals(), interrupt handlers) recurses on the JAVA stack too. Both are
+    // now ordinary, catchable errors.
+    private volatile int maxCallDepth = 100_000;
+    private static final int MAX_NESTED_INVOKES = 200;
+
+    /** how many bl0jv2 calls may be active at once on one core (default 100000) */
+    public void set_max_call_depth(int depth) {
+        this.maxCallDepth = depth;
+    }
+
+    private static Bl0j_VM_Exception stackOverflow(int limit) {
+        return new Bl0j_VM_Exception("stack overflow: call depth limit (" + limit + ") exceeded");
+    }
+
+    // ---- garbage collection ----
+    //
+    // OFF by default - the language's model is manual free(); this is an
+    // opt-in safety net for hosts (set_gc_enabled(true)).
+    //
+    // Heap slots used to be reclaimed only by an explicit free(), so a plain
+    // loop building strings ('s = s + x') kept every intermediate string
+    // forever - quadratic memory for a linear job. The VM now also collects
+    // on its own: mark-and-sweep from the constant pool, the call stack's
+    // registers and the registered interrupt handlers (see Collector).
+    //
+    // It runs ONLY here, at an instruction boundary of the program's own
+    // top-level run, and ONLY on a single-core machine. Both limits are what
+    // make it exact: at that point every live value sits in a register, the
+    // heap or the constant pool - no native method is half-way through
+    // holding a reference in a Java local - and no other core can be using a
+    // value the collector doesn't see. With more than one core (or while a
+    // nested handler/toString runs) it simply doesn't run: explicit free()
+    // and set_max_heap_entries() remain the tools there.
+    private volatile boolean gcEnabled = false;
+    private long collections;
+
+    private void collectGarbage(CoreContext ctx) {
+        Collector collector = new Collector(heap);
+        collector.markValues(consts);
+        for (Frame frame : ctx.callStack)
+            collector.markValues(frame.regs());
+        interrupts.forEachHandlerFn(collector::markObject);
+        collector.drain();
+        collector.sweep();
+        collections++;
+    }
+
+    /** turns automatic collection on/off (default OFF: memory is released with free()); explicit free() is unaffected either way */
+    public void set_gc_enabled(boolean enabled) {
+        this.gcEnabled = enabled;
+    }
+
+    /** how much allocation (estimated bytes) makes the VM collect once enabled; default 64 MB */
+    public void set_gc_threshold_bytes(long bytes) {
+        heap.setCollectThresholdBytes(bytes);
+    }
+
+    /** number of automatic collections performed so far */
+    public long gc_collections() {
+        return collections;
+    }
+
     public void set_max_heap_entries(long maxHeapEntries){
-        this.maxHeapEntries = maxHeapEntries;
+        heap.setMaxEntries(maxHeapEntries);
     }
 
     // must be called before feed_compiled_file(), which is what actually
@@ -768,6 +1112,54 @@ public final class Bl0jv2_jVM {
     // a bridge thread polls this directly (a sequence-number port bl0jv2
     // code bumps on every new write is the usual way to tell a fresh write
     // apart from re-reading stale data - see nic.bl0's own TX port layout).
+    // attaches the disk behind the controller ports (see DiskController);
+    // null detaches it
+    public void attach_disk(BlockDevice device) {
+        disk.attach(device);
+    }
+
+    // attaches a host folder behind the share ports (see ShareController); null detaches it
+    public void attach_share(HostShare folder) {
+        share.attach(folder);
+    }
+
+    // a guest port read: a device that claims the port answers, otherwise the stored value
+    private long portRead(int port, int widthBytes) {
+        for (PortDevice device : devices)
+            if (device.claimsRead(port)) return device.read(port, widthBytes);
+        return portIO.read(port, widthBytes);
+    }
+
+    /** the terminal sent these bytes: they go through the UART's receiver, which interrupts vector 2 */
+    public void uart_receive(byte[] bytes) {
+        uart.receive(bytes);
+    }
+
+    /** the UART's transmit speed in bits per second; 0 (the default) sends instantly */
+    public void set_uart_baud(int baud) {
+        uart.setBaud(baud);
+    }
+
+    /** with flow control (the default) the receiver holds bytes back while its FIFO is full; without, they are lost */
+    public void set_uart_flow_control(boolean on) {
+        uart.setFlowControl(on);
+    }
+
+    /** attaches a text-mode display (see DisplayController): the guest finds it by reading the present port */
+    public void attach_display() {
+        display.attach();
+    }
+
+    /** what the display shows now; null if none is attached */
+    public DisplayController.Frame display_frame() {
+        return display.frame();
+    }
+
+    /** the screen size the display reports to the guest (default 80x24) */
+    public void set_console_size(int columns, int rows) {
+        display.setSize(columns, rows);
+    }
+
     public long hostPortRead(int port, int widthBytes) {
         return portIO.read(port, widthBytes);
     }
@@ -877,7 +1269,9 @@ public final class Bl0jv2_jVM {
     private ResolvedCallee resolveCallee(Object callee) {
         if (callee instanceof Bl0jClosure closure)
             return new ResolvedCallee(closure.funDef(), closure.capturedCells());
-        return new ResolvedCallee((FunDef) callee, EMPTY_CELLS);
+        if (callee instanceof FunDef fun)
+            return new ResolvedCallee(fun, EMPTY_CELLS);
+        throw new Bl0j_VM_Exception("cannot call " + typeName(callee) + " - not a function");
     }
 
     // synchronously calls a bl0jv2 function from native Java code (used by
@@ -913,7 +1307,16 @@ public final class Bl0jv2_jVM {
         FunDef fun = resolved.fun();
         long[] capturedCells = resolved.capturedCells();
 
-        long[] regs = new long[fun.regs()];
+        // interrupt handlers, dispatch() tasks, toString()/equals() are all
+        // called from Java with a fixed argument list - a callee declared
+        // with a different parameter count is a program error to report,
+        // not something to run with missing or ignored arguments
+        if (fun.arity() - capturedCells.length != args.length)
+            throw arityError(fun, capturedCells.length, args.length);
+        if (ctx.callStack.size() >= maxCallDepth || ctx.invokeDepth >= MAX_NESTED_INVOKES)
+            throw stackOverflow(ctx.callStack.size() >= maxCallDepth ? maxCallDepth : MAX_NESTED_INVOKES);
+
+        long[] regs = newRegisters(fun.regs());
         for (int i = 0; i < capturedCells.length; i++)
             regs[i + 1] = capturedCells[i];
         for (int i = 0; i < args.length; i++)
@@ -922,10 +1325,13 @@ public final class Bl0jv2_jVM {
         // never assigned to a real variable by the compiler (regIndex
         // starts at 1), so it's free scratch space for exactly this
         ctx.callStack.push(new Frame(regs, -1, 0));
+        ctx.invokeDepth++;
         try {
             execute(fun.address() * C.INSTR_WIDTH, stopAtDepth, pollEligible);
         } catch (IOException e) {
             throw new Bl0j_VM_Exception("invoke failed: " + e.getMessage());
+        } finally {
+            ctx.invokeDepth--;
         }
         return unbox(ctx.callStack.peek().regs()[0]);
     }
@@ -983,6 +1389,13 @@ public final class Bl0jv2_jVM {
 
             int sinceLastPoll = 0;
 
+            // the running frame's registers, kept in a local instead of being
+            // looked up on the call stack for every instruction. It must be
+            // refreshed wherever the top frame changes: CALL, RETURN, and an
+            // exception unwinding to a handler (a nested invoke() always restores
+            // the stack to where it was, so it needs nothing)
+            long[] reg = ctx.callStack.peek().regs();
+
             for(int addr = startAddr; addr < instructions.length;){
                 try {
 
@@ -1000,8 +1413,10 @@ public final class Bl0jv2_jVM {
                     // exactly) - only the actual delivery attempt is
                     // skipped while this core is masked, so a pending
                     // interrupt stays queued rather than being dropped
+                    if (heap.collectWanted() && gcEnabled && coreCount == 1)
+                        collectGarbage(ctx);
                     if (ctx.disableDepth == 0) {
-                        InterruptController.Fired fired = interrupts.pollNext();
+                        InterruptController.Fired fired = interrupts.pollNext(ctx.coreId);
                         if (fired != null)
                             invokeAsTrap(fired.handlerFn(), NanBox.ofInt(fired.vector()));
                     }
@@ -1011,37 +1426,78 @@ public final class Bl0jv2_jVM {
 
                 int a = ((instructions[addr+1] & 0xFF) << 8) | (instructions[addr+2] & 0xFF);
                 int b = ((instructions[addr+3] & 0xFF) << 8) | (instructions[addr+4] & 0xFF);
+                int c = ((instructions[addr+5] & 0xFF) << 8) | (instructions[addr+6] & 0xFF);
                 addr += C.INSTR_WIDTH;
-
-                long[] reg = ctx.callStack.peek().regs();
 
                 switch (opcode) {
                     case OpCodes.LOAD_NIL -> reg[a] = NanBox.NIL;
                     case OpCodes.LOAD_CONST -> reg[a] = consts[b];
 
-                    case OpCodes.LR_ADD -> reg[a] = box(ops.add.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_SUB -> reg[a] = box(ops.sub.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_MUL -> reg[a] = box(ops.mul.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_DIV -> reg[a] = box(ops.div.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_REM -> reg[a] = box(ops.rem.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_POW -> reg[a] = box(ops.pow.calculate(unbox(reg[a]), unbox(reg[b])));
+                    // binary operators are three-operand: reg[c] = reg[a] OP reg[b]
+                    // (no copy of the left operand into the destination first).
+                    // int/int and double/double are decoded straight from the
+                    // NaN-boxed bits - no Object is allocated and no operator
+                    // table consulted; everything else (strings, mixed
+                    // int/double, errors) takes the general path below
+                    case OpCodes.LR_ADD -> {
+                        long x = reg[a], y = reg[b];
+                        if (NanBox.isInt(x) && NanBox.isInt(y))
+                            reg[c] = NanBox.ofInt(NanBox.asInt(x) + NanBox.asInt(y));
+                        else if (NanBox.isDouble(x) && NanBox.isDouble(y))
+                            reg[c] = Double.doubleToLongBits(Double.longBitsToDouble(x) + Double.longBitsToDouble(y));
+                        else
+                            reg[c] = box(ops.add.calculate(unbox(x), unbox(y)));
+                    }
+                    case OpCodes.LR_SUB -> {
+                        long x = reg[a], y = reg[b];
+                        if (NanBox.isInt(x) && NanBox.isInt(y))
+                            reg[c] = NanBox.ofInt(NanBox.asInt(x) - NanBox.asInt(y));
+                        else if (NanBox.isDouble(x) && NanBox.isDouble(y))
+                            reg[c] = Double.doubleToLongBits(Double.longBitsToDouble(x) - Double.longBitsToDouble(y));
+                        else
+                            reg[c] = box(ops.sub.calculate(unbox(x), unbox(y)));
+                    }
+                    case OpCodes.LR_MUL -> {
+                        long x = reg[a], y = reg[b];
+                        if (NanBox.isInt(x) && NanBox.isInt(y))
+                            reg[c] = NanBox.ofInt(NanBox.asInt(x) * NanBox.asInt(y));
+                        else if (NanBox.isDouble(x) && NanBox.isDouble(y))
+                            reg[c] = Double.doubleToLongBits(Double.longBitsToDouble(x) * Double.longBitsToDouble(y));
+                        else
+                            reg[c] = box(ops.mul.calculate(unbox(x), unbox(y)));
+                    }
+                    case OpCodes.LR_DIV -> reg[c] = box(ops.div.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_REM -> reg[c] = box(ops.rem.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_POW -> reg[c] = box(ops.pow.calculate(unbox(reg[a]), unbox(reg[b])));
 
-                    case OpCodes.LR_AND -> reg[a] = box(ops.and.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_OR -> reg[a] = box(ops.or.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_XOR -> reg[a] = box(ops.xor.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_SHL -> reg[a] = box(ops.shl.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_SHR -> reg[a] = box(ops.shr.calculate(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LR_USHR -> reg[a] = box(ops.ushr.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_AND -> reg[c] = box(ops.and.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_OR -> reg[c] = box(ops.or.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_XOR -> reg[c] = box(ops.xor.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_SHL -> reg[c] = box(ops.shl.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_SHR -> reg[c] = box(ops.shr.calculate(unbox(reg[a]), unbox(reg[b])));
+                    case OpCodes.LR_USHR -> reg[c] = box(ops.ushr.calculate(unbox(reg[a]), unbox(reg[b])));
                     case OpCodes.BIT_NOT -> reg[a] = NanBox.ofInt(bitNot(unbox(reg[a])));
 
                     case OpCodes.JUMP -> addr = a * C.INSTR_WIDTH;
-                    case OpCodes.JUMP_IF -> { if ( (boolean) unbox(reg[a])) addr = b * C.INSTR_WIDTH; }
-                    case OpCodes.JUMP_IF_NOT -> { if (!(boolean) unbox(reg[a])) addr = b * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF -> { if (truth(reg[a], "condition")) addr = b * C.INSTR_WIDTH; }
+                    case OpCodes.JUMP_IF_NOT -> { if (!truth(reg[a], "condition")) addr = b * C.INSTR_WIDTH; }
 
-                    case OpCodes.EQ -> reg[a] = NanBox.ofBoolean(valuesEqual(unbox(reg[a]), unbox(reg[b])));
-                    case OpCodes.LESS -> reg[a] = NanBox.ofBoolean(toDouble(unbox(reg[a])) < toDouble(unbox(reg[b])));
-                    case OpCodes.GREATER  -> reg[a] = NanBox.ofBoolean(toDouble(unbox(reg[a])) > toDouble(unbox(reg[b])));
-                    case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!(boolean) unbox(reg[a]));
+                    case OpCodes.EQ -> {
+                        long x = reg[a], y = reg[b];
+                        // same-kind ints/bools compare as bits (ofInt/ofBoolean
+                        // are canonical); everything else - cross int/double,
+                        // strings, instances with their own equals() - goes
+                        // through valuesEqual
+                        if ((NanBox.isInt(x) && NanBox.isInt(y)) || (NanBox.isBool(x) && NanBox.isBool(y)))
+                            reg[c] = NanBox.ofBoolean(x == y);
+                        else
+                            reg[c] = NanBox.ofBoolean(valuesEqual(unbox(x), unbox(y)));
+                    }
+                    case OpCodes.LESS -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS));
+                    case OpCodes.GREATER -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER));
+                    case OpCodes.LESS_EQ -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_LESS_EQ));
+                    case OpCodes.GREATER_EQ -> reg[c] = NanBox.ofBoolean(compare(reg[a], reg[b], COMPARE_GREATER_EQ));
+                    case OpCodes.NOT -> reg[a] = NanBox.ofBoolean(!truth(reg[a], "operand of '!'"));
 
                     case OpCodes.MOV -> reg[a] = reg[b];
                     case OpCodes.SET -> reg[a] = NanBox.ofInt(b);
@@ -1054,17 +1510,36 @@ public final class Bl0jv2_jVM {
                     // exactly the leading parameter slots the compiler
                     // reserved for them (see Bl0jv2_Compiler's LambdaNode
                     // handling; resolveCallee() is shared with invoke())
+                    // a = callee register, b = first argument register - 1
+                    // (reg[b] is also where the result lands), c = how many
+                    // arguments the call site passed (a method's 'this'
+                    // included). The callee's own frame is built right here,
+                    // straight from the caller's registers: leading slots
+                    // are a closure's captured cells, then the arguments.
                     case OpCodes.CALL -> {
-                        ResolvedCallee resolved = resolveCallee(unbox(reg[a]));
-                        FunDef fun = resolved.fun();
-                        long[] capturedCells = resolved.capturedCells();
+                        Object callee = unbox(reg[a]);
+                        FunDef fun;
+                        long[] capturedCells;
+                        if (callee instanceof FunDef f) {
+                            fun = f;
+                            capturedCells = EMPTY_CELLS;
+                        } else if (callee instanceof Bl0jClosure closure) {
+                            fun = closure.funDef();
+                            capturedCells = closure.capturedCells();
+                        } else {
+                            throw new Bl0j_VM_Exception("cannot call " + typeName(callee) + " - not a function");
+                        }
 
-                        long[] args = new long[fun.arity()];
-                        System.arraycopy(capturedCells, 0, args, 0, capturedCells.length);
-                        for (int i = capturedCells.length; i < fun.arity(); i++)
-                            args[i] = reg[b + 1 + (i - capturedCells.length)];
+                        if (fun.arity() - capturedCells.length != c)
+                            throw arityError(fun, capturedCells.length, c);
+                        if (ctx.callStack.size() >= maxCallDepth)
+                            throw stackOverflow(maxCallDepth);
 
-                        gen_frame(ctx, fun, args, addr, b);
+                        long[] regs = newRegisters(fun.regs());
+                        System.arraycopy(capturedCells, 0, regs, 1, capturedCells.length);
+                        System.arraycopy(reg, b + 1, regs, 1 + capturedCells.length, c);
+                        ctx.callStack.push(new Frame(regs, addr, b));
+                        reg = regs;
                         addr = fun.address() * C.INSTR_WIDTH;
                     }
 
@@ -1079,7 +1554,9 @@ public final class Bl0jv2_jVM {
                         if (nativeFun == null)
                             throw new Bl0j_VM_Exception("unknown native method: " + a);
                         Object result = nativeFun.apply(unbox(reg[b]));
-                        if (result instanceof Integer code && code == -1)
+                        // -1 is the generic error sentinel of the older natives (wait() on
+                        // interrupt...) - strFind legitimately answers -1 for 'not found'
+                        if (a != NativeMethods.STR_FIND && result instanceof Integer code && code == -1)
                             throw new Bl0j_VM_Exception("native method " + a + " returned error");
                         reg[b] = result == null ? NanBox.NIL : box(result);
                     }
@@ -1144,8 +1621,19 @@ public final class Bl0jv2_jVM {
 
                     case OpCodes.TO_INT -> reg[a] = box(toInt(unbox(reg[a])));
                     case OpCodes.TO_FLOAT -> reg[a] = box(toFloat(unbox(reg[a])));
-                    case OpCodes.TO_STRING -> reg[a] = boxRef(unbox(reg[a]).toString());
-                    case OpCodes.TYPE_OF -> reg[a] = boxRef(typeName(unbox(reg[a])));
+                    // str() and typeOf() used to take a fresh heap slot on every
+                    // call, even though a string stays the same string and typeOf()
+                    // only ever answers with one of a dozen words
+                    case OpCodes.TO_STRING -> {
+                        Object value = unbox(reg[a]);
+                        if (value instanceof String)
+                            ; // already a string: the register keeps referring to it
+                        else if (value instanceof Boolean || value == NIL_OBJECT)
+                            reg[a] = internedString(value.toString());
+                        else
+                            reg[a] = boxRef(value.toString());
+                    }
+                    case OpCodes.TYPE_OF -> reg[a] = internedString(typeName(unbox(reg[a])));
 
                     // b holds the catch block's address (patched by the
                     // compiler), a the register the caught error lands in
@@ -1157,17 +1645,21 @@ public final class Bl0jv2_jVM {
                     case OpCodes.NEW_INSTANCE -> reg[a] = boxRef(new Bl0jInstance((Bl0jClass) unbox(reg[a]), this));
 
                     case OpCodes.GET_FIELD -> {
-                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
-                        String name = (String) unbox(consts[b]);
-                        reg[a] = instance.getFieldRaw(name);
+                        Bl0jInstance instance = requireInstance(reg[a], "read field", b);
+                        int slot = instance.cls.fieldSlot(constSymbols[b]);
+                        if (slot < 0)
+                            throw noSuchMember(instance.cls, "field", b);
+                        reg[c] = instance.getFieldRaw(slot);
                     }
 
-                    // field name's const index and the value sit at reg[b]
-                    // and reg[b+1], same packing trick as INDEX_SET
+                    // a = object, b = register holding the value, c = the
+                    // field name's const index
                     case OpCodes.SET_FIELD -> {
-                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
-                        String name = (String) unbox(consts[(int) unbox(reg[b])]);
-                        instance.setFieldRaw(name, reg[b + 1]);
+                        Bl0jInstance instance = requireInstance(reg[a], "set field", c);
+                        int slot = instance.cls.fieldSlot(constSymbols[c]);
+                        if (slot < 0)
+                            throw noSuchMember(instance.cls, "field", c);
+                        instance.setFieldRaw(slot, reg[b]);
                     }
 
                     // b is the static field's own index, resolved at
@@ -1177,19 +1669,20 @@ public final class Bl0jv2_jVM {
                         reg[a] = cls.getStaticFieldRaw(b);
                     }
 
-                    // the field index and the value sit at reg[b] and
-                    // reg[b+1], same packing trick as SET_FIELD
+                    // a = class reference, b = register holding the value,
+                    // c = the static field's own index (compile-time)
                     case OpCodes.SET_STATIC_FIELD -> {
                         Bl0jClass cls = (Bl0jClass) unbox(reg[a]);
-                        int fieldIndex = (int) unbox(reg[b]);
-                        cls.setStaticFieldRaw(fieldIndex, reg[b + 1]);
+                        cls.setStaticFieldRaw(c, reg[b]);
                     }
 
                     // mutates a's own slot: object in, resolved FunDef out
                     case OpCodes.LOOKUP_METHOD -> {
-                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
-                        String name = (String) unbox(consts[b]);
-                        reg[a] = box(instance.cls.method(name));
+                        Bl0jInstance instance = requireInstance(reg[a], "call method", b);
+                        int method = instance.cls.methodIndex(constSymbols[b]);
+                        if (method < 0)
+                            throw noSuchMember(instance.cls, "method", b);
+                        reg[c] = instance.cls.methodRef(method);
                     }
 
                     case OpCodes.MAKE_CELL -> reg[a] = boxRef(new Bl0jCell());
@@ -1216,16 +1709,8 @@ public final class Bl0jv2_jVM {
                     // RawMemory's own doc for why
                     case OpCodes.FREE -> {
                         if (NanBox.isBoxed(reg[a]) && NanBox.tagOf(reg[a]) == NanBox.TAG_REF) {
-                            int idx = NanBox.asRefIndex(reg[a]);
-                            heapLock.writeLock().lock();
-                            try {
-                                if (heap.get(idx) == FREED)
-                                    throw new Bl0j_VM_Exception("double free");
-                                heap.set(idx, FREED);
-                                freeHeapSlots.push(idx);
-                            } finally {
-                                heapLock.writeLock().unlock();
-                            }
+                            if (!heap.free(NanBox.asRefIndex(reg[a])))
+                                throw new Bl0j_VM_Exception("double free");
                         } else {
                             throw new Bl0j_VM_Exception("cannot free " + typeName(unbox(reg[a])) + ": only managed values can be freed, there is no raw-memory allocator");
                         }
@@ -1277,7 +1762,7 @@ public final class Bl0jv2_jVM {
                     // compile-time immediate
                     case OpCodes.PORT_IN -> {
                         requirePrivileged(ctx, "in");
-                        reg[a] = NanBox.ofInt((int) portIO.read((int) unbox(reg[a]), b / 8));
+                        reg[a] = NanBox.ofInt((int) portRead((int) unbox(reg[a]), b / 8));
                     }
 
                     // same operand shape as POKE - width and value packed
@@ -1286,7 +1771,9 @@ public final class Bl0jv2_jVM {
                         requirePrivileged(ctx, "out");
                         int width = (int) unbox(reg[b]);
                         long value = ((Number) unbox(reg[b + 1])).longValue();
-                        portIO.write((int) unbox(reg[a]), width / 8, value);
+                        int port = (int) unbox(reg[a]);
+                        portIO.write(port, width / 8, value);
+                        for (PortDevice device : devices) device.onWrite(port, value);
                     }
 
                     // vector in a, arg in b - synchronous, unlike
@@ -1329,7 +1816,9 @@ public final class Bl0jv2_jVM {
                             ctx.handlerStack.pop();
 
                         Frame frame = ctx.callStack.pop();
-                        ctx.callStack.peek().regs[frame.resultReg]  = reg[a];
+                        long[] callerRegs = ctx.callStack.peek().regs();
+                        callerRegs[frame.resultReg] = reg[a];
+                        reg = callerRegs;
                         addr = frame.addressToReturn;
 
                         // the frame invoke() pushed has just returned -
@@ -1356,7 +1845,7 @@ public final class Bl0jv2_jVM {
                     // around the same time.
                     panicked = true;
                     throw e;
-                } catch (Exception e) {
+                } catch (Exception | StackOverflowError e) {
                     // a handler registered before this execute() call
                     // started (i.e. outside a nested invoke()) doesn't
                     // belong to it - let the exception propagate to the
@@ -1370,18 +1859,37 @@ public final class Bl0jv2_jVM {
                         Handler handler = ctx.handlerStack.pop();
                         while (ctx.callStack.size() > handler.callStackDepth())
                             ctx.callStack.pop();
-                        String message = e.getMessage() != null ? e.getMessage() : e.toString();
-                        ctx.callStack.peek().regs()[handler.errReg()] = box(new Bl0jError(message));
+                        String message = e instanceof StackOverflowError ? "stack overflow: native recursion too deep"
+                                : e instanceof Bl0j_VM_Exception v ? v.plainMessage()
+                                : e.getMessage() != null ? e.getMessage() : e.toString();
+                        reg = ctx.callStack.peek().regs();
+                        reg[handler.errReg()] = box(new Bl0jError(message));
                         addr = handler.catchAddr();
                         continue;
                     }
-                    throw new Bl0j_VM_Exception("Exception on address: "+addr/C.INSTR_WIDTH+" - "+ e);
+                    // already carries the address of the innermost failure
+                    if (e instanceof Bl0j_VM_Exception located && located.isLocated())
+                        throw located;
+                    Bl0j_VM_Exception vmError = e instanceof Bl0j_VM_Exception v ? v
+                            : new Bl0j_VM_Exception(e instanceof StackOverflowError
+                                    ? "stack overflow: native recursion too deep" : e.toString());
+                    throw vmError.locatedAt(addr / C.INSTR_WIDTH);
                 }
             }
     }
 
+    // a fresh register file: every register starts as nil. A plain
+    // 'new long[n]' is all-zero bits, which NanBox reads as the double 0.0 -
+    // so reading a variable that was never assigned (or an argument the
+    // caller didn't pass) silently produced 0.0 instead of nil.
+    private static long[] newRegisters(int count) {
+        long[] regs = new long[count];
+        Arrays.fill(regs, NanBox.NIL);
+        return regs;
+    }
+
     private void gen_frame(CoreContext ctx, FunDef fun, long[] args, int addressToReturn, int resultReg) {
-        long[] regs = new long[fun.regs()];
+        long[] regs = newRegisters(fun.regs());
 
         regs[0] = NanBox.NIL;
         for (int i = 0; i < args.length; i++)
@@ -1391,27 +1899,9 @@ public final class Bl0jv2_jVM {
     }
 
     private long boxRef(Object value) {
-        heapLock.writeLock().lock();
-        try {
-            if (!freeHeapSlots.isEmpty()) {
-                int slot = freeHeapSlots.pop();
-                heap.set(slot, value);
-                return NanBox.ofRef(slot);
-            }
-            if (maxHeapEntries > 0 && heap.size() >= maxHeapEntries)
-                throw new Bl0j_VM_Exception("out of memory: heap entry limit (" + maxHeapEntries + ") reached");
-            heap.add(value);
-            return NanBox.ofRef(heap.size() - 1);
-        } finally {
-            heapLock.writeLock().unlock();
-        }
+        return NanBox.ofRef(heap.add(value));
     }
 
-    // converts a NaN-boxed register/const value into the plain Java object
-    // it represents, for the (currently still Object-based) OperatorTable
-    // and native methods to work with. Public so Bl0jArray and friends,
-    // now in runtime.values, can unbox their own elements (e.g. for
-    // toString) without duplicating this.
     public Object unbox(long bits) {
         if (!NanBox.isBoxed(bits))
             return Double.longBitsToDouble(bits);
@@ -1420,13 +1910,7 @@ public final class Bl0jv2_jVM {
             case NanBox.TAG_BOOL -> NanBox.asBoolean(bits);
             case NanBox.TAG_NIL -> NIL_OBJECT;
             case NanBox.TAG_REF -> {
-                Object v;
-                heapLock.readLock().lock();
-                try {
-                    v = heap.get(NanBox.asRefIndex(bits));
-                } finally {
-                    heapLock.readLock().unlock();
-                }
+                Object v = heap.get(NanBox.asRefIndex(bits));
                 if (v == FREED)
                     throw new Bl0j_VM_Exception("use after free");
                 yield v;
@@ -1493,6 +1977,9 @@ public final class Bl0jv2_jVM {
         // true for a handler's duration and restore it afterward, mirroring
         // how real hardware only raises privilege through a trap gate
         boolean privileged = true;
+
+        // how many invoke() calls (Java -> bl0jv2) are active on this core's Java stack
+        int invokeDepth = 0;
 
         CoreContext(int coreId) {
             this.coreId = coreId;

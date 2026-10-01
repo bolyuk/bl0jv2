@@ -91,6 +91,55 @@ class TcpOutboundBridgeTest {
         assertEquals("echo: hi from bl0jv2", sw.toString());
     }
 
+    // tcp.bl0 retransmits what is not acknowledged in time, so the bridge can
+    // be handed the same segment again; writing it to the real socket twice
+    // would corrupt the stream the real peer sees
+    @Test
+    void aSegmentTheVmSendsAgainIsWrittenToTheRealSocketOnlyOnce(@TempDir Path dir) throws IOException, InterruptedException {
+        ServerSocket server = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress());
+        int realPort = server.getLocalPort();
+        StringBuffer received = new StringBuffer();
+
+        Thread serverThread = new Thread(() -> {
+            try (Socket client = server.accept()) {
+                client.setSoTimeout(1500);
+                byte[] buf = new byte[1024];
+                int n;
+                while ((n = client.getInputStream().read(buf)) > 0)
+                    received.append(new String(buf, 0, n, StandardCharsets.US_ASCII));
+            } catch (IOException ignored) {
+            }
+        });
+        serverThread.setDaemon(true);
+        serverThread.start();
+
+        Path entry = dir.resolve("entry.bl0");
+        Files.writeString(entry, "import '" + libPath("net/tcp.bl0") + "'; " +
+                "Nic.initWithHostBridge(); " +
+                "conn = TcpConn.connect(0x0A000002, 6100, 0x7F000001, " + realPort + "); " +
+                "seq0 = conn.sndNext; " +
+                "conn.send('hello'); " +
+                // the identical segment twice more, as a retransmission would
+                "conn.transmit(seq0, 0x18, 'hello'); " +
+                "conn.transmit(seq0, 0x18, 'hello'); " +
+                "conn.send(' world'); " +
+                "wait(300); " +
+                "conn.close();");
+
+        byte[] bytecode = compileWithImports(entry);
+        var vm = new Bl0jv2_jVM();
+        vm.set_interrupt_poll_interval(1);
+        vm.set_out_writer(new PrintWriter(new StringWriter()));
+        vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
+        new TcpOutboundBridge(vm).start();
+        vm.run_instructions();
+
+        serverThread.join(3000);
+        server.close();
+
+        assertEquals("hello world", received.toString());
+    }
+
     @Test
     void udpSendReachesARealLocalServerAndGetsAReply(@TempDir Path dir) throws IOException {
         java.net.DatagramSocket server = new java.net.DatagramSocket(0, java.net.InetAddress.getLoopbackAddress());

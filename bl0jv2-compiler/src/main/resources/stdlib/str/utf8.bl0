@@ -1,0 +1,137 @@
+// UTF-8 <-> text. A string is a sequence of UTF-16 units; a file or a disk
+// sector holds bytes, so anything that stores text on a device goes through
+// here. Bytes travel as arrays of ints 0-255.
+
+def class Utf8 {
+    // text -> array of bytes. A lone surrogate (not part of a valid pair)
+    // is stored as U+FFFD, the way every UTF-8 encoder has to.
+    static def encode(text) {
+        out = [];
+        n = len(text);
+        i = 0;
+        while (i < n) {
+            c = int(text[i]);
+            i += 1;
+            if (c >= 0xD800 && c <= 0xDBFF) {
+                if (i < n && int(text[i]) >= 0xDC00 && int(text[i]) <= 0xDFFF) {
+                    c = 0x10000 + ((c - 0xD800) << 10) + (int(text[i]) - 0xDC00);
+                    i += 1;
+                } else {
+                    c = 0xFFFD;
+                }
+            } else if (c >= 0xDC00 && c <= 0xDFFF) {
+                c = 0xFFFD;
+            }
+            if (c < 0x80) {
+                push(out, c);
+            } else if (c < 0x800) {
+                push(out, 0xC0 | (c >> 6));
+                push(out, 0x80 | (c & 0x3F));
+            } else if (c < 0x10000) {
+                push(out, 0xE0 | (c >> 12));
+                push(out, 0x80 | ((c >> 6) & 0x3F));
+                push(out, 0x80 | (c & 0x3F));
+            } else {
+                push(out, 0xF0 | (c >> 18));
+                push(out, 0x80 | ((c >> 12) & 0x3F));
+                push(out, 0x80 | ((c >> 6) & 0x3F));
+                push(out, 0x80 | (c & 0x3F));
+            }
+        }
+        return out;
+    }
+
+    // array of bytes -> text. Malformed input (stray continuation byte,
+    // truncated or overlong sequence) becomes U+FFFD instead of an error:
+    // a damaged file should still be readable.
+    static def decode(bytes) {
+        pieces = [];
+        chunk = [];
+        n = len(bytes);
+        i = 0;
+        while (i < n) {
+            b = bytes[i];
+            i += 1;
+            cp = b;
+            need = 0;
+            min = 0;
+            if (b >= 0x80) {
+                if (b >= 0xC2 && b <= 0xDF) { need = 1; cp = b & 0x1F; min = 0x80; }
+                else if (b >= 0xE0 && b <= 0xEF) { need = 2; cp = b & 0x0F; min = 0x800; }
+                else if (b >= 0xF0 && b <= 0xF4) { need = 3; cp = b & 0x07; min = 0x10000; }
+                else { cp = 0xFFFD; }
+            }
+            k = 0;
+            while (k < need) {
+                if (i < n && (bytes[i] & 0xC0) == 0x80) {
+                    cp = (cp << 6) | (bytes[i] & 0x3F);
+                    i += 1;
+                } else {
+                    cp = 0xFFFD;
+                    break;
+                }
+                k += 1;
+            }
+            if (need > 0 && (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))) { cp = 0xFFFD; }
+            push(chunk, strChar(cp));
+            if (len(chunk) >= 256) {
+                push(pieces, strJoin(chunk, ''));
+                Utf8.release(chunk);
+                chunk = [];
+            }
+        }
+        push(pieces, strJoin(chunk, ''));
+        Utf8.release(chunk);
+        text = strJoin(pieces, '');
+        free(pieces);
+        return text;
+    }
+
+    // every element came from strChar() and nobody else holds it
+    static def release(chunk) {
+        i = 0;
+        while (i < len(chunk)) {
+            free(chunk[i]);
+            i += 1;
+        }
+        free(chunk);
+    }
+}
+
+// Decodes a byte stream one byte at a time - what a keyboard driver sees: a
+// character may be split over several bytes and the next one may not arrive yet.
+//   s = new Utf8Stream();  text = s.feed(byte);   // '' until a character is complete
+// A malformed sequence yields U+FFFD (and the byte that broke it is handled as the
+// start of a new character, so nothing after the damage is lost).
+def class Utf8Stream {
+    field need;
+    field cp;
+    field min;
+
+    def init() {
+        this.need = 0;
+        this.cp = 0;
+        this.min = 0;
+    }
+
+    def feed(b) {
+        if (this.need > 0) {
+            if ((b & 0xC0) == 0x80) {
+                this.cp = (this.cp << 6) | (b & 0x3F);
+                this.need -= 1;
+                if (this.need > 0) { return ''; }
+                r = this.cp;
+                if (r < this.min || r > 0x10FFFF || (r >= 0xD800 && r <= 0xDFFF)) { return strChar(0xFFFD); }
+                return strChar(r);
+            }
+            // the sequence was cut short: report it, then look at this byte afresh
+            this.need = 0;
+            return strChar(0xFFFD) + this.feed(b);
+        }
+        if (b < 0x80) { return strChar(b); }
+        if (b >= 0xC2 && b <= 0xDF) { this.need = 1; this.cp = b & 0x1F; this.min = 0x80; return ''; }
+        if (b >= 0xE0 && b <= 0xEF) { this.need = 2; this.cp = b & 0x0F; this.min = 0x800; return ''; }
+        if (b >= 0xF0 && b <= 0xF4) { this.need = 3; this.cp = b & 0x07; this.min = 0x10000; return ''; }
+        return strChar(0xFFFD);
+    }
+}

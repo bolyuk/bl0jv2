@@ -47,15 +47,33 @@ final class TcpRelay {
         final int localPort;
         volatile int seq;
         volatile int ack;
-        volatile int lastTxSeqSeen = -1;
         volatile boolean vmDone = false;
+        // every frame the VM sends to this connection's 4-tuple, in order -
+        // see TxDispatcher for why a connection does not read the TX window itself
+        final TxDispatcher.Subscription tx;
 
-        FakeConn(int remoteIp, int remotePort, int localIp, int localPort) {
+        private FakeConn(int remoteIp, int remotePort, int localIp, int localPort, TxDispatcher.Subscription tx) {
             this.remoteIp = remoteIp;
             this.remotePort = remotePort;
             this.localIp = localIp;
             this.localPort = localPort;
+            this.tx = tx;
         }
+
+        void close() {
+            tx.close();
+        }
+    }
+
+    // subscribes BEFORE anything is sent, so no reply to the first frame can
+    // be missed. remote/local are as in FakeConn's doc: the VM's own address is
+    // 'local', and what it sends back to us carries it as the SOURCE.
+    FakeConn newConn(int remoteIp, int remotePort, int localIp, int localPort) {
+        var tx = TxDispatcher.of(vm).subscribe(frame ->
+                frame.length >= 40 && ipProto(frame) == IP_PROTO_TCP
+                        && ipSrcAddr(frame) == localIp && tcpSrcPort(frame) == localPort
+                        && ipDstAddr(frame) == remoteIp && tcpDstPort(frame) == remotePort);
+        return new FakeConn(remoteIp, remotePort, localIp, localPort, tx);
     }
 
     // starts both relay directions and blocks until either one ends on
@@ -91,6 +109,7 @@ final class TcpRelay {
             real.close();
         } catch (IOException ignored) {
         }
+        conn.close();
     }
 
     // real peer -> bl0jv2 side: blocking reads off the real socket, each
@@ -165,8 +184,24 @@ final class TcpRelay {
             int flags = tcpFlags(frame);
             byte[] payload = tcpPayload(frame);
 
+            // the VM retransmits anything unacknowledged (tcp.bl0), so the same
+            // segment can arrive twice - if our ACK was slow or lost, or an
+            // earlier copy is still in flight. Writing a repeat to the real
+            // socket would corrupt the stream, so only the segment that
+            // starts exactly at the next expected byte is accepted; a repeat is
+            // just acknowledged again, and a segment from the future (an
+            // earlier one was lost) is dropped until the VM resends in order.
+            int seqNo = tcpSeq(frame);
+            int behind = conn.ack - seqNo; // > 0: already received
+
             if (payload.length > 0) {
-                conn.ack = tcpSeq(frame) + payload.length;
+                if (behind > 0) {
+                    sendToVm(conn, ACK, new byte[0]);
+                    continue;
+                }
+                if (behind < 0)
+                    continue;
+                conn.ack = seqNo + payload.length;
                 try {
                     out.write(payload);
                     out.flush();
@@ -177,7 +212,13 @@ final class TcpRelay {
             }
 
             if (hasFlag(flags, FIN)) {
-                conn.ack = tcpSeq(frame) + 1;
+                if (behind > 0) {
+                    sendToVm(conn, ACK, new byte[0]);
+                    continue;
+                }
+                if (behind < 0)
+                    continue;
+                conn.ack = seqNo + 1;
                 sendToVm(conn, ACK, new byte[0]);
                 try {
                     real.shutdownOutput();
@@ -203,27 +244,11 @@ final class TcpRelay {
         injectRx(vm, frame);
     }
 
-    // reads whatever the bl0jv2 side most recently sent via nicHostSend()
-    // (see nic.bl0's own doc on why this is a poll, not a callback), and
-    // returns it only if it's TCP and addressed exactly the other way
-    // around from sendToVm() above (bl0jv2's local address as source,
-    // this connection's fake remote address as destination) - anything
-    // else (someone else's traffic sharing the one wire - see NicFrame's
-    // own doc) is silently not ours
+    // the next frame the bl0jv2 side sent to this connection's 4-tuple, or
+    // null if none is waiting. (Used to read the shared TX window directly and
+    // filter - see TxDispatcher for why that lost other connections' frames.)
     byte[] pollTx(FakeConn conn) {
-        NicFrame.TxPoll result = NicFrame.pollTx(vm, conn.lastTxSeqSeen);
-        if (result == null)
-            return null;
-        conn.lastTxSeqSeen = (int) result.seq;
-        byte[] frame = result.frame;
-
-        if (frame.length < 40 || ipProto(frame) != IP_PROTO_TCP)
-            return null;
-        if (ipSrcAddr(frame) != conn.localIp || tcpSrcPort(frame) != conn.localPort)
-            return null;
-        if (ipDstAddr(frame) != conn.remoteIp || tcpDstPort(frame) != conn.remotePort)
-            return null;
-        return frame;
+        return conn.tx.poll();
     }
 
     // mirrors stdlib/net/tcp.bl0's own tcpBuildHeader()/tcpApplyChecksum()/

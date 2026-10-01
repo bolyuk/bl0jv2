@@ -1,0 +1,24 @@
+// aeon-os program: print files, or standard input when none is named
+// Loaded from the virtual disk by the shell (bin/cat.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+import '../lib/input.bl0';
+
+def main(words) {
+    if (len(words) == 1) {
+        sayRaw(inputText(nil));
+        return nil;
+    }
+    i = 1;
+    while (i < len(words)) {
+        text = inputText(words[i]);
+        if (text == nil) {
+            sayErr(words[i] + ': no such file');
+        } else {
+            sayRaw(text);
+        }
+        i += 1;
+    }
+}
+
+programMain(main);

@@ -1,0 +1,21 @@
+// aeon-os (init): the smallest way to start the system. Reads the shared libraries and the
+// shell from the boot disk and runs the shell: no demos, no scheduler. boot.bl0 does the same
+// after its own show.
+//
+// This file is compiled with everything it needs INSIDE it (the disk driver, the filesystem,
+// the loader): it is what reads the libraries in, so it cannot link to them. The shell and the
+// commands, read from the disk afterwards, are built against the libraries and carry none of
+// their code.
+
+import 'kernel.bl0';
+import 'lib/loader.bl0';
+
+initHeap(4);
+Disk.init(kalloc(512));
+if (!Fs.mount()) {
+    println 'no boot disk: start with --disk <image> holding lib/, sbin/ and bin/ (see aeon-os/README.md)';
+    panic('no boot disk');
+}
+Log.write('init: booting');
+loadLibraries();
+journalExec('shell', 'sbin/shell.bl0c');

@@ -1,0 +1,113 @@
+// aeon-os: turns the byte stream a terminal sends into keys. A key is
+//   Key.name == nil  : a typed character, in Key.text (UTF-8 already decoded)
+//   Key.name != nil  : a named key: ENTER TAB BACKSPACE ESC UP DOWN LEFT RIGHT HOME END
+//                      DEL INSERT PGUP PGDN, CTRL-<letter>, ALT-<char>, CTRL-LEFT, CTRL-RIGHT
+// The terminal reports arrows and the like as escape sequences (ESC [ A, ESC O H,
+// ESC [ 3 ~, ESC [ 1 ; 5 C ...); a lone ESC byte is the Escape key, told apart
+// from the start of a sequence by whether more bytes follow at once - on a serial
+// line a sequence always arrives in one burst.
+
+import '../kernel.bl0';
+import '../../stdlib/str/utf8.bl0';
+
+def class Key {
+    field name;
+    field text;
+
+    def init(name, text) {
+        this.name = name;
+        this.text = text;
+    }
+}
+
+def class Keys {
+    static field stream;
+    static field escWaitMs;
+
+    // the next byte, waiting up to ms for it; -1 if none came
+    static def nextByte(ms) {
+        if (!kbHasInput() && !kbWait(ms)) { return -1; }
+        return kbReadByte();
+    }
+
+    // the next key, waiting up to timeoutMs (nil on timeout)
+    static def read(timeoutMs) {
+        if (Keys.stream == nil) { Keys.stream = new Utf8Stream(); }
+        deadline = ticks() + timeoutMs;
+        while (true) {
+            left = deadline - ticks();
+            b = Keys.nextByte(left > 0 ? left : 0);
+            if (b < 0) { return nil; }
+            key = Keys.decode(b);
+            if (key != nil) { return key; }
+            // a character split over several bytes: the rest follows at once
+        }
+    }
+
+    static def decode(b) {
+        if (b == 27) { return Keys.escape(); }
+        if (b == 13 || b == 10) { return new Key('ENTER', nil); }
+        if (b == 9) { return new Key('TAB', nil); }
+        if (b == 8 || b == 127) { return new Key('BACKSPACE', nil); }
+        if (b == 0) { return nil; }
+        if (b < 32) { return new Key('CTRL-' + strChar(b + 64), nil); }
+        text = Keys.stream.feed(b);
+        if (text == '') { return nil; }
+        return new Key(nil, text);
+    }
+
+    static def escape() {
+        b = Keys.nextByte(Keys.escWaitMs);
+        if (b < 0) { return new Key('ESC', nil); }
+        if (b == 91) { return Keys.csi(); }                    // ESC [
+        if (b == 79) {                                          // ESC O  (application mode arrows, Home, End)
+            c = Keys.nextByte(Keys.escWaitMs);
+            return Keys.finish(c, 1, 0);
+        }
+        if (b == 27) { return new Key('ESC', nil); }
+        if (b >= 32 && b < 127) { return new Key('ALT-' + strChar(b), nil); }
+        return new Key('ESC', nil);
+    }
+
+    // ESC [ params final
+    static def csi() {
+        first = 0;       // first numeric parameter
+        modifier = 0;    // second one (1;5C: 5 = Ctrl)
+        param = 0;
+        index = 0;
+        while (true) {
+            c = Keys.nextByte(Keys.escWaitMs);
+            if (c < 0) { return new Key('ESC', nil); }
+            if (c >= 48 && c <= 57) {
+                param = param * 10 + (c - 48);
+            } else if (c == 59) {
+                if (index == 0) { first = param; }
+                index += 1;
+                param = 0;
+            } else if (c >= 64 && c <= 126) {
+                if (index == 0) { first = param; } else if (index == 1) { modifier = param; }
+                return Keys.finish(c, first, modifier);
+            }
+        }
+    }
+
+    static def finish(c, first, modifier) {
+        ctrl = modifier == 5;
+        if (c == 65) { return new Key('UP', nil); }
+        if (c == 66) { return new Key('DOWN', nil); }
+        if (c == 67) { return new Key(ctrl ? 'CTRL-RIGHT' : 'RIGHT', nil); }
+        if (c == 68) { return new Key(ctrl ? 'CTRL-LEFT' : 'LEFT', nil); }
+        if (c == 72) { return new Key('HOME', nil); }
+        if (c == 70) { return new Key('END', nil); }
+        if (c == 126) {                                         // ESC [ n ~
+            if (first == 1 || first == 7) { return new Key('HOME', nil); }
+            if (first == 4 || first == 8) { return new Key('END', nil); }
+            if (first == 3) { return new Key('DEL', nil); }
+            if (first == 2) { return new Key('INSERT', nil); }
+            if (first == 5) { return new Key('PGUP', nil); }
+            if (first == 6) { return new Key('PGDN', nil); }
+        }
+        return new Key('UNKNOWN', nil);
+    }
+}
+Keys.escWaitMs = 25;

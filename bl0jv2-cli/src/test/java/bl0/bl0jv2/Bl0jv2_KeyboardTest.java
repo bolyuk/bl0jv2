@@ -136,6 +136,13 @@ class Bl0jv2_KeyboardTest {
         vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
 
         Thread injector = new Thread(() -> {
+            // the program registers its keyboard handler as its first act; a key
+            // raised before that is dropped (no handler yet), which made this test
+            // lose its first key whenever the injector thread won the race
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ignored) {
+            }
             int[] keys = {1, 2, 3, 4, 5}; // 5 keys into a 3-usable-slot buffer
             for (int k : keys) {
                 injectKey(vm, k);

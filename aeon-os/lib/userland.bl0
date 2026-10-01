@@ -1,0 +1,159 @@
+// aeon-os: what a program started from the disk needs. Importing this gives a
+// program the console, the filesystem (folders and paths included) and its
+// environment; startProgram() connects them to the kernel's disk driver, which
+// is the one thing a separately loaded program cannot have set up itself.
+//
+// A program is a plain .bl0 file:
+//
+//   import '../lib/userland.bl0';
+//   startProgram();
+//   ... Prog.words[0] is the command name, Prog.words[1..] its arguments ...
+//
+// compiled and put on the disk as bin/<name>.bl0c (see aeon-os/README or
+// --disk-put). It runs unprivileged and everything it does to the machine goes
+// through syscalls the kernel offers. When it returns, the shell is back.
+
+import '../kernel.bl0';
+import '../../stdlib/fs/dirs.bl0';
+import '../../stdlib/str/split.bl0';
+import '../../stdlib/str/fmt.bl0';
+import '../../stdlib/arrlib.bl0';
+import '../../stdlib/fs/hostfs.bl0';
+
+def class Prog {
+    static field cwd;
+    static field words;
+}
+
+// the words of a command line, without the empty pieces repeated spaces leave
+def tokens(text) {
+    raw = Split.split(text, ' ');
+    words = [];
+    i = 0;
+    while (i < len(raw)) {
+        if (raw[i] != '') { push(words, raw[i]); }
+        i += 1;
+    }
+    return words;
+}
+
+// everything from word 'from' on, joined with single spaces
+def restOf(words, from) {
+    return Arr.join(Arr.slice(words, from, len(words)), ' ');
+}
+
+def portNumber(text) {
+    n = 0;
+    i = 0;
+    if (len(text) == 0 || len(text) > 5) { return nil; }
+    while (i < len(text)) {
+        c = int(text[i]);
+        if (c < 48 || c > 57) { return nil; }
+        n = n * 10 + (c - 48);
+        i += 1;
+    }
+    if (n < 1 || n > 65535) { return nil; }
+    return n;
+}
+
+// text to standard output, one line at a time
+def printText(text) {
+    lines = Split.split(text, strChar(10));
+    i = 0;
+    last = len(lines);
+    if (last > 0 && lines[last - 1] == '') { last -= 1; }
+    while (i < last) {
+        line = lines[i];
+        if (len(line) > 0 && strSub(line, len(line) - 1, len(line)) == strChar(13)) { line = strSub(line, 0, len(line) - 1); }
+        say(line);
+        i += 1;
+    }
+}
+
+def isSpace(c) {
+    return c == ' ' || c == strChar(10) || c == strChar(13) || c == strChar(9);
+}
+
+// --- standard input and output ---
+//
+// A program writes with say() and reads with inputText(); where that goes is the
+// shell's business: the terminal, or a file when the command line redirected or
+// piped it (the shell sets Io.inPath and Io.outPath). Output to a file is
+// collected and appended in blocks. Messages that are about the command itself -
+// usage, "no such file" - go to sayErr(), which is always the terminal, so that a
+// pipe carries only data.
+
+def class Io {
+    static field outPath;
+    static field inPath;
+    static field buffer;
+    static field size;
+
+    static def flush() {
+        if (len(Io.buffer) == 0) { return nil; }
+        text = strJoin(Io.buffer, '');
+        Io.buffer = [];
+        Io.size = 0;
+        Fs.append(Io.outPath, text);
+    }
+}
+Io.outPath = '';
+Io.inPath = '';
+Io.buffer = [];
+Io.size = 0;
+
+def sayRaw(text) {
+    if (Io.outPath == '') {
+        consoleWrite(text);
+        return nil;
+    }
+    push(Io.buffer, text);
+    Io.size += len(text);
+    if (Io.size > 2048) { Io.flush(); }
+}
+
+def say(text) {
+    sayRaw(text + '\n');
+}
+
+def sayErr(text) {
+    consoleWriteLine(text);
+}
+
+// a path as typed -> the stored name, relative to the folder the shell was in
+def inCwd(path) {
+    return FsPath.resolve(Prog.cwd, path);
+}
+
+// a destination for cp/mv: an existing folder means "inside it"
+def destination(from, to) {
+    target = inCwd(to);
+    if (Dirs.isDir(target)) { target = FsPath.prefix(target) + FsPath.base(from); }
+    return target;
+}
+
+// call first thing in a program; false (after saying why) when there is no filesystem to use.
+// The shell has put the command line (Prog.words), the working folder (Prog.cwd) and the
+// redirections (Io.inPath, Io.outPath) where this program finds them: everything here is a
+// shared library, so those are the same variables the shell uses, not copies. The disk driver,
+// the keyboard, the console are likewise the system's own.
+def startProgram() {
+    if (!Fs.mounted) {
+        sayErr('the disk has no filesystem');
+        return false;
+    }
+    return true;
+}
+
+// runs the program: Prog.words[0] is the command name, the rest its arguments; whatever
+// it printed to a file is written out even if it fails
+def programMain(main) {
+    if (!startProgram()) { return nil; }
+    try {
+        main(Prog.words);
+    } catch (e) {
+        Io.flush();
+        throw(e);
+    }
+    Io.flush();
+}

@@ -1,0 +1,73 @@
+// Disk driver: reads and writes 512-byte sectors through the controller
+// ports 0x0F00-0x0F0D (see DiskController in the runtime). The controller
+// moves each sector by DMA between the device and ONE buffer in raw memory,
+// so sector contents are accessed with peek8/poke8/peek32/poke32 - which any
+// ring may use - while the port writes themselves are privileged.
+//
+// Disk.init() runs once, privileged (it reserves the buffer, reads the
+// sector count and registers the syscall that lets user mode ask the kernel
+// to do the port writes). After that Disk.read()/Disk.write() work from
+// either ring. There is a single buffer, so a caller must finish with the
+// buffer's contents before the next Disk call; stdlib/fs/fs.bl0 serialises
+// its users with a mutex.
+//
+// A different machine needs only a different driver here: the filesystem on
+// top sees nothing but sector count, read(sector), write(sector) and the
+// buffer's address.
+
+def class Disk {
+    static field bufAddr;
+    static field sectors;   // 0 = no disk
+    static field vector;    // syscall vector user mode reaches the controller through
+
+    // privileged; buffer is the raw address of 512 bytes the caller owns
+    static def init(buffer) {
+        Disk.bufAddr = buffer;
+        reserve(buffer, 512);
+        Disk.sectors = in32(0x0F00);
+        registerHandler(onDiskSyscall, Disk.vector, 1);
+    }
+
+    // for a program the kernel started: the driver state the kernel already set up
+    // (a program carries its own copy of this class, so it has to be told)
+    static def attach(buffer, sectors, vector) {
+        Disk.bufAddr = buffer;
+        Disk.sectors = sectors;
+        Disk.vector = vector;
+    }
+
+    static def present() {
+        return Disk.sectors > 0;
+    }
+
+    // privileged part: one command, returns the controller's status (0 = ok)
+    static def command(op, sector) {
+        out32(0x0F04, sector);
+        out32(0x0F08, Disk.bufAddr);
+        out8(0x0F0C, op);
+        return in8(0x0F0D);
+    }
+
+    static def run(op, sector) {
+        if (sector < 0 || sector >= Disk.sectors) { return false; }
+        if (isPrivileged()) { return Disk.command(op, sector) == 0; }
+        // sector * 4 + op packs both into the one value a syscall carries
+        return syscall(Disk.vector, sector * 4 + op) == 0;
+    }
+
+    // sector -> buffer; false on a bad sector or a device error
+    static def read(sector) {
+        return Disk.run(1, sector);
+    }
+
+    // buffer -> sector
+    static def write(sector) {
+        return Disk.run(2, sector);
+    }
+}
+Disk.vector = 6; // 1 console, 2 keyboard, 3 nic, 4 host rx, 5 host send
+
+// runs elevated, whatever ring the caller is in
+def onDiskSyscall(arg) {
+    return Disk.command(arg & 3, arg >> 2);
+}

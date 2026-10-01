@@ -121,9 +121,13 @@ class Bl0jv2_ThreadingTest {
         StringBuilder captured = new StringBuilder();
 
         Writer sink = new Writer() {
-            @Override public void write(char[] cbuf, int off, int len) {
+            // println writes its newline and its text as separate chunks, so the
+            // latch opens once the whole expected output has arrived, not on
+            // the first chunk
+            @Override public synchronized void write(char[] cbuf, int off, int len) {
                 captured.append(cbuf, off, len);
-                latch.countDown();
+                if (captured.toString().endsWith("C7"))
+                    latch.countDown();
             }
             @Override public void flush() {}
             @Override public void close() {}
@@ -291,7 +295,13 @@ class Bl0jv2_ThreadingTest {
         vm.set_core_count(2);
         vm.set_out_writer(sink);
         vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
-        vm.run_instructions(); // core 0's own program is just the two dispatches - returns immediately
+        try {
+            vm.run_instructions();
+        } catch (bl0.bl0jv2.exceptions.Bl0j_VM_Panic ignored) {
+            // core 0's own program is two dispatches and returns at once, but if
+            // the worker's panic lands first core 0 sees it at its next
+            // instruction - the same machine-wide halt, just observed here
+        } // core 0's own program is just the two dispatches - returns immediately
 
         assertTrue(!secondTaskRan.await(500, TimeUnit.MILLISECONDS),
                 "secondTask ran on a core that should have halted after badTask panicked");
@@ -407,7 +417,13 @@ class Bl0jv2_ThreadingTest {
         vm.set_core_count(3);
         vm.set_out_writer(sink);
         vm.feed_compiled_file(ByteBuffer.wrap(bytecode));
-        vm.run_instructions();
+        try {
+            vm.run_instructions();
+        } catch (bl0.bl0jv2.exceptions.Bl0j_VM_Panic ignored) {
+            // core 0's own program is two dispatches and returns at once, but if
+            // the worker's panic lands first core 0 sees it at its next
+            // instruction - the same machine-wide halt, just observed here
+        }
 
         // haltCore() itself unblocks (proven by this NOT hanging until the
         // test's own timeout), but the panicked check at the top of the

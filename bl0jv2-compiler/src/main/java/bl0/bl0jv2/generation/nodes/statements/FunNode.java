@@ -3,6 +3,9 @@ package bl0.bl0jv2.generation.nodes.statements;
 import bl0.bl0jv2.generation.nodes.Node;
 
 public class FunNode extends Node {
+    // declared by a shared library (see Bl0jv2_Linker): the compiler checks calls against it but
+    // emits no code - the loader supplies the real thing
+    public boolean external;
     public final String name;
     public final PARAMS_N args;
     public final Node body;

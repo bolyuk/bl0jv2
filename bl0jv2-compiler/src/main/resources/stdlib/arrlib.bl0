@@ -53,15 +53,11 @@ def class Arr {
         return result;
     }
 
+    // elements are shown the way str() shows them; built in one step by the
+    // strJoin builtin (a string appended per element used to leave every
+    // intermediate result on the heap)
     static def join(arr, sep) {
-        result = '';
-        i = 0;
-        while (i < len(arr)) {
-            if (i > 0) { result = result + sep; }
-            result = result + str(arr[i]);
-            i = i + 1;
-        }
-        return result;
+        return strJoin(arr, sep);
     }
 
     static def map(arr, f) {
@@ -102,9 +98,22 @@ def class Arr {
     // queue that gets rescanned by priority anyway, wrong for anything
     // that depends on element order
     static def removeAt(arr, i) {
+        if (i < 0 || i >= len(arr)) {
+            throw('Arr.removeAt: index ' + i + ' is outside the array (length ' + len(arr) + ')');
+        }
         last = len(arr) - 1;
         if (i != last) { arr[i] = arr[last]; }
         pop(arr);
+    }
+
+    // pushes every element of src onto dst, in order (dst changes, src doesn't):
+    // building a frame out of header + payload parts in ONE array instead of
+    // concat()ing, which makes a fresh array per step
+    static def appendAll(dst, src) {
+        i = 0;
+        n = len(src);
+        while (i < n) { push(dst, src[i]); i = i + 1; }
+        return dst;
     }
 
     // a NEW array holding every element of a then every element of b, in

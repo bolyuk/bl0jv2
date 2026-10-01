@@ -1,0 +1,12 @@
+// aeon-os program: rename or move a file
+// Loaded from the virtual disk by the shell (bin/mv.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 3) { sayErr('usage: mv <from> <to>'); return nil; }
+    from = inCwd(words[1]);
+    if (!Fs.rename(from, destination(from, words[2]))) { sayErr(words[1] + ': no such file'); }
+}
+
+programMain(main);

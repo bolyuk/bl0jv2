@@ -20,16 +20,11 @@
 // m.size) rather than through a getter - the same direct-field-access
 // convention this project already uses for conn.state, task.priority, etc.
 //
-// Fixed bucket count, chosen once at construction - no resize/rehash on
-// growth. The simplest policy that demonstrates the structure works, same
-// stance this project already takes with kalloc()'s bump allocator
-// (aeon-os/kernel.bl0) and nextWorkerCore()'s round-robin
-// (aeon-os/smp_boot.bl0): a real resizing policy is a straightforward
-// follow-up, not something this needs to get right on day one.
-// new Map(bucketCount) always takes an explicit count (no hidden default) -
-// the same convention every other constructor in this project already
-// follows (new Task(name, priority, remainingRuns, fn), etc); pick
-// something comfortably bigger than the entry count you expect.
+// The bucket count starts at what new Map(bucketCount) is given (no hidden
+// default - the same convention every other constructor in this project
+// follows) and doubles whenever there are more than 3 entries per 4 buckets,
+// so lookups stay O(1) however many entries are added; pick a starting count
+// near the size you expect to avoid regrowing.
 //
 // Keys can be anything '==' already compares meaningfully: int, float,
 // string, bool, or an instance with its own equals(). hashKey() special-
@@ -54,6 +49,7 @@ def class Map {
     field size;        // number of entries, not number of buckets
 
     def init(bucketCount) {
+        if (bucketCount < 1) { throw('Map: bucket count must be at least 1, got ' + bucketCount); }
         this.buckets = [];
         i = 0;
         while (i < bucketCount) {
@@ -105,7 +101,36 @@ def class Map {
         e.value = value;
         push(bucket, e);
         this.size = this.size + 1;
+        // keep chains short: past 3 entries per 4 buckets, double the table
+        if (this.size * 4 > this.bucketCount * 3) { this.grow(); }
         return nil;
+    }
+
+    // doubles the bucket count and re-files every entry - hashKey() depends on
+    // bucketCount, so every entry's bucket changes
+    def grow() {
+        old = this.buckets;
+        newCount = this.bucketCount * 2;
+        fresh = [];
+        i = 0;
+        while (i < newCount) {
+            push(fresh, []);
+            i = i + 1;
+        }
+        this.buckets = fresh;
+        this.bucketCount = newCount;
+
+        bi = 0;
+        while (bi < len(old)) {
+            chain = old[bi];
+            j = 0;
+            while (j < len(chain)) {
+                entry = chain[j];
+                push(this.buckets[this.hashKey(entry.key)], entry);
+                j = j + 1;
+            }
+            bi = bi + 1;
+        }
     }
 
     def has(key) {

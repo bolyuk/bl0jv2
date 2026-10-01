@@ -56,11 +56,25 @@ public class Bl0jv2_CLI {
     // than just answering whoever already knows to connect to a chosen
     // local port, worth requiring explicitly.
     private boolean bridgeOutbound = false;
+    // -I: extra directories an import is looked up in when it is not found next to the importing file
+    private final java.util.List<Path> includeDirs = new java.util.ArrayList<>();
+    // --disk: a host file presented to the program as a block device (see DiskController)
+    private Path diskImage = null;
+    // --bridge-fs: one host folder shown to the program (see DirShare)
+    private Path bridgeFsDir = null;
+    // --uart-baud: how fast the serial port sends (0 = instantly)
+    private int uartBaud = 0;
+    // --shared: a manifest of shared libraries; programs put on the disk link to them, and they are put there too
+    private Path sharedManifest = null;
+    // --display: the guest's text-mode display, drawn on the host terminal (see HostScreen)
+    private boolean display = false;
+    private final java.util.List<DiskImport.Spec> diskPuts = new java.util.ArrayList<>();
+    private int diskSectors = 2048; // 1 MiB, used only when the image does not exist yet
 
     private void parseArgs(String[] args) {
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
-                case "-t", "-terminal" -> terminal = true;
+                case "-t", "--terminal", "-terminal" -> terminal = true;
                 case "-c", "--compile" -> compile = true;
                 case "-d", "--dump"    -> dump    = true;
                 case "-e", "--execute" -> execute = true;
@@ -112,6 +126,68 @@ public class Bl0jv2_CLI {
                     }
                 }
                 case "--bridge-outbound" -> bridgeOutbound = true;
+                case "-I", "--include" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--include requires a directory");
+                        System.exit(1);
+                    }
+                    includeDirs.add(Path.of(args[++i]));
+                }
+                case "--display" -> display = true;
+                case "--shared" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--shared requires a manifest file");
+                        System.exit(1);
+                    }
+                    sharedManifest = Path.of(args[++i]);
+                }
+                case "--uart-baud" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--uart-baud requires a number");
+                        System.exit(1);
+                    }
+                    try {
+                        uartBaud = Integer.parseInt(args[++i]);
+                        if (uartBaud < 0) throw new NumberFormatException();
+                    } catch (NumberFormatException e) {
+                        System.err.println("--uart-baud must be a non-negative integer: " + args[i]);
+                        System.exit(1);
+                    }
+                }
+                case "--bridge-fs" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--bridge-fs requires a folder");
+                        System.exit(1);
+                    }
+                    bridgeFsDir = Path.of(args[++i]);
+                }
+                case "--disk" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--disk requires an image file");
+                        System.exit(1);
+                    }
+                    diskImage = Path.of(args[++i]);
+                }
+                case "--disk-put" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--disk-put requires HOSTFILE[:NAME]");
+                        System.exit(1);
+                    }
+                    diskPuts.add(DiskImport.Spec.parse(args[++i]));
+                }
+                case "--disk-sectors" -> {
+                    if (i + 1 >= args.length) {
+                        System.err.println("--disk-sectors requires a number");
+                        System.exit(1);
+                    }
+                    try {
+                        diskSectors = Integer.parseInt(args[++i]);
+                        if (diskSectors < 16) throw new NumberFormatException();
+                    } catch (NumberFormatException e) {
+                        System.err.println("--disk-sectors must be an integer of at least 16: " + args[i]);
+                        System.exit(1);
+                    }
+                }
                 case "-h", "--help"    -> help    = true;
                 case "-V", "--version" -> version = true;
                 default -> {
@@ -133,7 +209,7 @@ public class Bl0jv2_CLI {
     }
 
     private void printHelp() {
-        System.out.println("Usage: bl0jv2 [-cdehV] [-n <cores>] <source> [<dest>]");
+        System.out.println("Usage: bl0jv2 [-cdektVh] [-n <cores>] <source> [<dest>]");
         System.out.println();
         System.out.println("Parameters:");
         System.out.println("  <source>       source file");
@@ -154,20 +230,39 @@ public class Bl0jv2_CLI {
         System.out.println("                  into stdlib/net/nic.bl0's own host-bridge ports, so a");
         System.out.println("                  bl0jv2 program using stdlib/net/udp.bl0 can talk to a");
         System.out.println("                  real external program (curl/netcat/etc) - the bl0jv2");
-        System.out.println("                  program must call initNicWithHostBridge(), not plain");
-        System.out.println("                  initNic(); only meaningful together with -e");
+        System.out.println("                  program must call Nic.initWithHostBridge(), not plain");
+        System.out.println("                  Nic.init(); only meaningful together with -e");
         System.out.println("      --bridge-tcp HOSTPORT:VMPORT  relay a real host TCP socket (bound");
-        System.out.println("                  to HOSTPORT) to a bl0jv2 tcpListen()/httpServe() on");
+        System.out.println("                  to HOSTPORT) to a bl0jv2 TcpConn.listen()/Http.serve() on");
         System.out.println("                  VMPORT - e.g. curl http://localhost:HOSTPORT/ reaches a");
-        System.out.println("                  bl0jv2 httpServe(0x0A000001, VMPORT, handler). One real");
-        System.out.println("                  connection at a time (see tcpListen()'s own doc); the");
-        System.out.println("                  bl0jv2 program must call initNicWithHostBridge(), not");
-        System.out.println("                  plain initNic(); only meaningful together with -e");
+        System.out.println("                  bl0jv2 Http.serve(0x0A000001, VMPORT, handler). One real");
+        System.out.println("                  connection at a time (see TcpConn.listen()'s own doc); the");
+        System.out.println("                  bl0jv2 program must call Nic.initWithHostBridge(), not");
+        System.out.println("                  plain Nic.init(); only meaningful together with -e");
         System.out.println("      --bridge-outbound  lets bl0jv2 code reach OUT for real - a program's");
-        System.out.println("                  own tcpConnect() opens a real socket to wherever it");
-        System.out.println("                  names, and stdlib/net/dns.bl0's dnsResolve() answers for");
+        System.out.println("                  own TcpConn.connect() opens a real socket to wherever it");
+        System.out.println("                  names, and stdlib/net/dns.bl0's Dns.resolve() answers for");
         System.out.println("                  real too. The reverse of -b/--bridge-tcp above (a real");
         System.out.println("                  peer reaching IN); only meaningful together with -e");
+        System.out.println("  -I, --include DIR  look an import up in DIR when it is not found next to");
+        System.out.println("                  the file that names it (repeatable)");
+        System.out.println("      --disk FILE  present FILE to the program as a block device (512-byte");
+        System.out.println("                  sectors, ports 0x0F00-0x0F0D); created when missing");
+        System.out.println("      --disk-put HOSTFILE[:NAME]  copy a host file onto the --disk image first");
+        System.out.println("                  (formats a blank image); a .bl0 file is compiled and stored as");
+        System.out.println("                  .bl0c, ready for the shell's exec (repeatable)");
+        System.out.println("      --display  give the program a text-mode display (80x24 or the terminal's size)");
+        System.out.println("                  and draw it on this terminal; the console then goes to the screen,");
+        System.out.println("                  not to the serial line. Use together with -k for the keyboard");
+        System.out.println("      --shared MANIFEST  shared libraries (one source file per line, in load order):");
+        System.out.println("                  programs put on the disk with --disk-put do not contain their code but");
+        System.out.println("                  link to them when loaded, and the libraries are put on the disk too");
+        System.out.println("                  (lib/NAME.bl0c and lib/MANIFEST)");
+        System.out.println("      --uart-baud N  send on the serial port at N bits per second (default 0:");
+        System.out.println("                  instantly); a driver that ignores the line status loses text");
+        System.out.println("      --bridge-fs DIR  show the host folder DIR to the program (read, write,");
+        System.out.println("                  list, delete inside it only; the guest's hls/hget/hput)");
+        System.out.println("      --disk-sectors N  size of a newly created image (default 2048)");
         System.out.println("  -h, --help      show this help message and exit");
         System.out.println("  -V, --version   print version information and exit");
     }
@@ -176,67 +271,42 @@ public class Bl0jv2_CLI {
         System.out.println("bl0jv2 " + C.VERSION);
     }
 
+    // the guest's output is Unicode text; write it as UTF-8 whatever the host's default charset is
+    private static final java.io.PrintStream UTF8_OUT =
+            new java.io.PrintStream(new java.io.FileOutputStream(java.io.FileDescriptor.out), true, java.nio.charset.StandardCharsets.UTF_8);
+
     private static Writer consoleAutoFlushWriter() {
         return new Writer() {
             @Override public void write(char[] cbuf, int off, int len) {
-                System.out.print(new String(cbuf, off, len));
-                System.out.flush();
+                UTF8_OUT.print(new String(cbuf, off, len));
+                UTF8_OUT.flush();
             }
-            @Override public void flush() { System.out.flush(); }
+            @Override public void flush() { UTF8_OUT.flush(); }
             @Override public void close() {}
         };
     }
 
-    // reads real lines from stdin on a background thread and feeds each
-    // character into the VM's simulated keyboard exactly the way a real
-    // keyboard controller would: hostPortWrite() places the byte on its
-    // data port, raiseInterrupt() asserts the IRQ line - see
-    // Bl0jv2_jVM.hostPortWrite()'s own doc. One VM instance, one bridge
-    // thread, for the whole run - exec() (see its own doc) runs loaded
-    // programs IN this same instance now, not a second one, so there is
-    // no "which process is currently running" redirection to do: whatever
-    // code registered a handler for vector 2, in this VM, sees it.
-    //
-    // A small pacing delay between characters avoids overwriting one byte
-    // with the next before the running program's own interrupt handler has
-    // read it (a real hardware hazard, not just a simulation quirk - see
-    // Bl0jv2_KeyboardTest's own doc on the same race). readLine() blocks
-    // on real terminal input, so this only ever makes sense against an
-    // interactive stdin, not a redirected/empty one.
+    // Feeds what the host terminal sends into the VM's keyboard device (a FIFO with an
+    // interrupt, see UartController): bytes as they come, UTF-8 and escape
+    // sequences untouched. The guest turns them into keys. Only meaningful against an
+    // interactive stdin.
     private static void startKeyboardBridge(Bl0jv2_jVM vm) {
+        // the terminal's size is the screen's size; raw mode makes every key reach the guest as
+        // the terminal sent it (see HostTerminal) - the guest's line editor does the editing
+        int[] size = HostTerminal.size();
+        vm.set_console_size(size[0], size[1]);
+        HostTerminal.enterRawMode();
         Thread bridge = new Thread(() -> {
-            var reader = new BufferedReader(new InputStreamReader(System.in));
+            var in = System.in;
+            byte[] buffer = new byte[256];
             try {
-                // gives the program a head start to reach its own
-                // registerHandler() call before the first byte arrives -
-                // an interrupt raised before anything is registered for
-                // its vector is silently dropped (see InterruptController's
-                // own doc), losing the very first keystroke. A real human
-                // typing their first command takes far longer than this to
-                // even start, so this delay is never actually felt in
-                // interactive use - it only matters against piped input,
-                // where the very first character could otherwise arrive
-                // within microseconds of the program starting
-                Thread.sleep(150);
-                // a real human typing is always paced far looser than
-                // this anyway - these delays only matter when testing
-                // against piped/redirected input, where an entire line
-                // (or several) is available to readLine() instantly, with
-                // none of a real keyboard's natural inter-key delay
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    for (char c : line.toCharArray()) {
-                        vm.hostPortWrite(0, 1, c);
-                        vm.raiseInterrupt(2);
-                        Thread.sleep(20);
-                    }
-                    vm.hostPortWrite(0, 1, 13); // Enter
-                    vm.raiseInterrupt(2);
-                    Thread.sleep(60);
-                }
-            } catch (IOException | InterruptedException ignored) {
-                // stdin closed or the JVM is shutting down - nothing left
-                // for this bridge to do either way
+                int n;
+                // the bytes go into the keyboard device's FIFO as they arrive and an interrupt tells
+                // the guest; the FIFO is what makes pacing unnecessary. In the terminal's normal line
+                // mode the Enter key arrives as a line feed, which the guest also takes as Enter.
+                while ((n = in.read(buffer)) > 0) vm.uart_receive(java.util.Arrays.copyOf(buffer, n));
+            } catch (IOException ignored) {
+                // stdin closed or the JVM is shutting down - nothing left for this bridge to do
             }
         }, "keyboard-bridge");
         bridge.setDaemon(true);
@@ -262,7 +332,11 @@ public class Bl0jv2_CLI {
                 String line = scanner.nextLine().trim();
                 if(line.equals("!exit")) break;
 
-                byte[] instructions = compiler.compile(parser.getAST(lexer.getTokens(line)));
+                var ast = parser.getAST(lexer.getTokens(line));
+                // imports work at the prompt too: relative to the current directory, then -I
+                if (ast instanceof PROGRAM_N program)
+                    ast = Bl0jv2_Linker.resolveImports(program, Path.of("repl"), includeDirs);
+                byte[] instructions = compiler.compile(ast);
 
                 Bl0jv2_Utils.dump_file(instructions, writer);
 
@@ -333,7 +407,7 @@ public class Bl0jv2_CLI {
 
             if (!(ast instanceof PROGRAM_N program))
                 throw new IllegalStateException("parser did not produce a program");
-            var linked = Bl0jv2_Linker.resolveImports(program, source);
+            var linked = Bl0jv2_Linker.resolveImports(program, source, includeDirs);
 
             bytes = compiler.compile(linked);
             timer.mark("compiler");
@@ -365,6 +439,30 @@ public class Bl0jv2_CLI {
                 // fine, this just keeps VM setup grouped together
                 vm.set_core_count(cores);
                 vm.feed_compiled_file(ByteBuffer.wrap(bytes));
+                vm.set_uart_baud(uartBaud);
+                if (bridgeFsDir != null) {
+                    try {
+                        vm.attach_share(new DirShare(bridgeFsDir));
+                    } catch (IOException e) {
+                        System.err.println("--bridge-fs " + bridgeFsDir + ": " + e.getMessage());
+                        return 1;
+                    }
+                }
+                if (diskImage == null && !diskPuts.isEmpty()) {
+                    System.err.println("--disk-put needs --disk <image>");
+                    return 1;
+                }
+                if (diskImage != null) {
+                    try {
+                        var disk = new FileDisk(diskImage, diskSectors);
+                        SharedLibs shared = sharedManifest == null ? null : SharedLibs.read(sharedManifest);
+                        if (!diskPuts.isEmpty() || shared != null) DiskImport.put(disk, diskPuts, includeDirs, shared);
+                        vm.attach_disk(disk);
+                    } catch (IOException e) {
+                        System.err.println("--disk " + diskImage + ": " + e.getMessage());
+                        return 1;
+                    }
+                }
                 // -k needs output to appear as the program prints it, not
                 // buffered until run_instructions() returns (which, for an
                 // interactive keyboard-driven program, might be "never
@@ -373,15 +471,24 @@ public class Bl0jv2_CLI {
                 // flush after every write
                 Writer outWriter = (keyboard || bridgeUdpPort >= 0 || bridgeTcpPort >= 0 || bridgeOutbound)
                         ? consoleAutoFlushWriter() : writer;
-                vm.set_out_writer(outWriter);
+                // with a display the screen is the console: whatever the program print()s would only
+                // scribble over it, so that output is dropped
+                vm.set_out_writer(display ? Writer.nullWriter() : outWriter);
+                if (display) {
+                    int[] size = HostTerminal.size();
+                    vm.set_console_size(size[0], size[1]);
+                    vm.attach_display();
+                }
                 if (keyboard) {
                     vm.set_interrupt_poll_interval(1);
                     startKeyboardBridge(vm);
                 }
+                UdpBridge udpBridge = null;
                 if (bridgeUdpPort >= 0) {
                     vm.set_interrupt_poll_interval(1);
                     try {
-                        new UdpBridge(vm, bridgeUdpPort, 0x0A000001).start();
+                        udpBridge = new UdpBridge(vm, bridgeUdpPort, 0x0A000001);
+                        udpBridge.start();
                     } catch (java.net.SocketException e) {
                         System.err.println("--bridge-udp: cannot bind host port " + bridgeUdpPort + ": " + e.getMessage());
                         return 1;
@@ -402,14 +509,17 @@ public class Bl0jv2_CLI {
                 if (bridgeOutbound) {
                     vm.set_interrupt_poll_interval(1);
                     new TcpOutboundBridge(vm).start();
-                    new UdpOutboundBridge(vm).start();
+                    new IcmpOutboundBridge(vm).start();
+                    new UdpOutboundBridge(vm, udpBridge == null ? f -> false : udpBridge::claims).start();
                 }
-                System.out.println();
+                HostScreen screen = display ? new HostScreen(vm, UTF8_OUT) : null;
+                if (!display) System.out.println();
                 // flush in finally: a crash mid-program must not discard
                 // whatever it already printed before the exception
                 try {
                     vm.run_instructions();
                 } finally {
+                    if (screen != null) screen.close();
                     outWriter.flush();
                 }
             }

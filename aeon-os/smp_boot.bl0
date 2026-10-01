@@ -66,11 +66,14 @@
 // qualified name from any function regardless of nesting.
 
 import '../stdlib/mathlib.bl0';
+import '../stdlib/arrlib.bl0';
 import 'kernel.bl0';
+import 'lib/loader.bl0';
 
 def class Kernel {
     static field numCores;
     static field doneCounterAddr;
+    static field doneEvent;     // signalled by every taskDone(), so the boot core sleeps instead of polling
     // portConsole/sysPutcVector live here, not as plain top-level
     // variables, for the same reason every other piece of shared state in
     // this file does: a plain 'def' function (sysPutc, taskNetwork,
@@ -108,6 +111,7 @@ HEAP_BASE = 8;
 reserve(0, 8);
 poke32(HeapAlloc.counterAddr, HEAP_BASE);
 poke32(Kernel.doneCounterAddr, 0);
+Kernel.doneEvent = newEvent();
 
 def kalloc(size) {
     return atomicAdd(HeapAlloc.counterAddr, size);
@@ -203,16 +207,6 @@ def pickIndex() {
     return best;
 }
 
-// removes index i by swapping with the last element and popping - caller
-// must already hold Scheduler.queueLock
-def removeAt(i) {
-    last = len(Scheduler.tasks) - 1;
-    if (i != last) {
-        Scheduler.tasks[i] = Scheduler.tasks[last];
-    }
-    pop(Scheduler.tasks);
-}
-
 // simple round-robin placement across the worker cores - the "smart"
 // choice (load balancing, affinity, whatever) is exactly the kind of
 // policy decision that belongs here in bl0jv2, not baked into the VM;
@@ -237,7 +231,7 @@ def dispatchNext() {
         return nil;
     }
     t = Scheduler.tasks[idx];
-    removeAt(idx);
+    Arr.removeAt(Scheduler.tasks, idx); // swaps the last task in; queue order is irrelevant (pickIndex rescans by priority)
     unlock(Scheduler.queueLock);
     enableInterrupts();
 
@@ -250,6 +244,7 @@ def dispatchNext() {
 
 def taskDone() {
     atomicAdd(Kernel.doneCounterAddr, 1);
+    signalEvent(Kernel.doneEvent);
 }
 
 // --- demo tasks: each reports which real core it actually ran on, to
@@ -257,13 +252,13 @@ def taskDone() {
 // calls ensureUserMode() first - the core it lands on runs the rest of
 // the task, and every task dispatched to it afterward, unprivileged ---
 
-def taskLogger() {
+def taskLogger(arg) {
     ensureUserMode();
     println '    [logger] running on core ' + currentCore();
     taskDone();
 }
 
-def taskNetwork() {
+def taskNetwork(arg) {
     ensureUserMode();
     buf = kalloc(4);
     poke32(buf, 0xC0FFEE);
@@ -278,7 +273,7 @@ def taskNetwork() {
 
 // enough real work that genuine cross-core overlap is plausible, not just
 // three near-instant tasks that happen to interleave trivially
-def taskCompute() {
+def taskCompute(arg) {
     ensureUserMode();
     i = 0;
     sum = 0;
@@ -296,7 +291,7 @@ def taskCompute() {
 // dispatched task is only logged to stderr by the worker (see CoreWorker's
 // own catch block) and never calls taskDone(), which would strand the
 // completion count below and hang the final wait forever
-def taskRogue() {
+def taskRogue(arg) {
     ensureUserMode();
     try {
         out8(Kernel.portConsole, 99);
@@ -326,17 +321,14 @@ while (true) {
 
 println '';
 println '--- waiting for all dispatched tasks to complete ---';
-// a plain busy-poll, not haltCore() - see this file's own header comment
-// on why a targeted, core-specific wakeup isn't safe to build on yet. The
-// wait(1) still keeps this from pegging core 0 at 100% for the loop's
-// whole (short but nonzero) duration - this is a raw-memory counter check,
-// completely unrelated to the interrupt poll mechanism (see kbHasInput's
-// own comment in shell.bl0 for why THAT loop's wait() doesn't delay input
-// delivery), so there's no delivery-latency trade-off to weigh here at all
+// sleeps on Kernel.doneEvent, which every task signals as it finishes - no
+// polling. The generation is read BEFORE the counter is checked, so a task
+// that finishes between the check and the wait still ends the wait at once
+// (see waitEvent's own doc); the 100 ms cap is only a safety net.
 while (true) {
-    done = peek32(Kernel.doneCounterAddr);
-    if (done >= 6) { break; }
-    wait(1);
+    gen = eventGen(Kernel.doneEvent);
+    if (peek32(Kernel.doneCounterAddr) >= 6) { break; }
+    waitEvent(Kernel.doneEvent, gen, 100);
 }
 
 println '';
@@ -361,7 +353,13 @@ println 'all ' + peek32(Kernel.doneCounterAddr) + ' tasks completed across ' + (
 // would on a real system ---
 println '';
 println '--- launching shell ---';
-journalExec('shell', 'aeon-os/shell.bl0c');
+Disk.init(kalloc(512));
+if (!Fs.mount()) {
+    println 'no boot disk: start with --disk <image> holding sbin/shell.bl0c (see aeon-os/README.md)';
+    panic('no boot disk');
+}
+loadLibraries();
+journalExec('shell', 'sbin/shell.bl0c');
 
 println '';
 printJournal();

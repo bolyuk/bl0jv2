@@ -1,0 +1,50 @@
+// Paths for the flat filesystem in fs.bl0. A "directory" there is just a name
+// prefix ending in '/', and an entry called 'docs/' (a zero-length file) marks
+// one that exists even while empty. This file only does the text work:
+// turning what a user typed plus a current directory into a stored name.
+//
+// A resolved path has no leading and no trailing '/', '.' and '..' are folded
+// away ('..' at the root stays at the root), and the root itself is ''.
+
+import '../str/split.bl0';
+
+def class FsPath {
+    static def resolve(cwd, path) {
+        text = path;
+        if (len(path) == 0 || strSub(path, 0, 1) != '/') { text = cwd + '/' + path; }
+        pieces = Split.split(text, '/');
+        parts = [];
+        i = 0;
+        while (i < len(pieces)) {
+            piece = pieces[i];
+            if (piece == '..') {
+                if (len(parts) > 0) { pop(parts); }
+            } else if (piece != '' && piece != '.') {
+                push(parts, piece);
+            }
+            i += 1;
+        }
+        return strJoin(parts, '/');
+    }
+
+    // the directory part of a resolved path ('' for a top-level name)
+    static def parent(path) {
+        i = len(path) - 1;
+        while (i >= 0) {
+            if (strSub(path, i, i + 1) == '/') { return strSub(path, 0, i); }
+            i -= 1;
+        }
+        return '';
+    }
+
+    // the last component
+    static def base(path) {
+        return strSub(path, len(FsPath.parent(path)) == 0 ? 0 : len(FsPath.parent(path)) + 1, len(path));
+    }
+
+    // the prefix every name inside directory 'dir' starts with
+    static def prefix(dir) {
+        if (dir == '') { return ''; }
+        return dir + '/';
+    }
+}
