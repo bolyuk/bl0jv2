@@ -243,6 +243,24 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
 Limits: one terminal cell per character (no double-width or combining marks); there is no
 preemption (see Several programs at once), and a background job cannot read the terminal.
 
+## Devices, processes and the network are files
+
+Three folders are made by the kernel, not stored on the disk (`Fs.provide`, see `stdlib/fs/fs.bl0`): a file in them is
+generated when read and does something when written, and the usual owners and modes apply.
+
+- `dev/` - `null`, `zero`, `random`, `console` (write to print), `time`, `uptime`, `cpu`.
+- `proc/<pid>/` - `status`, `cmd`, and `ctl` (`echo kill > proc/3/ctl`; only the owner or root).
+- `net/` - `ip`, `dns/server`, `dns/<name>` (reads as the address), and for `tcp` and `udp`: `clone` (read it to get a
+  connection number N), then `N/ctl` (`connect <host> <port>`, `listen <port>`, `accept`, `close`; udp: `bind`,
+  `connect`, `close`), `N/data` (read what arrived, write to send) and `N/status`. A connection belongs to its maker (0600).
+
+```
+$ cat net/tcp/clone
+1
+$ echo connect 10.0.0.2 7000 > net/tcp/1/ctl
+$ echo hello > net/tcp/1/data
+```
+
 ## Moving files in and out
 
 `aeon.sh` shares `./share` (override with `SHARE=dir`) with `--bridge-fs`. It

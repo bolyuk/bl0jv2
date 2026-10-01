@@ -283,8 +283,24 @@ def class Nic {
     // empty. Safe to call from multiple cores with no separate has-frame
     // check racing against the pop itself, unlike hasFrame()+recv() as two
     // separate calls (see recv()'s own doc)
+    // moves what was sent to the receive queue (the loopback "wire"); the caller holds Nic.lock. The ISR does it, and
+    // so does a poll: code that runs where interrupts do not (a system call handler) must still see its own frames.
+    static def flushLocked() {
+        if (len(Nic.txQueue) == 0) { return nil; }
+        batch = Nic.txQueue;
+        Nic.txQueue = [];
+        i = 0;
+        while (i < len(batch)) {
+            push(Nic.rxQueue, batch[i]);
+            Nic.rxCount = Nic.rxCount + 1;
+            signalEvent(Nic.rxEvent);
+            i = i + 1;
+        }
+    }
+
     static def tryRecv() {
         lock(Nic.lock);
+        Nic.flushLocked();
         if (len(Nic.rxQueue) == Nic.rxHead) {
             unlock(Nic.lock);
             return nil;
@@ -322,15 +338,7 @@ Nic.txSeq = 0;
 // the "device" ISR: loops whatever was just staged back into the RX queue
 def onNicIRQ(vector) {
     lock(Nic.lock);
-    batch = Nic.txQueue;
-    Nic.txQueue = [];
-    i = 0;
-    while (i < len(batch)) {
-        push(Nic.rxQueue, batch[i]);
-        Nic.rxCount = Nic.rxCount + 1;
-        signalEvent(Nic.rxEvent);
-        i = i + 1;
-    }
+    Nic.flushLocked();
     unlock(Nic.lock);
 }
 
