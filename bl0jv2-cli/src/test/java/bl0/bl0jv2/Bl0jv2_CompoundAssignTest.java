@@ -68,9 +68,16 @@ class Bl0jv2_CompoundAssignTest {
     }
 
     @Test
-    void assigningToAFunctionNameIsACompileError() {
-        var e = assertThrows(Bl0j_CompilerException.class, () -> run("def f() { return 1; } f = 5;"));
-        assertTrue(e.getMessage().contains("cannot assign to 'f': it is the name of a function"), e.getMessage());
+    void assigningToAFunctionNameMakesALocalThatHidesIt() {
+        assertEquals("5|1", run("def f() { return 1; } def g() { return f(); } f = 5; print str(f) + '|' + str(g());"));
+    }
+
+    @Test
+    void aLocalNamedLikeAFunctionInsideAFunctionDoesNotDisturbTheGlobalOne() {
+        // the situation that made this an error before: a library local called
+        // 'handler' next to a program that defines its own 'handler' function
+        assertEquals("lib|prog", run(
+                "def handler(x) { return 'prog'; } def lib() { handler = 'lib'; return handler; } print lib() + '|' + handler(1);"));
     }
 
     @Test

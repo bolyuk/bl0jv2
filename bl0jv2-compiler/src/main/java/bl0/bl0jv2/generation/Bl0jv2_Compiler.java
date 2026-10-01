@@ -1955,8 +1955,11 @@ public final class Bl0jv2_Compiler {
             // as nil, makes the lambda capture the very cell the assignment
             // below then fills in - the same cell, so by the time the
             // lambda actually runs it sees itself.
-            if (functionArity.containsKey(idNode.name))
-                throw err("cannot assign to '" + idNode.name + "': it is the name of a function");
+            // assigning to the name of a global function makes a LOCAL variable of
+            // that name, hiding the function from here on in this function - the
+            // same as a parameter does. (It must not be an error: a library
+            // function's local called 'handler' would then break the moment a
+            // program defines its own top-level 'handler'.)
             if (classMapping.containsKey(idNode.name))
                 throw err("cannot assign to '" + idNode.name + "': it is the name of a class");
 

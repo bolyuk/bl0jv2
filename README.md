@@ -134,9 +134,9 @@ def counter() {
 
 Top-level `def` functions are global and callable before their definition. A
 `def` inside a function or block is a closure over the enclosing variables,
-exists from its statement on, and can call itself. A parameter shadows a
-global function of the same name; assigning to a function's or class's name is
-a compile error. Calls are checked: a wrong argument count is a compile error
+exists from its statement on, and can call itself. A parameter, or a local variable assigned in the function, shadows a global
+function of the same name inside that function; assigning to a class's name
+is a compile error. Calls are checked: a wrong argument count is a compile error
 when the function is known and `function f expects 2 arguments, got 1`
 otherwise. Recursion deeper than 100000 calls is a catchable
 `stack overflow` error.
