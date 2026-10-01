@@ -233,4 +233,19 @@ class ShellFilesTest {
         command(s, "echo [$1]", "[]");                           // the arguments are gone after the script
         command(s, "sh nosuch.sh", "no such file");
     }
+
+    @Test
+    void sortUniqAndFind(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("d.img"));
+        command(s, "echo \"pear\\napple\\npear\\n10\\n9\" > f.txt", "$ ");
+        command(s, "sort f.txt | head -n 1", "10");                          // text order: 10 < 9 < apple < pear
+        command(s, "sort -n f.txt | head -n 1", "apple");                    // apple counts as 0: stable, so first
+        command(s, "sort -r f.txt | head -n 1", "pear");
+        command(s, "sort f.txt | uniq -c | grep pear", "2 pear");
+        command(s, "mkdir sub", "$ ");
+        command(s, "echo x > sub/needle.txt", "$ ");
+        command(s, "find needle", "/sub/needle.txt");
+        command(s, "find needle sub", "/sub/needle.txt");
+        command(s, "find zzz", "nothing found");
+    }
 }

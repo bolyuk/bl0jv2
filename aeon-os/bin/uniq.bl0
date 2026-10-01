@@ -1,0 +1,41 @@
+// aeon-os program: drop repeated neighbouring lines; uniq [-c] [file] (-c prefixes the count)
+// Loaded from the virtual disk by the shell (bin/uniq.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+import '../lib/input.bl0';
+
+def flush(line, count, counting) {
+    if (line == nil) { return nil; }
+    if (counting) { say(Fmt.format('{:>6} {}', [count, line])); } else { say(line); }
+}
+
+def main(words) {
+    counting = false;
+    file = nil;
+    i = 1;
+    while (i < len(words)) {
+        if (words[i] == '-c') { counting = true; }
+        else if (file == nil) { file = words[i]; }
+        else { sayErr('usage: uniq [-c] [file]'); return nil; }
+        i += 1;
+    }
+    reader = openInput(file);
+    if (reader == nil) { sayErr(file + ': no such file'); return nil; }
+    lines = new Lines(reader);
+    last = nil;
+    count = 0;
+    while (true) {
+        line = lines.next();
+        if (line == nil) { break; }
+        if (last != nil && line == last) {
+            count += 1;
+        } else {
+            flush(last, count, counting);
+            last = line;
+            count = 1;
+        }
+    }
+    flush(last, count, counting);
+}
+
+programMain(main);

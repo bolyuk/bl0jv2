@@ -147,6 +147,8 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   on the line before it is split, so a value is parsed like typed text. `sh file [args]` runs the lines of a
   text file as commands (empty lines and `#` comments skipped); `$0`, `$1`... are the file's name and the
   arguments while it runs.
+* **More filters and search**: `sort [-r] [-n]`, `uniq [-c]` (stable merge sort, neighbouring duplicates) read a
+  file or standard input like `grep`; `find <text> [folder]` lists files below a folder whose name contains the text.
 * **Colours**: the prompt, `ls` (folders, programs), `ps`, `df`, error messages and the banner use
   ANSI colours (`Term.paint`, `lib/term.bl0`). A program's `paint()` colours only when its output goes to the
   terminal - never into a pipe or a file. The line editor measures the prompt without its escape sequences.
