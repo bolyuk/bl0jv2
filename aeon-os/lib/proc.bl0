@@ -119,6 +119,7 @@ def class Proc {
         parent = Ctx.me();                 // the job runs for whoever started it
         c.uid = parent.uid;
         c.gid = parent.gid;
+        c.groups = parent.groups;
         c.words = words;
         c.cwd = cwd;
         c.inPath = io[0];

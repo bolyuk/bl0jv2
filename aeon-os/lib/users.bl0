@@ -1,6 +1,9 @@
 // aeon-os: the user database - two text files that only root can write:
 //   etc/passwd   one line per user: name:uid:gid:home
 //   etc/shadow   one line per user: name:salt:hash     (mode 0600; hash empty = no password)
+//   etc/group    one line per group: name:gid:member,member,...
+// A user's primary group is the gid in etc/passwd; the other groups they belong to are the lines of etc/group that
+// list them. Everything that is a group of theirs counts when files are checked (see lib/perm.bl0).
 // A password is stored as SHA-256 applied 200 times to salt + password, so the file does not hold it and two
 // users with the same password differ. This code runs in the kernel (the login and password calls) and in the
 // programs root runs to edit the files (useradd, userdel); it needs read access to etc/shadow, which a
@@ -68,6 +71,84 @@ def class Users {
         while (i < len(lines)) {
             parts = Split.split(lines[i], ':');
             if (len(parts) >= 3) { push(out, [parts[0], parts[1], parts[2]]); }
+            i += 1;
+        }
+        return out;
+    }
+
+    // [[name, gid, [members]], ...]
+    static def groups() {
+        out = [];
+        if (!Fs.mounted) { return out; }
+        text = Fs.read('etc/group');
+        if (text == nil) { return out; }
+        lines = Split.split(text, strChar(10));
+        i = 0;
+        while (i < len(lines)) {
+            parts = Split.split(lines[i], ':');
+            if (len(parts) >= 3) {
+                members = [];
+                names = Split.split(parts[2], ',');
+                j = 0;
+                while (j < len(names)) {
+                    if (names[j] != '') { push(members, names[j]); }
+                    j += 1;
+                }
+                push(out, [parts[0], unsignedNumber(parts[1]), members]);
+            } else if (len(parts) == 2) {
+                push(out, [parts[0], unsignedNumber(parts[1]), []]);
+            }
+            i += 1;
+        }
+        return out;
+    }
+
+    static def findGroup(name) {
+        all = Users.groups();
+        i = 0;
+        while (i < len(all)) {
+            if (all[i][0] == name) { return all[i]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    static def findGid(gid) {
+        all = Users.groups();
+        i = 0;
+        while (i < len(all)) {
+            if (all[i][1] == gid) { return all[i]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    // the name of group 'gid' ('#N' when it has none)
+    static def groupNameOf(gid) {
+        g = Users.findGid(gid);
+        return g == nil ? '#' + gid : g[0];
+    }
+
+    static def writeGroups(all) {
+        lines = [];
+        i = 0;
+        while (i < len(all)) {
+            push(lines, all[i][0] + ':' + all[i][1] + ':' + strJoin(all[i][2], ','));
+            i += 1;
+        }
+        Fs.write('etc/group', len(lines) == 0 ? '' : strJoin(lines, strChar(10)) + strChar(10));
+    }
+
+    // every group number a user is in, the primary one first
+    static def groupsOf(name) {
+        u = Users.find(name);
+        out = [];
+        if (u == nil) { return out; }
+        push(out, u[2]);
+        all = Users.groups();
+        i = 0;
+        while (i < len(all)) {
+            if (Arr.contains(all[i][2], name) && !Arr.contains(out, all[i][1])) { push(out, all[i][1]); }
             i += 1;
         }
         return out;

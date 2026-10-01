@@ -13,7 +13,9 @@
 //                       padded, at most 47 bytes) at 0, first data sector + 1
 //                       at 48 (0 = empty file), size in bytes at 52, owner
 //                       user id (16 bits) at 56, group id at 58, mode at 60 (bit
-//                       15 set = the mode is recorded, bits 0-8 rwxrwxrwx; an
+//                       15 set = the mode is recorded, bits 0-8 rwxrwxrwx, bit 9
+//                       the sticky bit (only the owner of a file or of its folder may
+//                       remove or rename it there - the kernel enforces it); an
 //                       entry written before these existed has all zero there
 //                       and counts as owner 0, group 0, mode 0644 for a file and
 //                       0755 for a folder). An entry whose first name byte is 0
@@ -231,7 +233,7 @@ def class Fs {
 
     // the meta of a file or folder that is being created now
     static def newMeta(folder) {
-        base = folder ? 0x1FF : 0x1B6;          // 0777 / 0666, less the umask
+        base = folder ? 0x1FF : 0x1B6;          // 0777 / 0666, less the umask (which only ever takes rwx bits away)
         return [Fs.curUid, Fs.curGid, 0x8000 | (base & ~Fs.umask)];
     }
 
@@ -822,7 +824,7 @@ def class Fs {
         Fs.writeSector(Fs.entrySector(e));
     }
 
-    // [owner, group, permission bits 0-511, size, kind] for a file (kind 0) or a folder (kind 1), nil if
+    // [owner, group, permission bits (rwxrwxrwx = 0-511, sticky = 512), size, kind] for a file (kind 0) or a folder (kind 1), nil if
     // there is none. A folder is its marker entry 'name/' when it has one, otherwise it only exists as long
     // as something is below it (owner 0, group 0, 0755). The shared host folder has no owners: 0777.
     static def doStat(name) {
@@ -846,7 +848,7 @@ def class Fs {
         }
         if (e >= 0) {
             meta = Fs.entryMeta(e);
-            perm = (meta[2] & 0x8000) != 0 ? (meta[2] & 0x1FF) : (folder ? 0x1ED : 0x1A4);
+            perm = (meta[2] & 0x8000) != 0 ? (meta[2] & 0x3FF) : (folder ? 0x1ED : 0x1A4);
             return [meta[0], meta[1], perm, folder ? 0 : Fs.entrySize(e), folder ? 1 : 0];
         }
         inside = Fs.doList(name + '/');
@@ -879,7 +881,7 @@ def class Fs {
         e = Fs.metaEntry(name);
         if (e < 0) { return false; }
         meta = Fs.entryMeta(e);
-        meta[2] = 0x8000 | (mode & 0x1FF);
+        meta[2] = 0x8000 | (mode & 0x3FF);
         Fs.writeMeta(e, meta);
         return true;
     }

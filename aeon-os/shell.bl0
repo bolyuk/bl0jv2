@@ -93,7 +93,7 @@ def cmdHelp() {
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump sort uniq find tree more diff seq chmod chown passwd useradd userdel mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
+    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
 }
@@ -113,7 +113,13 @@ def cmdWhoami() {
 // id: the numbers behind the name
 def cmdId() {
     me = syscall(Sys.who, nil);
-    say('uid=' + me[0] + '(' + me[3] + ') gid=' + me[1]);
+    names = [];
+    i = 0;
+    while (i < len(me[4])) {
+        push(names, me[4][i] + '(' + Users.groupNameOf(me[4][i]) + ')');
+        i += 1;
+    }
+    say('uid=' + me[0] + '(' + me[3] + ') gid=' + me[1] + '(' + Users.groupNameOf(me[1]) + ') groups=' + strJoin(names, ','));
 }
 
 // what logging in as this user changes in the shell: the history is theirs, and so are the settings
@@ -300,7 +306,7 @@ registerHandler(sysSpawn, Exec.spawnVector, 1);
 // every file operation of a program in user mode: allowed for the caller's user, or an error
 def sysFsGate(request) {
     c = Ctx.me();
-    Perm.check(c.uid, c.gid, request[0], request[1], request[2]);
+    Perm.check(c.uid, c.groups, request[0], request[1], request[2]);
     return Fs.runAs(c.uid, c.gid, request[0], request[1], request[2]);
 }
 registerHandler(sysFsGate, Sys.fsGate, 1);
@@ -331,9 +337,11 @@ def sysLogin(request) {
         Log.writeDirect('login failed for ' + request[0]);
         return 'wrong password';
     }
-    if (!request[2]) { push(c.stack, [c.uid, c.gid]); }
+    if (!request[2]) { push(c.stack, [c.uid, c.gid, c.groups]); }
     c.uid = u[1];
     c.gid = u[2];
+    c.groups = Users.groupsOf(u[0]);
+    if (len(c.groups) == 0) { c.groups = [u[2]]; }
     Log.writeDirect('login: ' + u[0] + ' (uid ' + u[1] + ')');
     return [u[1], u[2], u[3], u[0]];
 }
@@ -346,16 +354,17 @@ def sysLogout(request) {
     previous = pop(c.stack);
     c.uid = previous[0];
     c.gid = previous[1];
+    c.groups = previous[2];
     return sysWho(nil);
 }
 registerHandler(sysLogout, Sys.logout, 1);
 
-// who the caller runs as: [uid, gid, home, name]
+// who the caller runs as: [uid, gid, home, name, groups]
 def sysWho(request) {
     c = Ctx.me();
     u = Users.findUid(c.uid);
-    if (u == nil) { return [c.uid, c.gid, c.uid == 0 ? 'root' : '', c.uid == 0 ? 'root' : '#' + c.uid]; }
-    return [c.uid, c.gid, u[3], u[0]];
+    if (u == nil) { return [c.uid, c.gid, c.uid == 0 ? 'root' : '', c.uid == 0 ? 'root' : '#' + c.uid, c.groups]; }
+    return [c.uid, c.gid, u[3], u[0], c.groups];
 }
 registerHandler(sysWho, Sys.who, 1);
 
@@ -377,10 +386,8 @@ registerHandler(sysSetPassword, Sys.setPassword, 1);
 // folders the system needs, made while the shell is still privileged: tmp/ for everybody, root's home
 def ensureSystemDirs() {
     if (!Fs.mounted) { return nil; }
-    if (!Fs.exists('tmp/')) {
-        Fs.write('tmp/', '');
-        Fs.chmod('tmp', 0x1FF);              // 0777: anyone may make files there (pipes use it)
-    }
+    if (!Fs.exists('tmp/')) { Fs.write('tmp/', ''); }
+    if (Fs.stat('tmp')[2] != 0x3FF) { Fs.chmod('tmp', 0x3FF); }      // 1777: anyone may make files there (pipes use it), only their owners remove them
     if (!Fs.exists('root/')) {
         Fs.write('root/', '');
         Fs.chmod('root', 0x1C0);             // 0700

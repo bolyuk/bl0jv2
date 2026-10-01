@@ -227,6 +227,14 @@ class Bl0jv2_FsTest {
                 "a = Fs.stat('old'); b = Fs.stat('d'); print str(a[2]) + ',' + str(a[0]) + '|' + str(b[2]) + ',' + str(b[0]);"));
     }
 
+    @Test
+    void theStickyBitIsPartOfTheMode(@TempDir Path dir) throws IOException {
+        // 1777 = 0x3FF; a mask of 0777 would lose it; the umask only takes rwx bits away
+        assertEquals("1023|493|1023", run(dir, 64,
+                "Fs.format(); Fs.write('t/', ''); Fs.chmod('t', 1023); print str(Fs.stat('t')[2]) + '|'; " +
+                "Fs.write('d/', ''); print str(Fs.stat('d')[2]) + '|'; Fs.chmod('d', 0x3FF + 0x400); print str(Fs.stat('d')[2]);"));
+    }
+
     private static String twoDisks(Path dir, MemoryDisk first, MemoryDisk second, String body) throws IOException {
         Path entry = dir.resolve("entry.bl0");
         Files.writeString(entry, "import 'stdlib/fs/fs.bl0'; Disk.init(8192); " + body);

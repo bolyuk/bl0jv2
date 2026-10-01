@@ -1,0 +1,26 @@
+// aeon-os program: the groups of a user; groups [user]
+// Loaded from the virtual disk by the shell (bin/groups.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+import '../lib/users.bl0';
+import '../lib/perm.bl0';
+
+def main(words) {
+    if (len(words) > 2) { sayErr('usage: groups [user]'); return nil; }
+    gids = nil;
+    if (len(words) == 2) {
+        if (Users.find(words[1]) == nil) { sayErr(words[1] + ': no such user'); return nil; }
+        gids = Users.groupsOf(words[1]);
+    } else {
+        gids = syscall(Sys.who, nil)[4];
+    }
+    names = [];
+    i = 0;
+    while (i < len(gids)) {
+        push(names, Users.groupNameOf(gids[i]));
+        i += 1;
+    }
+    say(strJoin(names, ' '));
+}
+
+programMain(main);

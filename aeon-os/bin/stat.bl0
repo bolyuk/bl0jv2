@@ -10,7 +10,7 @@ def main(words) {
     name = inCwd(words[1]);
     st = Fs.stat(name);
     if (st == nil) { sayErr(words[1] + ': no such file or folder'); return nil; }
-    owner = Users.nameOf(st[0]) + ' (' + st[0] + '), group ' + st[1];
+    owner = Users.nameOf(st[0]) + ' (' + st[0] + '), group ' + Users.groupNameOf(st[1]) + ' (' + st[1] + ')';
     mode = Perm.modeText(st[2]) + ' (' + ((st[2] >> 6) & 7) + ((st[2] >> 3) & 7) + (st[2] & 7) + ')';
     if (st[4] == 0) {
         say(Fmt.format('{}: file, {} bytes, {} sectors', [name, st[3], (st[3] + 511) >> 9]));

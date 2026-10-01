@@ -1,6 +1,6 @@
 // aeon-os program: add a user; useradd <name> [uid]
 // Makes the line in etc/passwd, a locked password (set one with passwd), and the home folder home/<name>
-// (mode 700). Only root can write those files. Loaded from the virtual disk by the shell (bin/useradd.bl0c).
+// (mode 700), and a group of the same name and number. Only root can write those files. Loaded from the virtual disk by the shell (bin/useradd.bl0c).
 
 import '../lib/userland.bl0';
 import '../lib/users.bl0';
@@ -23,6 +23,11 @@ def main(words) {
         if (Users.findUid(uid) != nil) { sayErr('user id ' + uid + ' is taken'); return nil; }
     }
     home = 'home/' + name;
+    // every user has a group of their own, with their number
+    if (Users.findGid(uid) != nil || Users.findGroup(name) != nil) { sayErr('useradd: a group ' + name + ' or ' + uid + ' exists already'); return nil; }
+    groups = Users.groups();
+    push(groups, [name, uid, []]);
+    Users.writeGroups(groups);
     push(users, [name, uid, uid, home]);
     Users.writePasswd(users);
     shadow = Users.shadow();

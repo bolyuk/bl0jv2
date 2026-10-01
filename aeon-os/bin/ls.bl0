@@ -30,7 +30,7 @@ def main(words) {
             if (st == nil) {
                 say('?         ' + shown);
             } else {
-                say((isDir ? 'd' : '-') + Perm.modeText(st[2]) + Fmt.format(' {:<8} {:>8}  ', [Users.nameOf(st[0]), entries[i][1]]) + shown);
+                say((isDir ? 'd' : '-') + Perm.modeText(st[2]) + Fmt.format(' {:<8} {:<8} {:>8}  ', [Users.nameOf(st[0]), Users.groupNameOf(st[1]), entries[i][1]]) + shown);
             }
         } else if (isDir) {
             say('   <dir>  ' + shown);

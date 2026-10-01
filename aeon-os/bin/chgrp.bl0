@@ -1,0 +1,23 @@
+// aeon-os program: give a file or folder to a group; chgrp <group> <path>...
+// The group is a name from etc/group or a number. The owner may do it for a group they are in; root for any.
+// Loaded from the virtual disk by the shell (bin/chgrp.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/users.bl0';
+
+def main(words) {
+    if (len(words) < 3) { sayErr('usage: chgrp <group> <path>...'); return nil; }
+    g = Users.findGroup(words[1]);
+    gid = g != nil ? g[1] : unsignedNumber(words[1]);
+    if (gid == nil) { sayErr(words[1] + ': no such group'); return nil; }
+    i = 2;
+    while (i < len(words)) {
+        name = inCwd(words[i]);
+        st = Fs.stat(name);
+        if (st == nil) { sayErr(words[i] + ': no such file or folder'); }
+        else { Fs.chown(name, st[0], gid); }
+        i += 1;
+    }
+}
+
+programMain(main);

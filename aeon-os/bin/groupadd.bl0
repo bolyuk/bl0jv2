@@ -1,0 +1,29 @@
+// aeon-os program: make a group; groupadd <name> [gid]
+// Groups live in etc/group. Only root. Loaded from the virtual disk by the shell (bin/groupadd.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/users.bl0';
+
+def main(words) {
+    if (len(words) < 2 || len(words) > 3) { sayErr('usage: groupadd <name> [gid]'); return nil; }
+    name = words[1];
+    if (!Users.validName(name)) { sayErr(name + ': a name is letters, digits, _ and -'); return nil; }
+    if (Users.findGroup(name) != nil) { sayErr(name + ': that group exists'); return nil; }
+    all = Users.groups();
+    gid = 1000;
+    i = 0;
+    while (i < len(all)) {
+        if (all[i][1] >= gid) { gid = all[i][1] + 1; }
+        i += 1;
+    }
+    if (len(words) == 3) {
+        gid = unsignedNumber(words[2]);
+        if (gid == nil) { sayErr(words[2] + ': not a number'); return nil; }
+        if (Users.findGid(gid) != nil) { sayErr('group id ' + gid + ' is taken'); return nil; }
+    }
+    push(all, [name, gid, []]);
+    Users.writeGroups(all);
+    say('added group ' + name + ' (gid ' + gid + ')');
+}
+
+programMain(main);

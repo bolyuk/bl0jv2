@@ -164,6 +164,13 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   - On a fresh disk the shell starts as root without asking. Once root has a password it asks `login:` and starts the
     user in their home folder. The prompt shows the user's name when it is not root. History, `tmp/` for pipes and the
     system log are per-user, world-writable and kernel-written respectively.
+* **Sticky bit and groups**: mode `1777` (or `chmod +t`) is the sticky bit: in such a folder - `tmp/` has it - only the
+  owner of a file, or of the folder, may remove or rename it, whatever the folder's `w` bits say (`ls -l` shows a `t` at the end
+  of the mode). `etc/group` (`name:gid:member,member`) lists the groups; a user's primary group is the gid in `etc/passwd`
+  (`useradd` makes one of the user's own name and number), and every other group that lists them counts too when files are
+  checked, from their next login or `su`. Root manages them: `groupadd name [gid]`, `groupdel name` (not a primary group),
+  `usermod -aG group user` (`-g` sets the primary one). `groups [user]` and `id` show them; `chgrp group path...` is for
+  the owner (to a group they are in) and root. A new file gets its maker's primary group.
 * **More than one drive** (`--disk` can be given several times): drive 0 is the root disk, the others are
   mounted as folders. `mount` lists the drives; `mkfs <drive> yes` puts an empty file system on one (not drive 0 -
   that is `format yes` - and not one that is mounted); `mount <drive> <folder>` makes the drive's files appear below

@@ -42,7 +42,8 @@ def class Ctx {
     field pid;
     field background;     // no terminal: reading standard input gives nothing
     field uid;            // who the job runs for (see lib/perm.bl0); the kernel sets these
-    field gid;
+    field gid;            // the primary group
+    field groups;         // every group (numbers), the primary first
     field stack;          // the identities su has switched away from, newest last
 
     def init() {
@@ -58,6 +59,7 @@ def class Ctx {
         this.background = false;
         this.uid = 0;
         this.gid = 0;
+        this.groups = [0];
         this.stack = [];
     }
 
