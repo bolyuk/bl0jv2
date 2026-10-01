@@ -48,12 +48,18 @@ public final class Bl0jInstance {
         if (toStringMethod != null)
             return String.valueOf(owner.invoke(toStringMethod, owner.box(this)));
 
-        StringBuilder sb = new StringBuilder(cls.name).append("{");
-        var names = cls.fieldNames();
-        for (int i = 0; i < names.length; i++) {
-            if (i > 0) sb.append(", ");
-            sb.append(names[i]).append(": ").append(owner.unbox(fields[i]));
+        if (!PrintGuard.enter(this))
+            return cls.name + "{...}";
+        try {
+            StringBuilder sb = new StringBuilder(cls.name).append("{");
+            var names = cls.fieldNames();
+            for (int i = 0; i < names.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(names[i]).append(": ").append(owner.unbox(fields[i]));
+            }
+            return sb.append("}").toString();
+        } finally {
+            PrintGuard.exit(this);
         }
-        return sb.append("}").toString();
     }
 }

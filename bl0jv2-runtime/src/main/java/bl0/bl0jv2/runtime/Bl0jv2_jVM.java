@@ -828,6 +828,25 @@ public final class Bl0jv2_jVM {
 
     // takes effect on the next boxRef() call - no need to call this before
     // feed_compiled_file() the way set_max_raw_bytes() does
+    // ---- recursion limits ----
+    //
+    // Each bl0jv2 call pushes a frame (a heap-allocated long[]), so runaway
+    // recursion used to run until the JVM died; and a native that calls back
+    // into bl0jv2 (printing an instance calls its toString(), == calls
+    // equals(), interrupt handlers) recurses on the JAVA stack too. Both are
+    // now ordinary, catchable errors.
+    private volatile int maxCallDepth = 100_000;
+    private static final int MAX_NESTED_INVOKES = 200;
+
+    /** how many bl0jv2 calls may be active at once on one core (default 100000) */
+    public void set_max_call_depth(int depth) {
+        this.maxCallDepth = depth;
+    }
+
+    private static Bl0j_VM_Exception stackOverflow(int limit) {
+        return new Bl0j_VM_Exception("stack overflow: call depth limit (" + limit + ") exceeded");
+    }
+
     // ---- garbage collection ----
     //
     // OFF by default - the language's model is manual free(); this is an
@@ -1077,6 +1096,8 @@ public final class Bl0jv2_jVM {
         // not something to run with missing or ignored arguments
         if (fun.arity() - capturedCells.length != args.length)
             throw arityError(fun, capturedCells.length, args.length);
+        if (ctx.callStack.size() >= maxCallDepth || ctx.invokeDepth >= MAX_NESTED_INVOKES)
+            throw stackOverflow(ctx.callStack.size() >= maxCallDepth ? maxCallDepth : MAX_NESTED_INVOKES);
 
         long[] regs = newRegisters(fun.regs());
         for (int i = 0; i < capturedCells.length; i++)
@@ -1087,10 +1108,13 @@ public final class Bl0jv2_jVM {
         // never assigned to a real variable by the compiler (regIndex
         // starts at 1), so it's free scratch space for exactly this
         ctx.callStack.push(new Frame(regs, -1, 0));
+        ctx.invokeDepth++;
         try {
             execute(fun.address() * C.INSTR_WIDTH, stopAtDepth, pollEligible);
         } catch (IOException e) {
             throw new Bl0j_VM_Exception("invoke failed: " + e.getMessage());
+        } finally {
+            ctx.invokeDepth--;
         }
         return unbox(ctx.callStack.peek().regs()[0]);
     }
@@ -1284,6 +1308,8 @@ public final class Bl0jv2_jVM {
 
                         if (fun.arity() - capturedCells.length != c)
                             throw arityError(fun, capturedCells.length, c);
+                        if (ctx.callStack.size() >= maxCallDepth)
+                            throw stackOverflow(maxCallDepth);
 
                         long[] regs = newRegisters(fun.regs());
                         System.arraycopy(capturedCells, 0, regs, 1, capturedCells.length);
@@ -1577,7 +1603,7 @@ public final class Bl0jv2_jVM {
                     // around the same time.
                     panicked = true;
                     throw e;
-                } catch (Exception e) {
+                } catch (Exception | StackOverflowError e) {
                     // a handler registered before this execute() call
                     // started (i.e. outside a nested invoke()) doesn't
                     // belong to it - let the exception propagate to the
@@ -1591,12 +1617,20 @@ public final class Bl0jv2_jVM {
                         Handler handler = ctx.handlerStack.pop();
                         while (ctx.callStack.size() > handler.callStackDepth())
                             ctx.callStack.pop();
-                        String message = e.getMessage() != null ? e.getMessage() : e.toString();
+                        String message = e instanceof StackOverflowError ? "stack overflow: native recursion too deep"
+                                : e instanceof Bl0j_VM_Exception v ? v.plainMessage()
+                                : e.getMessage() != null ? e.getMessage() : e.toString();
                         ctx.callStack.peek().regs()[handler.errReg()] = box(new Bl0jError(message));
                         addr = handler.catchAddr();
                         continue;
                     }
-                    throw new Bl0j_VM_Exception("Exception on address: "+addr/C.INSTR_WIDTH+" - "+ e);
+                    // already carries the address of the innermost failure
+                    if (e instanceof Bl0j_VM_Exception located && located.isLocated())
+                        throw located;
+                    Bl0j_VM_Exception vmError = e instanceof Bl0j_VM_Exception v ? v
+                            : new Bl0j_VM_Exception(e instanceof StackOverflowError
+                                    ? "stack overflow: native recursion too deep" : e.toString());
+                    throw vmError.locatedAt(addr / C.INSTR_WIDTH);
                 }
             }
     }
@@ -1700,6 +1734,9 @@ public final class Bl0jv2_jVM {
         // true for a handler's duration and restore it afterward, mirroring
         // how real hardware only raises privilege through a trap gate
         boolean privileged = true;
+
+        // how many invoke() calls (Java -> bl0jv2) are active on this core's Java stack
+        int invokeDepth = 0;
 
         CoreContext(int coreId) {
             this.coreId = coreId;
