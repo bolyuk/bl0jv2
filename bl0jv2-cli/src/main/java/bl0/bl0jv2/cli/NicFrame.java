@@ -54,6 +54,12 @@ final class NicFrame {
     static final int HOST_DNS_RESP_ACK_PORT = 4300;
     static final int HOST_DNS_RESP_IP_PORT = 4302;
 
+    // the host sets this to 1 when it attaches any bridge (TxDispatcher does, as
+    // soon as a bridge subscribes), so Nic.initAuto() in stdlib/net/nic.bl0 can tell
+    // a bridged run from a plain one without the program knowing how it was launched
+    static final int HOST_BRIDGE_PRESENT_PORT = 3602;
+
+    static final int IP_PROTO_ICMP = 1;
     static final int IP_PROTO_UDP = 17;
     static final int IP_PROTO_TCP = 6;
 

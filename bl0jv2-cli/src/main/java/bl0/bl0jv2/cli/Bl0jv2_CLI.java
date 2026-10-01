@@ -404,6 +404,7 @@ public class Bl0jv2_CLI {
                 if (bridgeOutbound) {
                     vm.set_interrupt_poll_interval(1);
                     new TcpOutboundBridge(vm).start();
+                    new IcmpOutboundBridge(vm).start();
                     new UdpOutboundBridge(vm, udpBridge == null ? f -> false : udpBridge::claims).start();
                 }
                 System.out.println();

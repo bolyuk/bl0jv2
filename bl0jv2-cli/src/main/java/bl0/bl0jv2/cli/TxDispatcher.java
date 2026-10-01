@@ -45,6 +45,7 @@ final class TxDispatcher {
 
     private TxDispatcher(Bl0jv2_jVM vm) {
         this.vm = vm;
+        vm.hostPortWrite(NicFrame.HOST_BRIDGE_PRESENT_PORT, 2, 1);
     }
 
     /** receives every TX frame for which filter returns true, in the order the VM sent them */
