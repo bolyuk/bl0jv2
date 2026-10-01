@@ -11,13 +11,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// automatic mark-and-sweep: garbage is reclaimed, everything reachable
+// opt-in (set_gc_enabled) mark-and-sweep: garbage is reclaimed, everything reachable
 // survives. A tiny threshold makes a collection happen every few hundred
 // allocations so these programs go through hundreds of them.
 class Bl0jv2_GcTest {
 
     private static Consumer<Bl0jv2_jVM> eager() {
-        return vm -> vm.set_gc_threshold_bytes(8 * 1024);
+        return vm -> { vm.set_gc_enabled(true); vm.set_gc_threshold_bytes(64 * 1024 / 8); };
     }
 
     @Test
@@ -26,22 +26,22 @@ class Bl0jv2_GcTest {
         // with only 2000 heap entries allowed this could not finish otherwise
         String out = run(
                 "s = ''; i = 0; while (i < 50000) { s = s + 'x'; i = i + 1; } print len(s);",
-                vm -> { vm.set_gc_threshold_bytes(64 * 1024); vm.set_max_heap_entries(2000); });
+                vm -> { vm.set_gc_enabled(true); vm.set_gc_threshold_bytes(64 * 1024); vm.set_max_heap_entries(2000); });
         assertEquals("50000", out);
     }
 
     @Test
-    void withoutCollectionTheSameLoopExhaustsTheHeapLimit() {
+    void byDefaultNothingIsCollectedSoTheSameLoopExhaustsTheHeapLimit() {
         assertThrows(Bl0j_VM_Exception.class, () -> run(
                 "s = ''; i = 0; while (i < 50000) { s = s + 'x'; i = i + 1; } print len(s);",
-                vm -> { vm.set_gc_enabled(false); vm.set_max_heap_entries(2000); }));
+                vm -> vm.set_max_heap_entries(2000)));
     }
 
     @Test
     void collectionsActuallyHappen() {
         var holder = new Bl0jv2_jVM[1];
         run("i = 0; while (i < 20000) { s = 'garbage' + str(i); i = i + 1; } print i;",
-                vm -> { vm.set_gc_threshold_bytes(8 * 1024); holder[0] = vm; });
+                vm -> { vm.set_gc_enabled(true); vm.set_gc_threshold_bytes(8 * 1024); holder[0] = vm; });
         assertTrue(holder[0].gc_collections() > 5, "collections: " + holder[0].gc_collections());
     }
 
@@ -122,7 +122,7 @@ class Bl0jv2_GcTest {
     void multiCoreMachinesDoNotCollectAutomatically() {
         var holder = new Bl0jv2_jVM[1];
         String out = run("def t(v) { } dispatch(t, 1, 0); i = 0; while (i < 20000) { s = 'junk' + str(i); i = i + 1; } print 'done';",
-                vm -> { vm.set_core_count(2); vm.set_gc_threshold_bytes(8 * 1024); holder[0] = vm; });
+                vm -> { vm.set_core_count(2); vm.set_gc_enabled(true); vm.set_gc_threshold_bytes(8 * 1024); holder[0] = vm; });
         assertEquals("done", out);
         assertEquals(0, holder[0].gc_collections());
     }

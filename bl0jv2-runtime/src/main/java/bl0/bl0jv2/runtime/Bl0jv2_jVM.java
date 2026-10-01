@@ -830,6 +830,9 @@ public final class Bl0jv2_jVM {
     // feed_compiled_file() the way set_max_raw_bytes() does
     // ---- garbage collection ----
     //
+    // OFF by default - the language's model is manual free(); this is an
+    // opt-in safety net for hosts (set_gc_enabled(true)).
+    //
     // Heap slots used to be reclaimed only by an explicit free(), so a plain
     // loop building strings ('s = s + x') kept every intermediate string
     // forever - quadratic memory for a linear job. The VM now also collects
@@ -844,7 +847,7 @@ public final class Bl0jv2_jVM {
     // value the collector doesn't see. With more than one core (or while a
     // nested handler/toString runs) it simply doesn't run: explicit free()
     // and set_max_heap_entries() remain the tools there.
-    private volatile boolean gcEnabled = true;
+    private volatile boolean gcEnabled = false;
     private long collections;
 
     private void collectGarbage(CoreContext ctx) {
@@ -858,12 +861,12 @@ public final class Bl0jv2_jVM {
         collections++;
     }
 
-    /** turns automatic collection off/on (default on); explicit free() is unaffected */
+    /** turns automatic collection on/off (default OFF: memory is released with free()); explicit free() is unaffected either way */
     public void set_gc_enabled(boolean enabled) {
         this.gcEnabled = enabled;
     }
 
-    /** how much allocation (estimated bytes) makes the VM collect; default 64 MB */
+    /** how much allocation (estimated bytes) makes the VM collect once enabled; default 64 MB */
     public void set_gc_threshold_bytes(long bytes) {
         heap.setCollectThresholdBytes(bytes);
     }
