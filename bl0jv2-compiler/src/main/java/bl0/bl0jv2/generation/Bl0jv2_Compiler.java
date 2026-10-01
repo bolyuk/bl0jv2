@@ -1128,6 +1128,7 @@ public final class Bl0jv2_Compiler {
         if ((r = compileNewEvent(funCall)) != null) return r;
         if ((r = compileSignalEvent(funCall)) != null) return r;
         if ((r = compileRaiseInterruptOn(funCall)) != null) return r;
+        if ((r = compileValueNative(funCall, "throw", 1, NativeMethods.THROW)) != null) return r;
         if ((r = compileValueNative(funCall, "strSub", 3, NativeMethods.STR_SUB)) != null) return r;
         if ((r = compileValueNative(funCall, "strFind", 3, NativeMethods.STR_FIND)) != null) return r;
         if ((r = compileValueNative(funCall, "strUpper", 1, NativeMethods.STR_UPPER)) != null) return r;

@@ -176,6 +176,14 @@ public final class Bl0jv2_jVM {
             interrupts.raiseInterruptOn(core, vector);
             return null;
         });
+        // throw(message) raises an error exactly like a runtime failure does: a
+        // surrounding try/catch receives the message, uncaught it ends the
+        // program. throw(e) with an err value (what catch hands you, or err())
+        // re-raises that error's own message.
+        nativeMethods.put(NativeMethods.THROW, (arg) -> {
+            String message = arg instanceof Bl0jError error ? error.message() : String.valueOf(arg);
+            throw new Bl0j_VM_Exception(message);
+        });
         // string helpers (see NativeMethods.STR_SUB) - one allocation for the
         // result instead of one per character the bl0jv2 version built
         nativeMethods.put(NativeMethods.STR_SUB, (arg) -> {

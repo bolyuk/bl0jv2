@@ -98,6 +98,9 @@ def class Arr {
     // queue that gets rescanned by priority anyway, wrong for anything
     // that depends on element order
     static def removeAt(arr, i) {
+        if (i < 0 || i >= len(arr)) {
+            throw('Arr.removeAt: index ' + i + ' is outside the array (length ' + len(arr) + ')');
+        }
         last = len(arr) - 1;
         if (i != last) { arr[i] = arr[last]; }
         pop(arr);

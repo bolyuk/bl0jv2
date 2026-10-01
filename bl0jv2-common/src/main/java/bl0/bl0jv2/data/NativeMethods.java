@@ -49,4 +49,6 @@ public final class NativeMethods {
     public static final byte STR_UPPER = 0x1B;
     public static final byte STR_LOWER = 0x1C;
     public static final byte STR_JOIN = 0x1D;
+    // throw(message): raise an error a surrounding try/catch receives
+    public static final byte THROW = 0x1E;
 }
