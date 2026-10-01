@@ -169,4 +169,25 @@ class MultitaskTest {
         String screen = s.screen().screenText();
         assertTrue(screen.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") && screen.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), screen);
     }
+
+    @Test
+    void topShowsTheCoresAndProcessesAndQLeaves(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir, 4);
+        expect(s, "sleep 30 &", "[2] sleep");
+        s.type("top" + "\r");
+        long deadline = System.currentTimeMillis() + 15_000;
+        String screen = "";
+        while (System.currentTimeMillis() < deadline) {
+            screen = s.screen().screenText();
+            if (screen.contains("core 1") && screen.contains("q quit") && screen.contains("sleep")) break;
+            Thread.sleep(50);
+        }
+        assertTrue(screen.contains("core 0") && screen.contains("shell") && screen.contains("core 1") && screen.contains("sleep")
+                && screen.contains("pid"), screen);
+        s.type("q");
+        deadline = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadline && !s.screen().screenText().contains("[2] sleep")) Thread.sleep(50);
+        assertTrue(s.screen().screenText().contains("aeon-shell ready"), s.screen().screenText());   // the normal screen is back
+        expect(s, "kill 2", "$ ");
+    }
 }

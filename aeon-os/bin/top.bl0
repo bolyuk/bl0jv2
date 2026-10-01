@@ -1,0 +1,115 @@
+// aeon-os program: a live view of the machine, full screen. top
+//
+// Shows the uptime, the cores (idle, or what each one runs), the disk, and the process table,
+// refreshed every second on the terminal's alternate screen; q, Esc or Ctrl-C leaves.
+// Loaded from the virtual disk by the shell (bin/top.bl0c); see lib/userland.bl0.
+
+import '../lib/proc.bl0';
+import '../lib/term.bl0';
+import '../lib/keys.bl0';
+
+def bar(used, total, width) {
+    cells = total > 0 ? (used * width) / total : 0;
+    text = '';
+    k = 0;
+    while (k < width) { text += (k < cells ? '|' : ' '); k += 1; }
+    return '[' + text + ']';
+}
+
+// the process running on 'core', or nil
+def onCore(core) {
+    i = 0;
+    while (i < len(Proc.table)) {
+        p = Proc.table[i];
+        if (p.state == 'running' && p.core == core) { return p; }
+        i += 1;
+    }
+    return nil;
+}
+
+def pad(text, width) {
+    if (len(text) > width) { return strSub(text, 0, width); }
+    return text + strRepeat(' ', width - len(text));
+}
+
+def strRepeat(s, n) {
+    out = '';
+    k = 0;
+    while (k < n) { out += s; k += 1; }
+    return out;
+}
+
+// the whole screen as lines; each is cut to the screen's width by pad() where it matters
+def screenLines(columns, rows) {
+    lines = [];
+    ms = ticks();
+    secs = ms / 1000;
+    push(lines, Term.paintBold(6, ' aeon-os') + '  up ' + (secs / 60) + 'm ' + (secs % 60) + 's   '
+        + coreCount() + ' core(s)');
+    push(lines, '');
+    c = 0;
+    while (c < coreCount()) {
+        p = onCore(c);
+        busy = p != nil;
+        label = busy ? p.name : 'idle';
+        line = Fmt.format(' core {} ', [c]) + bar(busy ? 1 : 0, 1, 10) + ' ' + (busy ? Term.paint(2, label) : Term.paint(7, label));
+        push(lines, line);
+        c += 1;
+    }
+    push(lines, '');
+    if (Fs.mounted) {
+        info = Fs.info();
+        used = info[1] - info[2];
+        push(lines, ' disk  ' + bar(used, info[1], 30) + Fmt.format(' {} of {} sectors used, {} files', [used, info[1], info[3]]));
+    } else {
+        push(lines, ' disk  none');
+    }
+    push(lines, '');
+    push(lines, Term.invert() + pad(Fmt.format(' {:>4}  {:<8} {:>4}  {:>8}  {}', ['pid', 'state', 'core', 'time ms', 'command']), columns) + Term.normal());
+    i = 0;
+    while (i < len(Proc.table) && len(lines) < rows - 1) {
+        p = Proc.table[i];
+        end = p.state == 'running' ? ticks() : p.ended;
+        text = Fmt.format(' {:>4}  {:<8} {:>4}  {:>8}  {}', [p.pid, p.state, p.core, end - p.started, p.name]);
+        push(lines, p.state == 'running' ? Term.paint(2, text) : text);
+        i += 1;
+    }
+    return lines;
+}
+
+def draw() {
+    columns = Console.columns > 20 ? Console.columns : 80;
+    rows = Console.rows > 6 ? Console.rows : 24;
+    lines = screenLines(columns, rows);
+    out = Term.esc + '[H';
+    i = 0;
+    while (i < len(lines)) {
+        out += lines[i] + Term.clearToEndOfLine() + '\r\n';
+        i += 1;
+    }
+    out += Term.clearToEndOfScreen();
+    out += Term.moveTo(rows, 1) + Term.paint(7, ' q quit') + Term.clearToEndOfLine();
+    consoleWrite(out);
+}
+
+def main(words) {
+    consoleWrite(Term.esc + '[?1049h' + Term.esc + '[?25l' + Term.clearScreen());
+    try {
+        done = false;
+        while (!done) {
+            draw();
+            key = Keys.read(1000);
+            if (key != nil) {
+                if (key.name == 'ESC' || key.name == 'CTRL-C') { done = true; }
+                if (key.name == nil && (key.text == 'q' || key.text == 'Q')) { done = true; }
+            }
+            checkAbort();
+        }
+    } catch (e) {
+        consoleWrite(Term.esc + '[?25h' + Term.esc + '[?1049l');
+        throw(e);
+    }
+    consoleWrite(Term.esc + '[?25h' + Term.esc + '[?1049l');
+}
+
+programMain(main);

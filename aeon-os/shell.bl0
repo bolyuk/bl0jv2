@@ -89,7 +89,7 @@ def cmdHelp() {
     say('built in: help, clear, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump df mkdir rmdir edit sleep yes ps kill wait - and any program you put there, run by its name');
+    say('          hexdump df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
 }
