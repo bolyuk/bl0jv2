@@ -1080,8 +1080,18 @@ public final class Bl0jv2_Compiler {
             ClassInfo staticTarget = staticTargetOf(fieldAccess.target);
             if (staticTarget != null) {
                 int fieldIndex = staticTarget.staticFieldIndex(fieldAccess.fieldName);
-                if (fieldIndex < 0)
-                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field '" + fieldAccess.fieldName + "'");
+                if (fieldIndex < 0) {
+                    // not a static field - a static method used as a value
+                    // (Class.method without a call): its function constant
+                    // is the callable, same as a bare function name
+                    Integer methodConst = functionMapping.get(staticTarget.name() + "." + fieldAccess.fieldName);
+                    if (methodConst != null) {
+                        int methodReg = regIndex++;
+                        _emit(OpCodes.LOAD_CONST, methodReg, methodConst);
+                        return methodReg;
+                    }
+                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field or method '" + fieldAccess.fieldName + "'");
+                }
 
                 int classReg = regIndex++;
                 _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());
@@ -1544,8 +1554,18 @@ public final class Bl0jv2_Compiler {
             ClassInfo staticTarget = staticTargetOf(fieldAccess.target);
             if (staticTarget != null) {
                 int fieldIndex = staticTarget.staticFieldIndex(fieldAccess.fieldName);
-                if (fieldIndex < 0)
-                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field '" + fieldAccess.fieldName + "'");
+                if (fieldIndex < 0) {
+                    // not a static field - a static method used as a value
+                    // (Class.method without a call): its function constant
+                    // is the callable, same as a bare function name
+                    Integer methodConst = functionMapping.get(staticTarget.name() + "." + fieldAccess.fieldName);
+                    if (methodConst != null) {
+                        int methodReg = regIndex++;
+                        _emit(OpCodes.LOAD_CONST, methodReg, methodConst);
+                        return methodReg;
+                    }
+                    throw new Bl0j_CompilerException("class " + staticTarget.name() + " has no static field or method '" + fieldAccess.fieldName + "'");
+                }
 
                 int classReg = regIndex++;
                 _emit(OpCodes.LOAD_CONST, classReg, staticTarget.constIndex());

@@ -148,7 +148,15 @@ public final class Bl0jv2_Lexer {
                             if (ch == '\\' && pos + 1 < len) {
                                 char escaped = peek();
                                 line_index++;
-                                buf.append(unescape(escaped, line, line_index));
+                                if (escaped == 'x') {
+                                    // \xNN: exactly two hex digits, one byte value
+                                    if (pos + 2 >= len || !isHexDigit(data[pos + 1]) || !isHexDigit(data[pos + 2]))
+                                        gen_exception(line, line_index, "expected two hex digits after \\x");
+                                    buf.append((char) Integer.parseInt("" + data[pos + 1] + data[pos + 2], 16));
+                                    pos += 2;
+                                    line_index += 2;
+                                } else
+                                    buf.append(unescape(escaped, line, line_index));
                             } else
                                 buf.append(ch);
                         }
@@ -272,6 +280,7 @@ public final class Bl0jv2_Lexer {
             case 'r' -> '\r';
             case '0' -> '\0';
             case '\'' -> '\'';
+            case '"' -> '"';
             case '\\' -> '\\';
             default -> {
                 gen_exception(line, line_index, "unknown escape sequence - \\" + escaped);

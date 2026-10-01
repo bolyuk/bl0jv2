@@ -71,6 +71,8 @@ def class TcpConn {
     field recvBuffer;      // in-order data received but not yet receive()'d
     field peerFinReceived;
 
+    static field connectTimeoutMs;
+
     static def buildHeader(srcPort, dstPort, seq, ack, flags) {
         return [
             Ip.byteAt(srcPort, 8), Ip.byteAt(srcPort, 0),
@@ -164,7 +166,16 @@ def class TcpConn {
         conn.sendSegment(TcpFlags.syn, '');
         conn.sndNext = conn.sndNext + 1;
 
+        // gives up after TcpConn.connectTimeoutMs of wall-clock time (see
+        // ticks()) instead of waiting forever: returns nil, with the conn
+        // marked CLOSED so TcpRegistry.findMatch() ignores it from then on.
+        // Set TcpConn.connectTimeoutMs to 0 or below to wait indefinitely.
+        deadline = ticks() + TcpConn.connectTimeoutMs;
         while (conn.state == 'SYN_SENT') {
+            if (TcpConn.connectTimeoutMs > 0 && ticks() >= deadline) {
+                conn.state = 'CLOSED';
+                return nil;
+            }
             TcpRegistry.pump();
             wait(1);
         }
@@ -357,6 +368,8 @@ def class TcpSegment {
         return s;
     }
 }
+
+TcpConn.connectTimeoutMs = 10000;
 
 // every connection this process has created, LISTEN or otherwise - see
 // pump()'s own doc for why this has to be a registry, not a per-connection

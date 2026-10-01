@@ -261,6 +261,16 @@ class Bl0jv2_StdlibTest {
     // tcpPump()'s own doc), so nothing here needs dispatch().
 
     @Test
+    void tcpConnectToNoListenerTimesOutWithNil(@TempDir Path dir) throws IOException {
+        assertEquals("nil|CLOSED", run(dir, "net/tcp.bl0",
+                "Nic.init(); " +
+                "TcpConn.connectTimeoutMs = 50; " +
+                "c = TcpConn.connect(0x0A000002, 5000, 0x0A000001, 9); " +
+                "print str(c) + '|'; " +
+                "print TcpRegistry.conns[0].state;"));
+    }
+
+    @Test
     void tcpHandshakeDataExchangeAndClose(@TempDir Path dir) throws IOException {
         assertEquals("ESTABLISHED|ESTABLISHED|GET / HTTP/1.0|HTTP/1.0 200 OK|CLOSED|CLOSED", run(dir, "net/tcp.bl0",
                 "Nic.init(); " +

@@ -135,7 +135,9 @@ public final class Bl0jv2_Parser {
            return native_call_statement(); // self-consumes its trailing ';'
 
         if(consume_if(ReturnToken.class)) {
-            Node returnNode = new ReturnNode(assign_evaluation());
+            // bare 'return;' / 'return }' yields nil
+            Node returnNode = new ReturnNode(peek_t() instanceof SemicolonToken || peek_t() instanceof RBraceToken || peek_t() instanceof EOFToken
+                    ? new NilNode() : assign_evaluation());
             consume_if(SemicolonToken.class);
             return returnNode;
         }
