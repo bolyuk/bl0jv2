@@ -205,6 +205,12 @@ Console.rows = 24;
 // must not land in the middle of whatever the user is typing: while the line editor is waiting for
 // input, consoleAsync() only queues the text and wakes the editor, which clears its line, prints the
 // text above it and draws the line again. When no editor is waiting the text is simply written.
+// the machine is being shut down (see lib/power.bl0): whoever waits for something at the keyboard stops waiting
+def class Power {
+    static field requested;
+}
+Power.requested = false;
+
 def class Console2 {
     static field editing;     // the line editor is waiting for input
     static field pending;     // text queued for it

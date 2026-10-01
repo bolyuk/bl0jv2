@@ -1,0 +1,76 @@
+// aeon-os program: read the system log; logs [-n N] [-a] [-f] [text]
+// Shows the last N lines (20 by default; -n 0 for none) of var/log/aeon.log, only those containing 'text' when it is
+// given. -a reads the rotated log (aeon.log.1, the older half) too. -f keeps going: new lines are shown as they
+// are written, until Ctrl-C. Lines that tell of a failure are red. Loaded from the virtual disk by the shell
+// (bin/logs.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/log.bl0';
+import '../../stdlib/str/split.bl0';
+
+def paintLine(line) {
+    if (strFind(line, 'failed', 0) >= 0 || strFind(line, 'denied', 0) >= 0 || strFind(line, 'incorrect', 0) >= 0
+        || strFind(line, 'crashed', 0) >= 0 || strFind(line, 'not run', 0) >= 0 || strFind(line, 'ignored', 0) >= 0) {
+        return paint(1, line);
+    }
+    return line;
+}
+
+def linesOf(path) {
+    text = Fs.read(path);
+    if (text == nil) { return []; }
+    lines = Split.split(text, strChar(10));
+    if (len(lines) > 0 && lines[len(lines) - 1] == '') { pop(lines); }
+    return lines;
+}
+
+def main(words) {
+    count = 20;
+    older = false;
+    follow = false;
+    filter = nil;
+    i = 1;
+    while (i < len(words)) {
+        if (words[i] == '-n' && i + 1 < len(words)) {
+            count = unsignedNumber(words[i + 1]);
+            if (count == nil) { sayErr(words[i + 1] + ': not a number'); return nil; }
+            i += 1;
+        } else if (words[i] == '-a') { older = true; }
+        else if (words[i] == '-f') { follow = true; }
+        else if (filter == nil) { filter = words[i]; }
+        else { sayErr('usage: logs [-n N] [-a] [-f] [text]'); return nil; }
+        i += 1;
+    }
+    lines = older ? Arr.concat(linesOf(Log.path + '.1'), linesOf(Log.path)) : linesOf(Log.path);
+    if (filter != nil) {
+        kept = [];
+        i = 0;
+        while (i < len(lines)) {
+            if (strFind(lines[i], filter, 0) >= 0) { push(kept, lines[i]); }
+            i += 1;
+        }
+        lines = kept;
+    }
+    from = len(lines) > count ? len(lines) - count : 0;
+    i = from;
+    while (i < len(lines)) {
+        say(paintLine(lines[i]));
+        i += 1;
+    }
+    if (!follow) { return nil; }
+    // what is shown from here on: the lines after the ones already read (the log may be rotated meanwhile:
+    // then it starts over from its beginning)
+    seen = len(linesOf(Log.path));
+    while (true) {
+        checkAbort();
+        wait(300);
+        now = linesOf(Log.path);
+        if (len(now) < seen) { seen = 0; }
+        while (seen < len(now)) {
+            if (filter == nil || strFind(now[seen], filter, 0) >= 0) { say(paintLine(now[seen])); }
+            seen += 1;
+        }
+    }
+}
+
+programMain(main);

@@ -32,6 +32,7 @@ def class Sys {
     static field logout;       // back to who the shell was before su
     static field who;          // [uid, gid, home, name] of the caller
     static field setPassword;  // [user, old, new] -> '' or why not
+    static field shutdown;     // root only: the shell ends, the machine halts -> '' or why not
     static field spawn;        // [path, words, folder, [inPath, outPath, pipeIn, pipeOut, background, quiet], who] -> [true, Process] or [false, why]
 }
 // (vectors 1-9 are the console, keyboard, NIC, host NIC, disk, exec, host folder and spawn)
@@ -40,6 +41,7 @@ Sys.login = 13;
 Sys.logout = 14;
 Sys.who = 15;
 Sys.setPassword = 16;
+Sys.shutdown = 19;
 Sys.spawn = 9;             // (the shell's Exec.spawnVector)
 
 def class Perm {

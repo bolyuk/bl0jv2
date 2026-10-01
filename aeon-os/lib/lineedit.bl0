@@ -325,7 +325,15 @@ def class LineEditor {
         while (true) {
             key = Keys.read(250);
             LineEditor.flushAsync();
-            if (key == nil) { continue; }
+            if (key == nil) {
+                if (Power.requested) {
+                    // the machine is shutting down while we wait at the prompt: end like Ctrl-D does
+                    consoleWrite('\n');
+                    consoleSetEditing(false);
+                    return nil;
+                }
+                continue;
+            }
             name = key.name;
             wasTab = false;
 

@@ -35,7 +35,7 @@
 // below - read, write, append, remove, rename, size, list, mkdir via a name ending
 // in '/' - works on it exactly as on the disk, and rename/copy-by-readData can
 // cross between the two. Code never needs to know which one it is talking to.
-// (Disk-only limits - 47-byte names, the 128-entry directory - do not apply there.)
+// (Disk-only limits - 47-byte names, the directory's fixed size - do not apply there.)
 //
 // Errors are exceptions whose message starts with "fs: " (catch them with
 // try/catch); "not found" is a nil/false return instead. Every public call
@@ -420,7 +420,7 @@ def class Fs {
         if (total < 16) { throw('fs: the disk is too small (16 sectors at least)'); }
         dirSectors = total >> 5;
         if (dirSectors < 1) { dirSectors = 1; }
-        if (dirSectors > 16) { dirSectors = 16; }
+        if (dirSectors > 32) { dirSectors = 32; }        // up to 256 entries; a disk keeps the size it was formatted with
         fat = 1;
         while (true) {
             need = (total - 1 - dirSectors - fat + 127) >> 7;

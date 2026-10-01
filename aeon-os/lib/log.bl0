@@ -4,9 +4,11 @@
 // part. A log must never take the system down: when the disk is missing,
 // unformatted or full, the line is dropped and counted, not raised. When the
 // file passes Log.maxBytes it becomes aeon.log.1 (replacing the previous
-// one), so the log's footprint stays bounded.
+// one), so the log's footprint stays bounded. Each line starts with the date and time
+// (UTC, from the real-time clock): 2026-10-01 12:00:03 shell: started.
 
 import '../../stdlib/fs/fs.bl0';
+import '../../stdlib/time/clock.bl0';
 
 def class Log {
     static field path;
@@ -37,13 +39,13 @@ def class Log {
                 Fs.remove(Log.path + '.1');
                 Fs.rename(Log.path, Log.path + '.1');
             }
-            Fs.append(Log.path, ticks() + 'ms ' + message + '\n');
+            Fs.append(Log.path, Clock.text(Clock.read()) + ' ' + message + '\n');
         } catch (e) {
             Log.dropped += 1;
         }
     }
 }
 Log.path = 'var/log/aeon.log';
-Log.maxBytes = 16384;
+Log.maxBytes = 65536;
 Log.dropped = 0;
 Log.vector = 17;

@@ -1,0 +1,58 @@
+// aeon-os: bringing the machine down in order. Shutdown.stopAll() is what the shutdown command does and what the
+// shell does when root leaves it for good: first the services are told to stop (the ones whose pid file names a live
+// process), then every other process still running is asked to stop; what has not ended after a few seconds is
+// reported. The disk needs no flushing - every file operation is on the disk when it returns - and the last console
+// bytes are sent by the shell right before it ends.
+
+import 'userland.bl0';
+import 'proc.bl0';
+import 'services.bl0';
+
+def class Shutdown {
+    // how many processes were still running at the end (0 = all stopped); says what it does when 'talk'
+    static def stopAll(talk) {
+        stoppedServices = 0;
+        names = Services.names();
+        i = 0;
+        while (i < len(names)) {
+            svc = Services.definition(names[i]);
+            p = svc == nil ? nil : Services.running(names[i], svc);
+            if (p != nil) {
+                if (talk) { say('stopping ' + names[i]); }
+                if (Services.stop(names[i], p)) { stoppedServices += 1; }
+            }
+            i += 1;
+        }
+        // whatever else runs: a stop request each (not this one, nor the shell)
+        me = Ctx.me().pid;
+        asked = 0;
+        i = 0;
+        while (i < len(Proc.table)) {
+            q = Proc.table[i];
+            if (q.state == 'running' && !q.system && q.pid != me) {
+                if (talk) { say('stopping [' + q.pid + '] ' + q.name); }
+                Proc.kill(q.pid);
+                asked += 1;
+            }
+            i += 1;
+        }
+        left = 0;
+        waited = 0;
+        while (waited < 30) {
+            left = 0;
+            i = 0;
+            while (i < len(Proc.table)) {
+                q = Proc.table[i];
+                if (q.state == 'running' && !q.system && q.pid != me) { left += 1; }
+                i += 1;
+            }
+            if (left == 0) { break; }
+            checkAbort();
+            wait(100);
+            waited += 1;
+        }
+        Log.write('shutdown: ' + stoppedServices + ' services stopped, ' + asked + ' processes asked to stop, ' + left + ' still running');
+        if (left > 0 && talk) { sayErr(left + ' processes did not stop (they look for a stop request only at a checkpoint)'); }
+        return left;
+    }
+}

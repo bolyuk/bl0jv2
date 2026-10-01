@@ -164,6 +164,15 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   - On a fresh disk the shell starts as root without asking. Once root has a password it asks `login:` and starts the
     user in their home folder. The prompt shows the user's name when it is not root. History, `tmp/` for pipes and the
     system log are per-user, world-writable and kernel-written respectively.
+* **Logs and shutdown** (`logs`, `shutdown`): every line of the system log (`var/log/aeon.log`, which becomes
+  `aeon.log.1` at 64 KiB) now starts with the date and time (UTC, from the real-time clock). `logs [-n N] [-a] [-f] [text]`
+  shows the last N lines (20), only those containing `text`; `-a` adds the rotated half, `-f` follows new lines until Ctrl-C;
+  failures are red. `shutdown` (aliases `halt`, `poweroff`; root only) stops the machine in order: every running service is
+  stopped, every other process is asked to stop (a few seconds' grace; what does not end is reported), the shell ends,
+  and the machine halts. Root leaving the shell with `exit` or Ctrl-D does the same; `exit` after `su` only goes back
+  to who you were. A shutdown that comes from cron or a background job ends a shell that is waiting at its prompt too.
+  Files need no flushing - every file operation is on the disk when it returns - and the last console bytes are sent
+  by the shell right before it ends.
 * **Start-up and services** (`etc/rc`, `service`): when the machine starts the shell runs `etc/rc` as root, a script like
   `etc/profile`, before the login prompt. Its default line is `service boot`, which starts every service listed in
   `etc/services.enabled`. A service is a definition `etc/services/<name>` (`description`, `command`, optionally `user`, default

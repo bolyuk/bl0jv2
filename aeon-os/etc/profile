@@ -3,3 +3,5 @@
 PATH=bin
 alias ll='ls'
 alias h='history'
+alias halt='shutdown'
+alias poweroff='shutdown'

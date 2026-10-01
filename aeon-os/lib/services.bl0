@@ -1,0 +1,96 @@
+// aeon-os: the services - what the service program and the shutdown both need (see bin/service.bl0 for what a
+// service is).
+
+import 'userland.bl0';
+import 'proc.bl0';
+import '../../stdlib/str/trim.bl0';
+
+def class Services {
+    // the definition of 'name' as [description, command, user, log], or nil
+    static def definition(name) {
+        text = Fs.read('etc/services/' + name);
+        if (text == nil) { return nil; }
+        out = ['', '', 'root', 'var/log/' + name + '.log'];
+        lines = Split.split(text, strChar(10));
+        i = 0;
+        while (i < len(lines)) {
+            line = Trim.trim(lines[i]);
+            eq = strFind(line, '=', 0);
+            if (line != '' && strSub(line, 0, 1) != '#' && eq > 0) {
+                key = Trim.trim(strSub(line, 0, eq));
+                value = Trim.trim(strSub(line, eq + 1, len(line)));
+                if (key == 'description') { out[0] = value; }
+                else if (key == 'command') { out[1] = value; }
+                else if (key == 'user') { out[2] = value; }
+                else if (key == 'log') { out[3] = value; }
+            }
+            i += 1;
+        }
+        return out;
+    }
+
+    static def names() {
+        out = [];
+        if (!Fs.mounted || !Dirs.isDir('etc/services')) { return out; }
+        entries = Dirs.list('etc/services');
+        i = 0;
+        while (i < len(entries)) {
+            if (!entries[i][2]) { push(out, entries[i][0]); }
+            i += 1;
+        }
+        return out;
+    }
+
+    static def enabledNames() {
+        text = Fs.read('etc/services.enabled');
+        out = [];
+        if (text == nil) { return out; }
+        lines = Split.split(text, strChar(10));
+        i = 0;
+        while (i < len(lines)) {
+            n = Trim.trim(lines[i]);
+            if (n != '' && strSub(n, 0, 1) != '#') { push(out, n); }
+            i += 1;
+        }
+        return out;
+    }
+
+    static def writeEnabled(list) {
+        Fs.write('etc/services.enabled', len(list) == 0 ? '' : strJoin(list, strChar(10)) + strChar(10));
+    }
+
+    static def pidFile(name) {
+        return 'var/run/' + name + '.pid';
+    }
+
+    // the process of a running service, or nil (a pid file left behind by a machine that was restarted, or by a
+    // process that has ended, is not a running service)
+    static def running(name, svc) {
+        text = Fs.read(Services.pidFile(name));
+        if (text == nil) { return nil; }
+        pid = unsignedNumber(Trim.trim(text));
+        if (pid == nil) { return nil; }
+        p = Proc.find(pid);
+        if (p == nil || p.state != 'running') { return nil; }
+        first = tokens(svc[1]);
+        if (len(first) == 0 || p.name != first[0]) { return nil; }
+        return p;
+    }
+
+
+    // a stop request to the service's process, and a wait (up to five seconds) for it to end; its pid file goes
+    // when it has. True when it stopped.
+    static def stop(name, p) {
+        Proc.kill(p.pid);
+        waited = 0;
+        while (p.state == 'running' && waited < 50) {
+            checkAbort();
+            wait(100);
+            waited += 1;
+        }
+        if (p.state == 'running') { return false; }
+        Fs.remove(Services.pidFile(name));
+        Log.write('service: ' + name + ' stopped');
+        return true;
+    }
+}

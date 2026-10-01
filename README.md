@@ -292,7 +292,7 @@ print Fs.read('notes/a.txt');       // nil if there is no such file
 Fs.list('notes/')  // [[name, size], ...] sorted;  Fs.rename Fs.remove Fs.size Fs.exists Fs.info
 ```
 
-Layout: superblock, a FAT, a flat directory (64-byte entries, up to 128 files,
+Layout: superblock, a FAT, a flat directory (64-byte entries, sized when the disk is formatted - one sector per 32 disk sectors, at most 32, so up to 256 files -;
 names up to 47 bytes - `/` is just a character, `Fs.list(prefix)` makes it
 look like folders), data. Text is stored as UTF-8. A write goes to fresh
 sectors first and only then switches the directory entry, so a failure keeps the
