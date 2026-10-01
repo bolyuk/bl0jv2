@@ -1,0 +1,56 @@
+// The real-time clock (ports 0x0F70-0x0F77, see RealTimeClock in the runtime): the date and time in UTC.
+//
+// Clock.now() is [year, month, day, hour, minute, second, weekday] (month 1-12, weekday 0 = Sunday). The ports
+// are privileged, so a caller in user mode goes through a system call the kernel registers with Clock.init():
+// the same function works in either ring, like the disk driver's.
+
+def class Clock {
+    static field vector;
+
+    // privileged, once: registers the system call user mode reads the time through
+    static def init() {
+        registerHandler(onClockSyscall, Clock.vector, 1);
+    }
+
+    static def now() {
+        if (isPrivileged()) { return Clock.read(); }
+        return syscall(Clock.vector, 0);
+    }
+
+    // privileged: the ports. Reading the seconds first takes a snapshot the other fields then agree with.
+    static def read() {
+        second = in8(0x0F70);
+        minute = in8(0x0F71);
+        hour = in8(0x0F72);
+        day = in8(0x0F73);
+        month = in8(0x0F74);
+        weekday = in8(0x0F75);
+        year = in16(0x0F76);
+        return [year, month, day, hour, minute, second, weekday];
+    }
+
+    static def two(n) {
+        return n < 10 ? '0' + n : '' + n;
+    }
+
+    // '2026-10-01 03:04:05'
+    static def text(t) {
+        return t[0] + '-' + Clock.two(t[1]) + '-' + Clock.two(t[2]) + ' ' + Clock.two(t[3]) + ':' + Clock.two(t[4]) + ':' + Clock.two(t[5]);
+    }
+
+    static def weekdayName(t) {
+        names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        return names[t[6]];
+    }
+
+    // a number that changes whenever the minute does (and only then): for something that runs once a minute
+    static def minuteStamp(t) {
+        return (((t[0] * 12 + t[1]) * 32 + t[2]) * 24 + t[3]) * 60 + t[4];
+    }
+}
+Clock.vector = 18;
+
+// runs elevated, whatever ring the caller is in
+def onClockSyscall(arg) {
+    return Clock.read();
+}

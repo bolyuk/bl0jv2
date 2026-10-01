@@ -43,4 +43,12 @@ class Bl0jv2_ClockTest {
         String out = Bl0jv2_TestRunner.run("in8(0x0F70); print str(in16(0x0F76));");
         assertTrue(Integer.parseInt(out) >= 2024, out);
     }
+
+    @Test
+    void theClockLibraryReadsAndFormatsTheTime(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws java.io.IOException {
+        java.nio.file.Path entry = dir.resolve("entry.bl0");
+        java.nio.file.Files.writeString(entry, "import 'stdlib/time/clock.bl0'; t = Clock.now(); " +
+                "print Clock.text(t) + ' ' + Clock.weekdayName(t) + ' ' + str(Clock.minuteStamp(t) - Clock.minuteStamp([2026, 10, 1, 3, 3, 0, 4]));");
+        assertEquals("2026-10-01 03:04:05 Thu 1", Bl0jv2_TestRunner.runFile(entry, vm -> vm.set_clock(() -> millis(2026, 10, 1, 3, 4, 5))));
+    }
 }
