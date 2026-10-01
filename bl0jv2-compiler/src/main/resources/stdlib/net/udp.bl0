@@ -1,4 +1,5 @@
 import 'ip.bl0'; // brings in Ip.netByteToChar() too - see its own doc
+import 'net.bl0';
 
 // minimal UDP over the IP layer below: an 8-byte header (src port, dst
 // port, length, checksum) plus a payload. The checksum field is always
@@ -48,10 +49,77 @@ def class Udp {
         Udp.sendBytes(srcIp, srcPort, dstIp, dstPort, Ip.bytesOf(message));
     }
 
+    static field queue; // received datagrams (UdpPacket), oldest first
+    static field lock;
+
+    // Net.pump() calls this, under Net.pumpLock, for every UDP datagram
+    static def handleFrame(ipHeader, frame) {
+        if (len(frame) < 28) { return nil; }
+        pkt = UdpPacket.parse(frame, ipHeader);
+        lock(Udp.lock);
+        push(Udp.queue, pkt);
+        unlock(Udp.lock);
+    }
+
+    // true if a datagram is waiting. Pumps the NIC first, so a frame that has
+    // arrived but not yet been sorted by protocol counts.
     static def hasPacket() {
-        return Nic.hasFrame();
+        Net.pump();
+        lock(Udp.lock);
+        result = len(Udp.queue) > 0;
+        unlock(Udp.lock);
+        return result;
+    }
+
+    // blocks until a datagram for 'port' (any port if port < 0) arrives, or
+    // timeoutMs passes (negative = forever); returns it, or nil on timeout.
+    // Datagrams for other ports stay queued for whoever wants them. Sleeps on
+    // Nic.rxEvent - generation read before the queue is scanned, so one that
+    // lands in between is not slept through.
+    static def recvWait(port, timeoutMs) {
+        deadline = ticks() + timeoutMs;
+        while (true) {
+            gen = eventGen(Nic.rxEvent);
+            Net.pump();
+            pkt = Udp.take(port);
+            if (pkt != nil) { return pkt; }
+            if (timeoutMs < 0) {
+                waitEvent(Nic.rxEvent, gen, -1);
+            } else {
+                remaining = deadline - ticks();
+                if (remaining <= 0) { return nil; }
+                waitEvent(Nic.rxEvent, gen, remaining);
+            }
+        }
+    }
+
+    // removes and returns the oldest queued datagram for 'port' (any if port < 0), or nil
+    static def take(port) {
+        lock(Udp.lock);
+        found = nil;
+        i = 0;
+        while (found == nil && i < len(Udp.queue)) {
+            if (port < 0 || Udp.queue[i].dstPort == port) { found = i; }
+            i = i + 1;
+        }
+        result = nil;
+        if (found != nil) {
+            result = Udp.queue[found];
+            rest = [];
+            j = 0;
+            while (j < len(Udp.queue)) {
+                if (j != found) { push(rest, Udp.queue[j]); }
+                j = j + 1;
+            }
+            Udp.queue = rest;
+        }
+        unlock(Udp.lock);
+        return result;
     }
 }
+Udp.queue = [];
+Udp.lock = newMutex();
+Net.register(Ip.protoUdp, Udp.handleFrame);
 
 def class UdpPacket {
     field srcIp;
@@ -61,14 +129,18 @@ def class UdpPacket {
     field message;      // string, via Ip.netByteToChar() - see receive()'s own doc on what this loses
     field payloadBytes; // array of ints, each 0-255 - lossless, use this for anything binary (DNS - see dns.bl0)
 
-    // caller must check Udp.hasPacket() first, same contract Nic.recv()
-    // already has for an empty queue. Fills in BOTH pkt.message (lossy for
-    // anything outside Ip.netByteToChar()'s own range) and
+    // the oldest queued datagram, or nil if none is (pumps the NIC first).
+    // Callers normally check Udp.hasPacket() first; Udp.recvWait() waits.
+    static def receive() {
+        Net.pump();
+        return Udp.take(-1);
+    }
+
+    // builds a UdpPacket from a received frame. Fills in BOTH pkt.message
+    // (lossy for anything outside Ip.netByteToChar()'s own range) and
     // pkt.payloadBytes (lossless) - see this class's own doc on which to
     // actually use.
-    static def receive() {
-        frame = Nic.recv();
-        ipHeader = IpHeader.parse(frame);
+    static def parse(frame, ipHeader) {
 
         srcPort = Ip.u16From(frame, 20);
         dstPort = Ip.u16From(frame, 22);

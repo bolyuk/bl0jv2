@@ -21,6 +21,7 @@ def class Dns {
     static field myPort;
     static field serverIp; // 8.8.8.8 by default - Google Public DNS, picked for being about as stable/available as a public resolver gets; override this if your own network intercepts/blocks port 53 to a foreign resolver (see this project's own notes on that)
     static field nextId;
+    static field timeoutMs; // how long resolve() waits for an answer before giving up (returns 0)
 
     // one length-prefixed label per '.'-separated part, terminated by a
     // zero length byte - e.g. 'a.b' -> [1]'a'[1]'b'[0]. No compression on
@@ -141,15 +142,16 @@ def class Dns {
         query = Dns.buildQuery(hostname, id);
         Udp.sendBytes(Dns.myIp, Dns.myPort, Dns.serverIp, 53, query);
 
-        i = 0;
-        while (i < 300) {
-            i = i + 1;
-            gen = eventGen(Nic.rxEvent);
-            if (!Udp.hasPacket()) { waitEvent(Nic.rxEvent, gen, 20); continue; }
-
-            pkt = UdpPacket.receive();
+        // the query we just sent comes back to us through the loopback NIC
+        // before any real answer, so skip datagrams that come from ourselves;
+        // wait up to Dns.timeoutMs in total for the real one
+        deadline = ticks() + Dns.timeoutMs;
+        while (true) {
+            remaining = deadline - ticks();
+            if (remaining <= 0) { break; }
+            pkt = Udp.recvWait(Dns.myPort, remaining);
+            if (pkt == nil) { break; }
             if (pkt.srcIp == Dns.myIp && pkt.srcPort == Dns.myPort) { continue; }
-
             return Dns.parseResponse(pkt.payloadBytes);
         }
         return 0;
@@ -159,3 +161,4 @@ Dns.myIp = 0x0A000001;
 Dns.myPort = 53000;
 Dns.serverIp = 0x08080808;
 Dns.nextId = 1;
+Dns.timeoutMs = 6000;

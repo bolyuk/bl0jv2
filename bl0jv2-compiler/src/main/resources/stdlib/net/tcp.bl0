@@ -1,4 +1,5 @@
 import 'ip.bl0'; // brings in Ip.netByteToChar() too - see its own doc
+import 'net.bl0';
 
 // a toy TCP over the IP/NIC layers below: real three-way handshake
 // (SYN / SYN+ACK / ACK), real sequence/ack numbers, a real four-way close
@@ -612,37 +613,22 @@ def class TcpRegistry {
     // internally - a program using this stack never has to call it
     // directly.
     static def pump() {
-        // one core at a time: frames are popped from the NIC queue in
-        // order, but without this two cores could each pop a consecutive
-        // frame and then run handleSegment() for them concurrently, in
-        // either order - e.g. a connection's data segment handled before
-        // the ACK frame that precedes it, or two segments of one stream
-        // swapped so the in-order check (seg.seq == rcvNext) silently
-        // drops one, and with no retransmission nothing ever recovers it.
-        // Holding pumpLock across pop AND handle keeps arrival order. The
-        // mutex is reentrant, so handleSegment() -> sendSegment() paths
-        // that end up back in pump() are fine.
+        Net.pump(); // takes the frames off the NIC; handleFrame() below receives the TCP ones
         lock(TcpRegistry.pumpLock);
-        while (true) {
-            frame = Nic.tryRecv();
-            if (frame == nil) { break; }
-
-            ipHeader = IpHeader.parse(frame);
-            if (ipHeader.proto != Ip.protoTcp) { continue; }
-
-            seg = TcpSegment.parse(frame, ipHeader);
-            target = TcpRegistry.findMatch(ipHeader, seg);
-            if (target != nil) {
-                target.handleSegment(ipHeader, seg);
-                // the connection's owner may be a DIFFERENT core, asleep in
-                // idle() - see idle()'s own doc
-                signalEvent(Nic.rxEvent);
-            }
-        }
         TcpRegistry.retransmitTick();
         unlock(TcpRegistry.pumpLock);
+    }
+
+    // Net.pump() calls this, under Net.pumpLock, for every TCP segment
+    static def handleFrame(ipHeader, frame) {
+        seg = TcpSegment.parse(frame, ipHeader);
+        target = TcpRegistry.findMatch(ipHeader, seg);
+        if (target != nil) {
+            target.handleSegment(ipHeader, seg);
+        }
     }
 }
 TcpRegistry.conns = [];
 TcpRegistry.lock = newMutex();
-TcpRegistry.pumpLock = newMutex();
+TcpRegistry.pumpLock = Net.pumpLock; // the same mutex: sendSegment() and retransmission take it too
+Net.register(Ip.protoTcp, TcpRegistry.handleFrame);
