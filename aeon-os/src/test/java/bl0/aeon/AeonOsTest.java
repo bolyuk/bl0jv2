@@ -12,6 +12,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 // argument although dispatch() passes one).
 class AeonOsTest {
 
+    // the kernel programs are read from the virtual disk: boot needs an image with sbin/
+    private static void attachOsDisk(bl0.bl0jv2.runtime.Bl0jv2_jVM vm, String name) {
+        try {
+            vm.attach_disk(AeonImage.os(java.nio.file.Files.createTempFile("aeon-" + name, ".img")));
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    @Test
+    void bootWithoutADiskSaysWhatItNeeds() throws Exception {
+        var s = new AeonSession();
+        s.start(AeonSession.compile("boot.bl0"), 1);
+        assertTrue(s.waitFor("no boot disk", 10_000), s.output());
+        s.thread.join(5000);
+        assertTrue(s.failure != null && s.failure.getMessage().contains("no boot disk"), String.valueOf(s.failure));
+    }
+
     @Test
     void childHelloRunsToCompletion() throws Exception {
         var s = new AeonSession();
@@ -31,7 +49,7 @@ class AeonOsTest {
     @Test
     void bootRunsTheSchedulerIsolatesTheFaultAndLaunchesChildren() throws Exception {
         var s = new AeonSession();
-        s.start(AeonSession.compile("boot.bl0"), 1);
+        s.start(AeonSession.compile("boot.bl0"), 1, vm -> attachOsDisk(vm, "boot"));
         assertTrue(s.waitFor("aeon-shell ready", 20_000), s.output());
         String out = s.output();
         assertTrue(out.contains("[network] received packet: c0ffee"), out);
@@ -41,7 +59,7 @@ class AeonOsTest {
         assertTrue(out.contains("pid 2 child_crash: crashed"), out);
         // the shell answers on the keyboard, then exits
         s.type("help\r");
-        assertTrue(s.waitFor("available commands: help", 10_000), s.output());
+        assertTrue(s.waitFor("built in: help", 10_000), s.output());
         s.type("exit\r");
         s.thread.join(10_000);
         assertTrue(s.finished, s.output());
@@ -50,7 +68,7 @@ class AeonOsTest {
     @Test
     void smpBootDispatchesEverySixTaskAcrossThreeWorkerCores() throws Exception {
         var s = new AeonSession();
-        s.start(AeonSession.compile("smp_boot.bl0"), 4);
+        s.start(AeonSession.compile("smp_boot.bl0"), 4, vm -> attachOsDisk(vm, "smp"));
         assertTrue(s.waitFor("all 6 tasks completed across 3 worker cores", 20_000), s.output());
         String out = s.output();
         assertTrue(out.contains("[rogue] blocked: privileged instruction 'out' requires kernel mode"), out);

@@ -58,6 +58,25 @@ public final class AeonSession {
         thread.start();
     }
 
+    /** a shell on a copy of the OS disk, in 'dir' (the image file is dir/d.img) */
+    static AeonSession shellOnOsDisk(java.nio.file.Path dir) throws Exception {
+        return shellOn(dir.resolve("d.img"), true);
+    }
+
+    /** a shell on the image at 'image'; fresh = start from a new copy of the OS disk, else keep what is there */
+    static AeonSession shellOn(java.nio.file.Path image, boolean fresh) throws Exception {
+        var s = new AeonSession();
+        s.start(compile("shell.bl0"), 1, vm -> {
+            try {
+                vm.attach_disk(fresh ? AeonImage.os(image) : new bl0.bl0jv2.cli.FileDisk(image, AeonImage.SECTORS));
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        if (!s.waitFor("aeon-shell ready", 20_000)) throw new AssertionError(s.output());
+        return s;
+    }
+
     public String output() {
         synchronized (out.getBuffer()) {
             return out.toString();

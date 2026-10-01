@@ -1,0 +1,104 @@
+// aeon-os: what a program started from the disk needs. Importing this gives a
+// program the console, the filesystem (folders and paths included) and its
+// environment; startProgram() connects them to the kernel's disk driver, which
+// is the one thing a separately loaded program cannot have set up itself.
+//
+// A program is a plain .bl0 file:
+//
+//   import '../lib/userland.bl0';
+//   startProgram();
+//   ... Prog.words[0] is the command name, Prog.words[1..] its arguments ...
+//
+// compiled and put on the disk as bin/<name>.bl0c (see aeon-os/README or
+// --disk-put). It runs unprivileged and everything it does to the machine goes
+// through syscalls the kernel offers. When it returns, the shell is back.
+
+import '../kernel.bl0';
+import '../../stdlib/fs/dirs.bl0';
+import '../../stdlib/str/split.bl0';
+import '../../stdlib/str/fmt.bl0';
+import '../../stdlib/arrlib.bl0';
+import 'sys.bl0';
+
+def class Prog {
+    static field cwd;
+    static field words;
+}
+
+// the words of a command line, without the empty pieces repeated spaces leave
+def tokens(text) {
+    raw = Split.split(text, ' ');
+    words = [];
+    i = 0;
+    while (i < len(raw)) {
+        if (raw[i] != '') { push(words, raw[i]); }
+        i += 1;
+    }
+    return words;
+}
+
+// everything from word 'from' on, joined with single spaces
+def restOf(words, from) {
+    return Arr.join(Arr.slice(words, from, len(words)), ' ');
+}
+
+def portNumber(text) {
+    n = 0;
+    i = 0;
+    if (len(text) == 0 || len(text) > 5) { return nil; }
+    while (i < len(text)) {
+        c = int(text[i]);
+        if (c < 48 || c > 57) { return nil; }
+        n = n * 10 + (c - 48);
+        i += 1;
+    }
+    if (n < 1 || n > 65535) { return nil; }
+    return n;
+}
+
+// what was typed may hold \n for a line break (the keyboard cannot type one)
+def unescape(text) {
+    return strJoin(Split.split(text, '\\n'), strChar(10));
+}
+
+// text to the console, one line at a time (the console shows control characters as '?')
+def printText(text) {
+    lines = Split.split(text, strChar(10));
+    i = 0;
+    last = len(lines);
+    if (last > 0 && lines[last - 1] == '') { last -= 1; }
+    while (i < last) {
+        line = lines[i];
+        if (len(line) > 0 && strSub(line, len(line) - 1, len(line)) == strChar(13)) { line = strSub(line, 0, len(line) - 1); }
+        consoleWriteLine(line);
+        i += 1;
+    }
+}
+
+def isSpace(c) {
+    return c == ' ' || c == strChar(10) || c == strChar(13) || c == strChar(9);
+}
+
+// a path as typed -> the stored name, relative to the folder the shell was in
+def inCwd(path) {
+    return FsPath.resolve(Prog.cwd, path);
+}
+
+// a destination for cp/mv: an existing folder means "inside it"
+def destination(from, to) {
+    target = inCwd(to);
+    if (Dirs.isDir(target)) { target = FsPath.prefix(target) + FsPath.base(from); }
+    return target;
+}
+
+// call first thing in a program; false (after saying why) when there is no filesystem to use
+def startProgram() {
+    Disk.attach(peek32(Sys.base + 8), peek32(Sys.base + 4), peek32(Sys.base + 12));
+    Prog.cwd = sysCwd();
+    Prog.words = tokens(sysArgs());
+    if (!Fs.mount()) {
+        consoleWriteLine('the disk has no filesystem');
+        return false;
+    }
+    return true;
+}

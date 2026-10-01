@@ -1,0 +1,11 @@
+// aeon-os program: remove an empty folder
+// Loaded from the virtual disk by the shell (bin/rmdir.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: rmdir <folder>'); return nil; }
+    if (!Dirs.rmdir(inCwd(words[1]))) { consoleWriteLine(words[1] + ': no such folder'); }
+}
+
+if (startProgram()) { main(Prog.words); }

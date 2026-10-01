@@ -2,7 +2,7 @@
 
 A small register-based scripting language with its own compiler and virtual
 machine, written in Java 21. It was built to write an operating system in
-(`aeon-os/`), so besides the usual language features it has a VM with
+(`aeon-os/`, its own module: see aeon-os/README.md), so besides the usual language features it has a VM with
 multiple cores, interrupts, timers, ports, raw memory, privilege rings and a
 toy network stack (`stdlib/net/`) written in the language itself.
 
@@ -38,6 +38,8 @@ bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
       --bridge-tcp HOSTPORT:VMPORT  relay a real TCP socket to a Tcp listener
       --bridge-outbound          let VM code open real sockets (see below)
       --disk FILE [--disk-sectors N]  present FILE as a block device (created if missing)
+      --disk-put HOSTFILE[:NAME]  copy a host file or folder onto the --disk image first
+                         (a .bl0 is compiled and stored as .bl0c); repeatable
   -I, --include DIR  look an import up in DIR when it is not next to the importing file
 ```
 
@@ -205,10 +207,10 @@ look. It works at the `-t` prompt too.
 | Events | `newEvent()` `eventGen(e)` `signalEvent(e)` `waitEvent(e, gen, timeoutMs)` |
 | Interrupts | `registerHandler(fn, vector, priority)` `raiseInterrupt(v)` `raiseInterruptOn(core, v)` `disableInterrupts()` `enableInterrupts()` `haltCore()` |
 | Privilege | `dropToUserMode()` (one-way) `isPrivileged()` `syscall(vector, arg)` |
-| Other | `read()` (a line from stdin) `exec(path)` (run a compiled file) |
+| Other | `read()` (a line from stdin) `execMem(addr, size, mode)` (run a compiled program that sits in raw memory; mode 0 = user program, unloaded afterwards, 1 = kernel program) |
 
 A user function with the same name as a builtin takes precedence. Privileged
-(ring 0) only: `registerHandler`, `dispatch`, `exec`, `haltCore`, `reserve`,
+(ring 0) only: `registerHandler`, `dispatch`, `execMem`, `haltCore`, `reserve`,
 `disableInterrupts`, `enableInterrupts`, `in*`, `out*`.
 
 **Events** are broadcast latches: read `gen = eventGen(e)`, check your
@@ -266,7 +268,7 @@ old contents. Errors are `try/catch`-able messages starting `fs: `. After
 a syscall (vector 6), while the sector buffer is read with `peek`/`poke`.
 
 To port to another machine, replace `fs/disk.bl0` (`Disk.read/write/sectors`)
-and nothing else. The aeon-os shell has `ls cat write append rm mv cp df format`.
+and nothing else. The aeon-os shell has `ls cat write append rm mv cp df format` and more (aeon-os/README.md).
 
 ### Network stack
 

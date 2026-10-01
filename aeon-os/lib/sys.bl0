@@ -1,0 +1,73 @@
+// aeon-os: the system page. A program the shell starts from the disk is a
+// separate compiled file with its own copies of every class it imports, so the
+// shell hands it what it needs through one fixed block of raw memory - the way
+// a real OS gives a new process an environment: the disk driver's state, the
+// command line, the working folder.
+//
+//   +0    magic 'AEON'
+//   +4    disk sectors
+//   +8    address of the disk's sector buffer
+//   +12   syscall vector the disk driver uses from user mode
+//   +16   command line: 32-bit byte count, then UTF-8 bytes (at most 1000)
+//   +1024 working folder: the same shape
+//
+// The shell reserves the page once, privileged (reserve() is), and fills it
+// in; reading and writing it is peek/poke, which any ring may do.
+
+import '../../stdlib/str/utf8.bl0';
+
+def class Sys {
+    static field base;
+    static field textMax;
+}
+Sys.base = 0xF0000;
+Sys.textMax = 1000;
+
+// privileged
+def sysReserve() {
+    reserve(Sys.base, 4096);
+}
+
+def sysPublish(buffer, sectors, vector) {
+    poke32(Sys.base, 0x41454F4E);
+    poke32(Sys.base + 4, sectors);
+    poke32(Sys.base + 8, buffer);
+    poke32(Sys.base + 12, vector);
+    sysPutText(Sys.base + 16, '');
+    sysPutText(Sys.base + 1024, '');
+}
+
+def sysPutText(addr, text) {
+    bytes = Utf8.encode(text);
+    n = len(bytes);
+    if (n > Sys.textMax) {
+        free(bytes);
+        throw('sys: text longer than ' + Sys.textMax + ' bytes');
+    }
+    poke32(addr, n);
+    i = 0;
+    while (i < n) {
+        poke8(addr + 4 + i, bytes[i]);
+        i += 1;
+    }
+    free(bytes);
+}
+
+def sysGetText(addr) {
+    n = peek32(addr);
+    if (n < 0 || n > Sys.textMax) { return ''; }
+    bytes = [];
+    i = 0;
+    while (i < n) {
+        push(bytes, peek8(addr + 4 + i));
+        i += 1;
+    }
+    text = Utf8.decode(bytes);
+    free(bytes);
+    return text;
+}
+
+def sysSetArgs(text) { sysPutText(Sys.base + 16, text); }
+def sysArgs() { return sysGetText(Sys.base + 16); }
+def sysSetCwd(text) { sysPutText(Sys.base + 1024, text); }
+def sysCwd() { return sysGetText(Sys.base + 1024); }

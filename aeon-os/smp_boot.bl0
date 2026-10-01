@@ -68,6 +68,7 @@
 import '../stdlib/mathlib.bl0';
 import '../stdlib/arrlib.bl0';
 import 'kernel.bl0';
+import 'lib/loader.bl0';
 
 def class Kernel {
     static field numCores;
@@ -352,7 +353,12 @@ println 'all ' + peek32(Kernel.doneCounterAddr) + ' tasks completed across ' + (
 // would on a real system ---
 println '';
 println '--- launching shell ---';
-journalExec('shell', 'aeon-os/shell.bl0c');
+Disk.init(kalloc(512));
+if (!Fs.mount()) {
+    println 'no boot disk: start with --disk <image> holding sbin/shell.bl0c (see aeon-os/README.md)';
+    panic('no boot disk');
+}
+journalExec('shell', 'sbin/shell.bl0c');
 
 println '';
 printJournal();

@@ -1,0 +1,11 @@
+// aeon-os program: free space
+// Loaded from the virtual disk by the shell (bin/df.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    info = Fs.info();
+    consoleWriteLine(Fmt.format('{} files, {} of {} data sectors free ({} bytes free)', [info[3], info[2], info[1], info[2] * 512]));
+}
+
+if (startProgram()) { main(Prog.words); }

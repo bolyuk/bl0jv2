@@ -1,0 +1,13 @@
+// aeon-os program: replace a file with text
+// Loaded from the virtual disk by the shell (bin/write.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) < 2) { consoleWriteLine('usage: write <file> <text>'); return nil; }
+    name = inCwd(words[1]);
+    Fs.write(name, unescape(restOf(words, 2)));
+    consoleWriteLine(Fmt.format('wrote {} bytes to {}', [Fs.size(name), words[1]]));
+}
+
+if (startProgram()) { main(Prog.words); }

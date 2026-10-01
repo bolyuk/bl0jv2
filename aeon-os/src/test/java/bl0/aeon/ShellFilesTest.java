@@ -12,11 +12,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 // the aeon-os shell's file commands over a real host image file (--disk)
 class ShellFilesTest {
 
+    // a shell on a copy of the OS disk: bin/ holds the command programs
     private static AeonSession shell(Path image) throws Exception {
+        return AeonSession.shellOnOsDisk(image.getParent());
+    }
+
+    // a shell on a disk that holds no filesystem at all
+    private static AeonSession shellOnBlankDisk(Path dir) throws Exception {
         var s = new AeonSession();
         s.start(AeonSession.compile("shell.bl0"), 1, vm -> {
             try {
-                vm.attach_disk(new FileDisk(image, 256));
+                vm.attach_disk(AeonImage.blank(dir.resolve("blank.img"), 256));
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);
             }
@@ -36,18 +42,19 @@ class ShellFilesTest {
     }
 
     @Test
-    void anUnformattedDiskAsksForAFormat(@TempDir Path dir) throws Exception {
-        var s = shell(dir.resolve("d.img"));
-        command(s, "ls", "no filesystem");
+    void aBlankDiskAsksForAFormatAndFormattingMakesItUsable(@TempDir Path dir) throws Exception {
+        var s = shellOnBlankDisk(dir);
+        command(s, "cd x", "the disk has no filesystem");
+        command(s, "ls", "ls: command not found");
         command(s, "format", "run \"format yes\"");
         command(s, "format yes", "formatted 256 sectors");
-        command(s, "ls", "(empty)");
+        command(s, "echo hi > a.txt", "$ ");
+        command(s, "cd /", "$ ");
     }
 
     @Test
     void filesCanBeWrittenReadCopiedRenamedAndRemoved(@TempDir Path dir) throws Exception {
         var s = shell(dir.resolve("d.img"));
-        command(s, "format yes", "formatted");
         command(s, "write notes.txt hello  from the shell", "wrote 20 bytes to notes.txt");
         command(s, "cat notes.txt", "hello from the shell");
         command(s, "append notes.txt !", "notes.txt is now 21 bytes");
@@ -60,13 +67,12 @@ class ShellFilesTest {
         command(s, "cat notes.txt", "notes.txt: no such file");
         command(s, "rm old.txt", "$ ");
         command(s, "rm old.txt", "old.txt: no such file");
-        command(s, "df", "1 files");
+        command(s, "df", "files,");
     }
 
     @Test
     void foldersCanBeMadeEnteredAndRemovedAndPathsAreRelative(@TempDir Path dir) throws Exception {
         var s = shell(dir.resolve("d.img"));
-        command(s, "format yes", "formatted");
         command(s, "mkdir a", "$ ");
         command(s, "mkdir a/b", "$ ");
         command(s, "cd a/b", "/a/b $ ");
@@ -84,13 +90,12 @@ class ShellFilesTest {
         command(s, "rm a/b/f.txt", "$ ");
         command(s, "rmdir a/b", "$ ");
         command(s, "rmdir a", "$ ");
-        command(s, "ls", "(empty)");
+        command(s, "cd a", "a: no such folder");
     }
 
     @Test
     void cpAndMvIntoAFolderKeepTheName(@TempDir Path dir) throws Exception {
         var s = shell(dir.resolve("d.img"));
-        command(s, "format yes", "formatted");
         command(s, "mkdir box", "$ ");
         command(s, "write one.txt 1", "wrote");
         command(s, "cp one.txt box", "$ ");
@@ -102,7 +107,6 @@ class ShellFilesTest {
     @Test
     void dataCommandsWorkOnLinesAndBytes(@TempDir Path dir) throws Exception {
         var s = shell(dir.resolve("d.img"));
-        command(s, "format yes", "formatted");
         command(s, "write t.txt one\\ntwo apple\\nthree", "wrote 19 bytes");
         command(s, "cat t.txt", "three");
         command(s, "wc t.txt", "3 lines, 4 words, 19 bytes");
@@ -118,47 +122,73 @@ class ShellFilesTest {
         command(s, "stat empty", "file, 0 bytes, 0 sectors");
     }
 
-    // a program compiled on the host, put on the disk, run by the shell
+    // a program compiled on the host and put on a copy of the OS disk as bin/<name>.bl0c
     private static AeonSession shellWith(Path dir, String name, String source) throws Exception {
         Path src = dir.resolve(name + ".bl0");
         java.nio.file.Files.writeString(src, source);
         var s = new AeonSession();
         s.start(AeonSession.compile("shell.bl0"), 1, vm -> {
             try {
-                var disk = new FileDisk(dir.resolve("d.img"), 256);
-                DiskImport.put(disk, java.util.List.of(DiskImport.Spec.parse(src.toString())), java.util.List.of());
+                var disk = AeonImage.os(dir.resolve("d.img"));
+                DiskImport.put(disk, java.util.List.of(DiskImport.Spec.parse(src + ":bin/" + name + ".bl0c")), java.util.List.of(Path.of("aeon-os/bin")));
                 vm.attach_disk(disk);
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);
             }
         });
-        assertTrue(s.waitFor("aeon-shell ready", 15_000), s.output());
+        assertTrue(s.waitFor("aeon-shell ready", 20_000), s.output());
         return s;
     }
 
     @Test
-    void execRunsAProgramFromTheDiskWithoutPrivilege(@TempDir Path dir) throws Exception {
+    void aProgramOnTheDiskRunsByNameWithoutPrivilege(@TempDir Path dir) throws Exception {
         var s = shellWith(dir, "hello", "println 'hello from the disk, privileged: ' + str(isPrivileged());");
-        command(s, "ls", "hello.bl0c");
-        command(s, "exec hello.bl0c", "hello from the disk, privileged: false");
+        command(s, "ls bin", "hello.bl0c");
+        command(s, "hello", "hello from the disk, privileged: false");
+        command(s, "exec bin/hello.bl0c", "hello from the disk, privileged: false");
         command(s, "whoami", "user"); // the shell itself is still in user mode, and alive
+    }
+
+    @Test
+    void aProgramSeesItsArgumentsAndTheCurrentFolder(@TempDir Path dir) throws Exception {
+        var s = shellWith(dir, "where", "import '../lib/sys.bl0'; println 'args=[' + sysArgs() + '] cwd=[' + sysCwd() + ']';");
+        command(s, "mkdir work", "$ ");
+        command(s, "cd work", "/work $ ");
+        command(s, "where one  two", "args=[where one  two] cwd=[work]");
     }
 
     @Test
     void aProgramThatFailsReportsAndTheShellCarriesOn(@TempDir Path dir) throws Exception {
         var s = shellWith(dir, "bad", "println 'about to fail'; throw('boom');");
-        command(s, "exec bad.bl0c", "boom");
+        command(s, "bad", "boom");
         command(s, "whoami", "user");
-        command(s, "exec missing", "missing: no such file");
+        command(s, "nosuchthing", "nosuchthing: command not found");
         command(s, "write notaprogram hello", "wrote");
         command(s, "exec notaprogram", "notaprogram: ");
         command(s, "whoami", "user");
     }
 
     @Test
+    void repeatedRunsDoNotUseUpTheVm(@TempDir Path dir) throws Exception {
+        var s = shellWith(dir, "tick", "print '.';");
+        for (int i = 0; i < 40; i++) command(s, "ls", "$ ");
+        command(s, "tick", ".");
+        command(s, "whoami", "user");
+    }
+
+    @Test
+    void theOsWritesItsLogToTheDisk(@TempDir Path dir) throws Exception {
+        var s = shell(dir.resolve("x"));
+        command(s, "whoami", "user");
+        command(s, "ls /", "var/");
+        command(s, "cat var/log/aeon.log", "shell: started");
+        assertTrue(s.output().contains("shell: whoami"), s.output());
+        command(s, "tail -n 1 var/log/aeon.log", "shell: tail -n 1 var/log/aeon.log");
+    }
+
+    @Test
     void errorsAreReportedAndTheShellCarriesOn(@TempDir Path dir) throws Exception {
         var s = shell(dir.resolve("d.img"));
-        command(s, "format yes", "formatted");
         command(s, "write 0123456789012345678901234567890123456789012345678 x", "fs: a file name must be 1 to 47 bytes");
         command(s, "mv a b", "a: no such file");
         command(s, "cat", "usage: cat <file>");
@@ -169,10 +199,9 @@ class ShellFilesTest {
     void filesSurviveARestartBecauseTheyLiveInTheImage(@TempDir Path dir) throws Exception {
         Path image = dir.resolve("d.img");
         var first = shell(image);
-        command(first, "format yes", "formatted");
         command(first, "write keep.txt still here", "wrote");
 
-        var second = shell(image);
+        var second = AeonSession.shellOn(image, false);
         command(second, "cat keep.txt", "still here");
         assertFalse(second.output().contains("no filesystem"), second.output());
     }
@@ -182,7 +211,8 @@ class ShellFilesTest {
         var s = new AeonSession();
         s.start(AeonSession.compile("shell.bl0"), 1);
         assertTrue(s.waitFor("aeon-shell ready", 15_000), s.output());
-        command(s, "ls", "no disk attached");
+        command(s, "cd x", "no disk attached");
         command(s, "format yes", "no disk attached");
+        command(s, "ls", "ls: command not found");
     }
 }

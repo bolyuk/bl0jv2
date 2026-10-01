@@ -1,0 +1,12 @@
+// aeon-os program: create an empty file
+// Loaded from the virtual disk by the shell (bin/touch.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: touch <file>'); return nil; }
+    name = inCwd(words[1]);
+    if (!Fs.exists(name)) { Fs.write(name, ''); }
+}
+
+if (startProgram()) { main(Prog.words); }

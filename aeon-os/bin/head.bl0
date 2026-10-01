@@ -1,0 +1,28 @@
+// aeon-os program: the first lines of a file
+// Loaded from the virtual disk by the shell (bin/head.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    count = 10;
+    at = 1;
+    if (len(words) >= 3 && words[1] == '-n') {
+        count = portNumber(words[2]);
+        if (count == nil) { consoleWriteLine('usage: head [-n N] <file>'); return nil; }
+        at = 3;
+    }
+    if (len(words) != at + 1) { consoleWriteLine('usage: head [-n N] <file>'); return nil; }
+    text = Fs.read(inCwd(words[at]));
+    if (text == nil) { consoleWriteLine(words[at] + ': no such file'); return nil; }
+    lines = Split.split(text, strChar(10));
+    if (len(lines) > 0 && lines[len(lines) - 1] == '') { pop(lines); }
+    shown = [];
+    i = 0;
+    while (i < len(lines) && i < count) {
+        push(shown, lines[i]);
+        i += 1;
+    }
+    printText(strJoin(shown, strChar(10)));
+}
+
+if (startProgram()) { main(Prog.words); }

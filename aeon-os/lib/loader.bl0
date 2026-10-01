@@ -1,0 +1,81 @@
+// aeon-os: starting programs from the virtual disk. The VM has no way to read
+// a host file: a kernel reads a compiled program (.bl0c) from the disk with Fs,
+// puts the bytes in raw memory and asks the VM to run them (execMem, which
+// relocates the program to wherever there is room). Everything here runs
+// privileged: the boot code, and the shell's kernel half (a syscall handler).
+//
+// journalExec() is the boot-time launcher: it runs a KERNEL program (it keeps
+// its privilege and stays loaded) and records the outcome in the process
+// journal and the system log. runProgram() is for user programs.
+
+import '../kernel.bl0';
+import '../../stdlib/fs/fs.bl0';
+import 'log.bl0';
+
+def class Loader {
+    static field buffer;
+    static field limit;
+}
+Loader.limit = 131072;
+
+// reads 'path' from the disk and runs it. mode 0 = user program, 1 = kernel
+// program. Errors (no such file, too big, a failing program) are thrown.
+def loadAndRun(path, mode) {
+    if (Loader.buffer == nil) { Loader.buffer = kalloc(Loader.limit); }
+    data = Fs.readData(path);
+    if (data == nil) { throw(path + ': no such file'); }
+    size = len(data);
+    if (size == 0 || size > Loader.limit) {
+        free(data);
+        throw(path + ': not a program (' + size + ' bytes; at most ' + Loader.limit + ')');
+    }
+    i = 0;
+    while (i < size) {
+        poke8(Loader.buffer + i, data[i]);
+        i += 1;
+    }
+    free(data);
+    execMem(Loader.buffer, size, mode);
+}
+
+// --- process journal: a log of every program a kernel-level caller has
+// launched through journalExec() - name, outcome (ok / crashed: <message>)
+// and how long it ran. execMem() itself knows nothing about this; it is pure
+// kernel-side bookkeeping wrapped AROUND it, the way a real init system logs
+// what it launches ---
+def class ProcessJournal {
+    static field entries;
+    static field nextPid;
+}
+ProcessJournal.entries = [];
+ProcessJournal.nextPid = 1;
+
+def journalExec(name, path) {
+    pid = ProcessJournal.nextPid;
+    ProcessJournal.nextPid = ProcessJournal.nextPid + 1;
+    startTick = ticks();
+    println '  [journal] pid ' + pid + ' starting ' + name + ' (' + path + ')';
+    Log.write('journal: pid ' + pid + ' starting ' + name);
+
+    status = 'ok';
+    try {
+        loadAndRun(path, 1);
+    } catch (e) {
+        status = 'crashed: ' + e;
+    }
+
+    elapsedMs = ticks() - startTick;
+    push(ProcessJournal.entries, 'pid=' + pid + ' name=' + name + ' status=' + status + ' elapsedMs=' + elapsedMs);
+    println '  [journal] pid ' + pid + ' ' + name + ': ' + status + ' (' + elapsedMs + 'ms)';
+    Log.write('journal: pid ' + pid + ' ' + name + ' ' + status);
+    return status;
+}
+
+def printJournal() {
+    println '--- process journal (' + len(ProcessJournal.entries) + ' entries) ---';
+    i = 0;
+    while (i < len(ProcessJournal.entries)) {
+        println '  ' + ProcessJournal.entries[i];
+        i = i + 1;
+    }
+}

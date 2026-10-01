@@ -1,0 +1,16 @@
+// aeon-os program: print a file
+// Loaded from the virtual disk by the shell (bin/cat.bl0c); see lib/userland.bl0.
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: cat <file>'); return nil; }
+    text = Fs.read(inCwd(words[1]));
+    if (text == nil) {
+        consoleWriteLine(words[1] + ': no such file');
+    } else {
+        printText(text);
+    }
+}
+
+if (startProgram()) { main(Prog.words); }
