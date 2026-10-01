@@ -1,0 +1,140 @@
+import '../mathlib.bl0';
+
+// string formatting, so building a message doesn't take a chain of '+' and
+// str() calls: Fmt.format('{} + {} = {}', [a, b, a + b]).
+//
+// placeholders (the argument array is always the second parameter):
+//   {}        next argument, in order
+//   {2}       argument at index 2 (does not move the '{}' counter)
+//   {{ }}     a literal '{' / '}'
+//   {:spec}   or {2:spec}   - spec, all parts optional, in this order:
+//       < or >   align left / right inside the width (default: right)
+//       0        pad with zeros instead of spaces
+//       N        minimum width, in characters
+//       x        render an int as hex (its 32-bit pattern, see Math.toHex)
+//   e.g. {:x}  {:08x}  {:>6}  {:<10}  {1:04}
+//
+// anything that isn't str()able the way print would show it is shown the
+// way str() shows it. A missing argument is an ordinary out-of-range index
+// error (catchable with try/catch); a '{' with no closing '}' is copied
+// through literally rather than being an error.
+//
+// like Substr/Split in this directory, built a character at a time - there
+// is no string-builder primitive.
+
+def class Fmt {
+    static def isDigit(c) {
+        n = int(c);
+        return n >= 48 && n <= 57;
+    }
+
+    // parses s[from..to) as a non-negative decimal int, 0 for an empty range
+    static def parseInt(s, from, to) {
+        n = 0;
+        i = from;
+        while (i < to) {
+            n = n * 10 + (int(s[i]) - 48);
+            i = i + 1;
+        }
+        return n;
+    }
+
+    static def pad(text, width, left, zero) {
+        fill = ' ';
+        if (zero) { fill = '0'; }
+        while (len(text) < width) {
+            if (left) { text = text + fill; } else { text = fill + text; }
+        }
+        return text;
+    }
+
+    // renders one value according to a spec string like '08x' or '>6'
+    static def render(value, spec) {
+        lt = '<';
+        gt = '>';
+        zr = '0';
+        hx = 'x';
+        left = false;
+        zero = false;
+        hex = false;
+
+        end = len(spec);
+        if (end > 0 && spec[end - 1] == hx[0]) {
+            hex = true;
+            end = end - 1;
+        }
+
+        i = 0;
+        if (i < end && spec[i] == lt[0]) { left = true; i = i + 1; }
+        else {
+            if (i < end && spec[i] == gt[0]) { i = i + 1; }
+        }
+        if (i < end && spec[i] == zr[0] && !left) { zero = true; i = i + 1; }
+
+        width = Fmt.parseInt(spec, i, end);
+
+        text = '';
+        if (hex) { text = Math.toHex(int(value)); } else { text = str(value); }
+        return Fmt.pad(text, width, left, zero);
+    }
+
+    static def format(tpl, args) {
+        lb = '{';
+        rb = '}';
+        colon = ':';
+        out = '';
+        n = len(tpl);
+        next = 0;
+        i = 0;
+        while (i < n) {
+            c = tpl[i];
+
+            if (c == rb[0]) {
+                // '}}' is a literal '}'; a lone '}' is kept as-is too
+                if (i + 1 < n && tpl[i + 1] == rb[0]) { i = i + 1; }
+                out = out + c;
+                i = i + 1;
+                continue;
+            }
+
+            if (c != lb[0]) {
+                out = out + c;
+                i = i + 1;
+                continue;
+            }
+
+            if (i + 1 < n && tpl[i + 1] == lb[0]) {
+                out = out + c;
+                i = i + 2;
+                continue;
+            }
+
+            close = i + 1;
+            while (close < n && tpl[close] != rb[0]) { close = close + 1; }
+            if (close >= n) {
+                // unterminated '{': not a placeholder, copy it through
+                out = out + c;
+                i = i + 1;
+                continue;
+            }
+
+            sep = i + 1;
+            while (sep < close && tpl[sep] != colon[0]) { sep = sep + 1; }
+
+            idx = next;
+            if (sep > i + 1) {
+                idx = Fmt.parseInt(tpl, i + 1, sep);
+            } else {
+                next = next + 1;
+            }
+
+            spec = '';
+            k = sep + 1;
+            while (k < close) { spec = spec + tpl[k]; k = k + 1; }
+
+            out = out + Fmt.render(args[idx], spec);
+            i = close + 1;
+        }
+        return out;
+    }
+}
