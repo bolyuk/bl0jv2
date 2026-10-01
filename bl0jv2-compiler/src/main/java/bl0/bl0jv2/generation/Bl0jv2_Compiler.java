@@ -10,6 +10,7 @@ import bl0.bl0jv2.exceptions.Bl0j_CompilerException;
 import bl0.bl0jv2.generation.nodes.BinaryNode;
 import bl0.bl0jv2.generation.nodes.Node;
 import bl0.bl0jv2.generation.nodes.PROGRAM_N;
+import bl0.bl0jv2.generation.nodes.RegValueNode;
 import bl0.bl0jv2.generation.nodes.data.*;
 import bl0.bl0jv2.generation.nodes.statements.*;
 import bl0.bl0jv2.generation.nodes.unary.LUnaryNode;
@@ -1172,6 +1173,9 @@ public final class Bl0jv2_Compiler {
             return reg;
         }
 
+        if(node instanceof RegValueNode regValue)
+            return regValue.reg;
+
         if(node instanceof NativeCallNode nativeCallNode){
             int valRegRaw = compileInner(nativeCallNode.right);
 
@@ -1704,12 +1708,16 @@ public final class Bl0jv2_Compiler {
             int reg;
 
             if(node instanceof RUnaryNode rUnaryNode){
-                reg = compileInner(rUnaryNode.right);
-
-                int oneConst = constant(1);
-                int tempReg = regIndex++;
-                int tempRegToReturn = regIndex++;
-                _emit(OpCodes.LOAD_CONST, tempReg, oneConst);
+                // x++ / x-- as 'x = x + 1' written back to wherever x lives, and
+                // yielding x's OLD value. It used to add to a register that holds
+                // a COPY of x for anything but a plain local - a captured variable
+                // (a cell), a field or an array element - so those silently never
+                // changed.
+                Node target = rUnaryNode.right;
+                if (!(target instanceof IdentityNode || target instanceof FieldAccessNode || target instanceof IndexNode))
+                    throw err("the operand of '" + (rUnaryNode.op == Operator.PLUS_PLUS ? "++" : "--") + "' must be a variable, a field or an array element");
+                if (!isRepeatableTarget(target))
+                    throw err("the operand of '++'/'--' is read and written, so it must not contain calls or assignments");
 
                 byte op = switch (rUnaryNode.op){
                     case MINUS_MINUS -> OpCodes.LR_SUB;
@@ -1717,10 +1725,17 @@ public final class Bl0jv2_Compiler {
                     default -> throw new Bl0j_CompilerException("Unknown op: " + u.op);
                 };
 
-                _emit(OpCodes.MOV, tempRegToReturn, reg);
-                _emit(op, reg, tempReg);
+                int current = compileInner(target);
+                int oldValue = regIndex++;
+                _emit(OpCodes.MOV, oldValue, current); // 'current' may BE the variable's register, which the store below changes
+                int one = regIndex++;
+                _emit(OpCodes.LOAD_CONST, one, constant(1));
+                int updated = regIndex++;
+                _emit(OpCodes.MOV, updated, oldValue);
+                _emit(op, updated, one);
 
-                return tempRegToReturn;
+                compileAssign(target, new RegValueNode(updated));
+                return oldValue;
             }
 
             if(node instanceof LUnaryNode l) {
@@ -1966,6 +1981,19 @@ public final class Bl0jv2_Compiler {
         }
 
         throw new Bl0j_CompilerException("cannot assign to " + target);
+    }
+
+    // a target that can be compiled twice (read, then written) without running
+    // anything twice: names, literals, and field/index chains over them
+    private static boolean isRepeatableTarget(Node node) {
+        return switch (node) {
+            case IdentityNode n -> true;
+            case NumberNode n -> true;
+            case StringNode n -> true;
+            case FieldAccessNode n -> isRepeatableTarget(n.target);
+            case IndexNode n -> isRepeatableTarget(n.left) && isRepeatableTarget(n.index);
+            default -> false;
+        };
     }
 
     // does the lambda's body refer to 'name' without it being one of the
