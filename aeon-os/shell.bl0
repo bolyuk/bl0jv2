@@ -38,6 +38,13 @@
 
 import '../stdlib/mathlib.bl0';
 import 'kernel.bl0';
+import '../stdlib/net/icmp.bl0';
+import '../stdlib/net/tcp.bl0';
+import '../stdlib/net/udp.bl0';
+import '../stdlib/net/dns.bl0';
+import '../stdlib/net/http.bl0';
+import '../stdlib/str/split.bl0';
+import '../stdlib/str/fmt.bl0';
 
 // when boot.bl0 exec()s this file, it already called kernel.bl0's
 // initHeap() with ITS OWN reserved regions accounted for (see its own
@@ -56,10 +63,18 @@ if (peek32(0) == 0) {
 }
 initKeyboard();
 initConsole();
+// the network device: init() or initWithHostBridge(), whichever the host attached
+// (privileged - reads a port and registers handlers - so it happens here, before
+// dropToUserMode(); afterwards the shell sends through the kernel's syscall)
+Nic.initAuto();
+Dns.myIp = Net.localIp;
+TcpConn.connectTimeoutMs = 5000;
 
 // --- built-in commands ---
 def cmdHelp() {
     consoleWriteLine('available commands: help, echo <text>, uptime, whoami, reboot, exit');
+    consoleWriteLine('network: net, netstat, setip <ip>, setdns <ip>, ping <host>, resolve <host>,');
+    consoleWriteLine('         http <host[:port]> [path], tcp <host> <port> <text>, udp <host> <port> <text>, httpd <port>');
 }
 
 def cmdUptime() {
@@ -85,6 +100,222 @@ def cmdReboot() {
     }
 }
 
+// --- network commands ---
+//
+// <host> is a dotted address (10.0.0.2) or a name, looked up with 'resolve'.
+// Reaching anything beyond this machine's own loopback needs the host to attach a
+// bridge (bl0jv2 --bridge-outbound ...): without one, frames only ever come back
+// to this same VM, so a ping to another address times out, which is the true answer.
+
+def class ShellNet {
+    static field nextPort;
+}
+ShellNet.nextPort = 49152;
+
+def freePort() {
+    p = ShellNet.nextPort;
+    ShellNet.nextPort += 1;
+    if (ShellNet.nextPort > 65000) { ShellNet.nextPort = 49152; }
+    return p;
+}
+
+// the words of a command line, without the empty pieces repeated spaces leave
+def tokens(text) {
+    raw = Split.split(text, ' ');
+    words = [];
+    i = 0;
+    while (i < len(raw)) {
+        if (raw[i] != '') { push(words, raw[i]); }
+        i += 1;
+    }
+    return words;
+}
+
+// everything from word 'from' on, joined with single spaces
+def restOf(words, from) {
+    return Arr.join(Arr.slice(words, from, len(words)), ' ');
+}
+
+// an address: dotted quad as is, otherwise a DNS lookup; nil (after saying why) if neither works
+def hostAddress(name) {
+    addr = Ip.parseAddr(name);
+    if (addr != nil) { return addr; }
+    consoleWriteLine('resolving ' + name + '...');
+    addr = Dns.resolve(name);
+    if (addr == 0) {
+        consoleWriteLine(name + ': name not found (no answer from DNS server ' + Ip.formatAddr(Dns.serverIp) + ')');
+        return nil;
+    }
+    return addr;
+}
+
+def portNumber(text) {
+    n = 0;
+    i = 0;
+    if (len(text) == 0 || len(text) > 5) { return nil; }
+    while (i < len(text)) {
+        c = int(text[i]);
+        if (c < 48 || c > 57) { return nil; }
+        n = n * 10 + (c - 48);
+        i += 1;
+    }
+    if (n < 1 || n > 65535) { return nil; }
+    return n;
+}
+
+def cmdNet() {
+    bridge = Nic.hostBridgeEnabled ? 'attached' : 'none (loopback only)';
+    consoleWriteLine(Fmt.format('address  {}', [Ip.formatAddr(Net.localIp)]));
+    consoleWriteLine(Fmt.format('dns      {}', [Ip.formatAddr(Dns.serverIp)]));
+    consoleWriteLine(Fmt.format('bridge   {}', [bridge]));
+    consoleWriteLine(Fmt.format('frames   {} sent, {} received, {} waiting, {} dropped by the IP layer', [Nic.txCount, Nic.rxCount, Nic.pending(), Net.dropped]));
+}
+
+def cmdNetstat() {
+    consoleWriteLine('proto  local                  remote                 state');
+    n = 0;
+    i = 0;
+    while (i < len(TcpRegistry.conns)) {
+        c = TcpRegistry.conns[i];
+        remote = '*';
+        if (c.remoteIp != nil) { remote = Ip.formatAddr(c.remoteIp) + ':' + c.remotePort; }
+        consoleWriteLine(Fmt.format('tcp    {:<22} {:<22} {}', [Ip.formatAddr(c.localIp) + ':' + c.localPort, remote, c.state]));
+        n += 1;
+        i += 1;
+    }
+    if (n == 0) { consoleWriteLine('(no connections)'); }
+}
+
+def cmdSetIp(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: setip <a.b.c.d>'); return nil; }
+    addr = Ip.parseAddr(words[1]);
+    if (addr == nil) { consoleWriteLine(words[1] + ': not an address'); return nil; }
+    Net.localIp = addr;
+    Dns.myIp = addr;
+    consoleWriteLine('address is now ' + Ip.formatAddr(addr));
+}
+
+def cmdSetDns(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: setdns <a.b.c.d>'); return nil; }
+    addr = Ip.parseAddr(words[1]);
+    if (addr == nil) { consoleWriteLine(words[1] + ': not an address'); return nil; }
+    Dns.serverIp = addr;
+    consoleWriteLine('dns server is now ' + Ip.formatAddr(addr));
+}
+
+def cmdPing(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: ping <host>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    consoleWriteLine('PING ' + Ip.formatAddr(addr) + ' with 32 bytes of data');
+    received = 0;
+    seq = 1;
+    while (seq <= 4) {
+        rtt = Icmp.ping(Net.localIp, addr, seq, 1000);
+        if (rtt < 0) {
+            consoleWriteLine(Fmt.format('seq={}: request timed out', [seq]));
+        } else {
+            consoleWriteLine(Fmt.format('reply from {}: seq={} time={}ms', [Ip.formatAddr(addr), seq, rtt]));
+            received += 1;
+        }
+        seq += 1;
+    }
+    consoleWriteLine(Fmt.format('4 sent, {} received', [received]));
+}
+
+def cmdResolve(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: resolve <host>'); return nil; }
+    addr = Dns.resolve(words[1]);
+    if (addr == 0) {
+        consoleWriteLine(words[1] + ': no answer from DNS server ' + Ip.formatAddr(Dns.serverIp));
+    } else {
+        consoleWriteLine(words[1] + ' is ' + Ip.formatAddr(addr));
+    }
+}
+
+def cmdHttp(words) {
+    if (len(words) < 2 || len(words) > 3) { consoleWriteLine('usage: http <host[:port]> [path]'); return nil; }
+    target = words[1];
+    port = 80;
+    colon = strFind(target, ':', 0);
+    if (colon >= 0) {
+        port = portNumber(strSub(target, colon + 1, len(target)));
+        target = strSub(target, 0, colon);
+        if (port == nil) { consoleWriteLine('bad port'); return nil; }
+    }
+    path = '/';
+    if (len(words) == 3) { path = words[2]; }
+    addr = hostAddress(target);
+    if (addr == nil) { return nil; }
+    response = Http.get(Net.localIp, freePort(), addr, port, path);
+    if (response == nil) {
+        consoleWriteLine('connection to ' + Ip.formatAddr(addr) + ':' + port + ' timed out');
+        return nil;
+    }
+    parsed = HttpResponse.parse(response);
+    consoleWriteLine(parsed.statusLine);
+    consoleWriteLine(parsed.body);
+}
+
+def cmdTcp(words) {
+    if (len(words) < 4) { consoleWriteLine('usage: tcp <host> <port> <text>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    port = portNumber(words[2]);
+    if (port == nil) { consoleWriteLine('bad port'); return nil; }
+    conn = TcpConn.connect(Net.localIp, freePort(), addr, port);
+    if (conn == nil) {
+        consoleWriteLine('connection to ' + Ip.formatAddr(addr) + ':' + port + ' timed out');
+        return nil;
+    }
+    conn.send(restOf(words, 3));
+    reply = '';
+    while (conn.waitData(2000)) { reply = reply + conn.receive(); }
+    conn.close();
+    if (reply == '') {
+        consoleWriteLine('(no reply)');
+    } else {
+        consoleWriteLine(reply);
+    }
+}
+
+def cmdUdp(words) {
+    if (len(words) < 4) { consoleWriteLine('usage: udp <host> <port> <text>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    port = portNumber(words[2]);
+    if (port == nil) { consoleWriteLine('bad port'); return nil; }
+    local = freePort();
+    Udp.send(Net.localIp, local, addr, port, restOf(words, 3));
+    // the datagram we just sent also comes back to us through the loopback NIC:
+    // skip it, wait for something that is not from ourselves
+    deadline = ticks() + 2000;
+    while (true) {
+        remaining = deadline - ticks();
+        if (remaining <= 0) { consoleWriteLine('(no reply)'); return nil; }
+        pkt = Udp.recvWait(local, remaining);
+        if (pkt == nil) { consoleWriteLine('(no reply)'); return nil; }
+        if (pkt.srcIp == Net.localIp && pkt.srcPort == local) { continue; }
+        consoleWriteLine(Fmt.format('reply from {}:{}: {}', [Ip.formatAddr(pkt.srcIp), pkt.srcPort, pkt.message]));
+        return nil;
+    }
+}
+
+def httpdPage(path) {
+    return 'hello from aeon-os, you asked for ' + path;
+}
+
+// serves exactly ONE request, then returns to the prompt (TcpConn.listen()
+// accepts one connection per call - see its own doc); run it again for the next
+def cmdHttpd(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: httpd <port>'); return nil; }
+    port = portNumber(words[1]);
+    if (port == nil) { consoleWriteLine('bad port'); return nil; }
+    consoleWriteLine('listening on ' + Ip.formatAddr(Net.localIp) + ':' + port + ' for one request...');
+    Http.serve(Net.localIp, port, httpdPage);
+    consoleWriteLine('served one request');
+}
+
 def class ShellState {
     static field running;
 }
@@ -105,6 +336,20 @@ def runCommand(line) {
         return nil;
     }
     if (line == '') { return nil; }
+
+    words = tokens(line);
+    if (len(words) == 0) { return nil; }
+    cmd = words[0];
+    if (cmd == 'net') { cmdNet(); return nil; }
+    if (cmd == 'netstat') { cmdNetstat(); return nil; }
+    if (cmd == 'setip') { cmdSetIp(words); return nil; }
+    if (cmd == 'setdns') { cmdSetDns(words); return nil; }
+    if (cmd == 'ping') { cmdPing(words); return nil; }
+    if (cmd == 'resolve') { cmdResolve(words); return nil; }
+    if (cmd == 'http') { cmdHttp(words); return nil; }
+    if (cmd == 'tcp') { cmdTcp(words); return nil; }
+    if (cmd == 'udp') { cmdUdp(words); return nil; }
+    if (cmd == 'httpd') { cmdHttpd(words); return nil; }
     consoleWriteLine(line + ': command not found');
 }
 
