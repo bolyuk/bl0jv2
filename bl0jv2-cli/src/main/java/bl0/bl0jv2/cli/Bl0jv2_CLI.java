@@ -60,7 +60,7 @@ public class Bl0jv2_CLI {
     private void parseArgs(String[] args) {
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
-                case "-t", "-terminal" -> terminal = true;
+                case "-t", "--terminal", "-terminal" -> terminal = true;
                 case "-c", "--compile" -> compile = true;
                 case "-d", "--dump"    -> dump    = true;
                 case "-e", "--execute" -> execute = true;
@@ -133,7 +133,7 @@ public class Bl0jv2_CLI {
     }
 
     private void printHelp() {
-        System.out.println("Usage: bl0jv2 [-cdehV] [-n <cores>] <source> [<dest>]");
+        System.out.println("Usage: bl0jv2 [-cdektVh] [-n <cores>] <source> [<dest>]");
         System.out.println();
         System.out.println("Parameters:");
         System.out.println("  <source>       source file");
@@ -154,18 +154,18 @@ public class Bl0jv2_CLI {
         System.out.println("                  into stdlib/net/nic.bl0's own host-bridge ports, so a");
         System.out.println("                  bl0jv2 program using stdlib/net/udp.bl0 can talk to a");
         System.out.println("                  real external program (curl/netcat/etc) - the bl0jv2");
-        System.out.println("                  program must call initNicWithHostBridge(), not plain");
-        System.out.println("                  initNic(); only meaningful together with -e");
+        System.out.println("                  program must call Nic.initWithHostBridge(), not plain");
+        System.out.println("                  Nic.init(); only meaningful together with -e");
         System.out.println("      --bridge-tcp HOSTPORT:VMPORT  relay a real host TCP socket (bound");
-        System.out.println("                  to HOSTPORT) to a bl0jv2 tcpListen()/httpServe() on");
+        System.out.println("                  to HOSTPORT) to a bl0jv2 TcpConn.listen()/Http.serve() on");
         System.out.println("                  VMPORT - e.g. curl http://localhost:HOSTPORT/ reaches a");
-        System.out.println("                  bl0jv2 httpServe(0x0A000001, VMPORT, handler). One real");
-        System.out.println("                  connection at a time (see tcpListen()'s own doc); the");
-        System.out.println("                  bl0jv2 program must call initNicWithHostBridge(), not");
-        System.out.println("                  plain initNic(); only meaningful together with -e");
+        System.out.println("                  bl0jv2 Http.serve(0x0A000001, VMPORT, handler). One real");
+        System.out.println("                  connection at a time (see TcpConn.listen()'s own doc); the");
+        System.out.println("                  bl0jv2 program must call Nic.initWithHostBridge(), not");
+        System.out.println("                  plain Nic.init(); only meaningful together with -e");
         System.out.println("      --bridge-outbound  lets bl0jv2 code reach OUT for real - a program's");
-        System.out.println("                  own tcpConnect() opens a real socket to wherever it");
-        System.out.println("                  names, and stdlib/net/dns.bl0's dnsResolve() answers for");
+        System.out.println("                  own TcpConn.connect() opens a real socket to wherever it");
+        System.out.println("                  names, and stdlib/net/dns.bl0's Dns.resolve() answers for");
         System.out.println("                  real too. The reverse of -b/--bridge-tcp above (a real");
         System.out.println("                  peer reaching IN); only meaningful together with -e");
         System.out.println("  -h, --help      show this help message and exit");

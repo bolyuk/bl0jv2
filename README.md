@@ -1,10 +1,13 @@
 # bl0jv2
 
-A small register-based scripting language, compiler, and VM written in Java 21.
-**Status: proof of concept.** The pipeline (lexer → parser → compiler → VM) works
-end to end for the features listed below, but there are sharp edges — see
-[Known limitations](#known-limitations). Every example in this file has been
-run against the actual jar.
+A small register-based scripting language with its own compiler and virtual
+machine, written in Java 21. It was built to write an operating system in
+(`aeon-os/`), so besides the usual language features it has a VM with
+multiple cores, interrupts, timers, ports, raw memory, privilege rings and a
+toy network stack (`stdlib/net/`) written in the language itself.
+
+**Status: proof of concept.** Everything described here is covered by the test
+suite, but it is a young language: see [Known limitations](#known-limitations).
 
 ## Build
 
@@ -12,240 +15,268 @@ run against the actual jar.
 mvn package
 ```
 
-This produces two artifacts:
+produces `target/bl0jv2-1.0-SNAPSHOT-fat.jar` (runnable) and, if `native-image`
+is on the PATH, a GraalVM native binary `target/bl0jv2`.
 
-- `target/bl0jv2-1.0-SNAPSHOT-fat.jar` — runnable fat jar
-- `target/bl0jv2` (or `bl0jv2.exe` on Windows) — a GraalVM native image, if `native-image` is on your PATH
+Modules: `bl0jv2-common` (opcodes, constant formats, exceptions),
+`bl0jv2-compiler` (lexer, parser, compiler, linker, `stdlib/`),
+`bl0jv2-runtime` (the VM), `bl0jv2-cli` (command line, host network bridges),
+`aeon-os/` (the OS and demo programs).
 
-## CLI usage
-
-```
-bl0jv2 [-cdehtV] <source> [<dest>]
-
-  <source>       source file
-  [<dest>]       destination file (optional, only used with -c)
-
-  -c, --compile  compile <source> to bytecode (writes <source>.bl0c, or <dest> if given)
-  -d, --dump     print the bytecode disassembly (header, constants, instructions)
-  -e, --execute  execute the bytecode
-  -t, --terminal start an interactive REPL
-  -h, --help     show help and exit
-  -V, --version  print version and exit
-```
-
-Examples:
+## Command line
 
 ```
-java -jar bl0jv2-1.0-SNAPSHOT-fat.jar -c hello.bl0        # compile -> hello.bl0.bl0c
-java -jar bl0jv2-1.0-SNAPSHOT-fat.jar -e hello.bl0.bl0c    # run compiled bytecode
-java -jar bl0jv2-1.0-SNAPSHOT-fat.jar -c -e hello.bl0      # compile and immediately run
-java -jar bl0jv2-1.0-SNAPSHOT-fat.jar -c -d hello.bl0      # compile and print the disassembly
-java -jar bl0jv2-1.0-SNAPSHOT-fat.jar -t                   # interactive REPL, one line at a time
+bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
+
+  -c, --compile      compile <source> to bytecode (<source>.bl0c, or <dest>)
+  -d, --dump         disassemble the bytecode
+  -e, --execute      run it
+  -t, --terminal     interactive REPL, one line at a time (!exit quits)
+  -k, --keyboard     bridge real stdin to aeon-os's simulated keyboard
+  -n, --cores N      N-1 worker cores besides core 0 (default 1)
+  -b, --bridge-udp PORT          relay a real UDP socket into the VM's NIC
+      --bridge-tcp HOSTPORT:VMPORT  relay a real TCP socket to a Tcp listener
+      --bridge-outbound          let VM code open real sockets (see below)
 ```
 
-In the REPL, type `!exit` to quit. Each line you enter is compiled and executed
-immediately, and its disassembly is printed before it runs.
-
-## Language structure
-
-Source files have no extension requirement. There is no comment syntax yet —
-everything you write is parsed as code.
-
-**Statement separators:** don't rely on trailing `;` — see
-[Known limitations](#known-limitations). Just put one statement per line.
-
-### Literals
-
 ```
-5           // integer
-'hello'     // string (single quotes only, no escapes)
-true
-false
-nil
+java -jar bl0jv2-1.0-SNAPSHOT-fat.jar -c -e hello.bl0   # compile and run
 ```
 
-### Variables & assignment
+`-c -e` together compile and run; `-e` alone expects an already compiled
+`.bl0c`. `--bridge-outbound` lets a program's `TcpConn.connect()` /
+`Udp.send()` reach real hosts: it refuses the wildcard, multicast and
+link-local (169.254.0.0/16, cloud metadata) addresses and allows at most 64
+connections at a time, but loopback and private ranges are reachable - only use
+it with programs you trust.
 
-Variables don't need declaring — assigning to an identifier creates it.
+## The language
 
-```
-a = 5
-b = 'text'
-c = a
-```
+Statements are separated by newlines or `;`. A `;` is required after `field`
+declarations and `import`. `//` starts a line comment. `println` prints a
+newline *before* its text (so output has no trailing newline).
 
-### Arithmetic operators
+### Values
 
-`+  -  *  /  %` are supported, with limited operator overloading via a
-type-based dispatch table:
-
-```
-x = 3 + 4          // 7
-y = 10 % 3          // 1
-s = 'foo' + 'bar'   // 'foobar'
-s2 = '' + 1          // '1'   (string + int -> string concat; see note below)
-r = 'ab' * 3         // 'ababab' (string * int -> repeat)
-```
-
-**Note:** mixed string/int addition ignores which side the string is
-literally written on and always concatenates as if the string came first
-(a quirk of the operator dispatch table — see
-[Known limitations](#known-limitations)). If you want `int + string` to read
-naturally, put an empty string first: `'' + i + ' items'`.
-
-Division and remainder by zero throw a VM exception.
-
-### Comparison & equality
+`int` (32-bit, wraps on overflow), `float` (double), `string`, `bool`, `nil`,
+`char` (what `s[i]` gives; equal to a one-character string), arrays `[1, 2]`,
+tuples `(1, 2)` (immutable), functions, class instances, `err`, mutexes, events.
 
 ```
-a == b
-a != b
-a < b
-a > b
+a = 5                 // variables need no declaration
+b = 'text'            // 'single' or "double" quotes, same escapes:
+println "say \"hi\"\n\t\x41"     // \n \t \r \0 \' \" \\ \xNN
+println 1.5e3         // float literals may have an exponent
+println 0xFF + 0b101  // hex and binary integer literals
 ```
 
-`<=` and `>=` are **not implemented** in the compiler yet — avoid them (see
-[Known limitations](#known-limitations)).
+A literal that does not fit in 32 bits is a parse error; reading a variable that
+is never assigned anywhere in its function is a compile error.
 
-### Unary & postfix operators
-
-```
-neg = -a
-notb = !true
-
-i = 0
-i++
-i--
-```
-
-### Ternary
+### Operators
 
 ```
-age = 20
-label = age == 20 ? 'twenty' : 'not twenty'
-println label
+println 7 / 2         // 3     int / int is integer division
+println 7 / 2.0       // 3.5   any float operand makes the operation float
+println 2 ** 10       // 1024  right-associative; -2 ** 2 is -4
+println 'ab' * 3      // ababab
+println 'x=' + 5      // x=5   + concatenates when either side is a string
 ```
 
-### if / else
+`+ - * / % **`, comparison `== != < > <= >=` (numbers; strings and chars by
+character order), `&& || !` (operands must be `bool`: `if (5)` is an error,
+there is no truthiness), bitwise `& | ^ ~ << >> >>>`, ternary `c ? a : b`,
+`++`/`--`, and compound assignment `+= -= *= /= %= **= &= |= ^= <<= >>= >>>=`
+(`a[f()] += 1` is rejected: the target would be evaluated twice).
+`==` on numbers compares `1 == 1.0` as true; on arrays it is identity; an
+instance with an `equals` method uses it.
 
-The condition may optionally be wrapped in parentheses; the body may be a
-single statement or a `{ }` block.
+### Control flow
 
 ```
-x = 7
-if (x > 5) {
-    println 'big'
-} else {
-    println 'small'
+if (x > 5) { println 'big' } else { println 'small' }
+
+sum = 0
+for (i = 1; i <= 10; i += 1) { sum += i }
+while (sum > 0) { sum -= 20; if (sum < 10) { break } }
+
+switch (x) {                     // no fallthrough; each case is a block
+    case 1 { println 'one' }
+    case 2 { println 'two' }
+    default { println 'many' }
+}
+
+try { x = 1 / 0 } catch (e) { println 'caught: ' + e }
+try { throw('custom') } catch (e) { println e }
+```
+
+Runtime failures and `throw(message)` are caught with `try/catch`; the catch
+variable is an `err` value that prints as its message. Errors that nothing
+catches end the program.
+
+### Functions, lambdas, closures
+
+```
+def fact(n) { if (n <= 1) { return 1 } return n * fact(n - 1) }
+def log(msg) { println msg; return }      // bare return gives nil
+
+add = (a, b) -> a + b                     // lambda
+k = 10
+addk = (x) -> x + k                       // captures k (by reference)
+fib = (n) -> n < 2 ? n : fib(n - 1) + fib(n - 2)   // may call itself
+
+def counter() {
+    n = 0
+    def next() { n += 1; return n }       // nested def = closure
+    return next
 }
 ```
 
-### while
+Top-level `def` functions are global and callable before their definition. A
+`def` inside a function or block is a closure over the enclosing variables,
+exists from its statement on, and can call itself. A parameter shadows a
+global function of the same name; assigning to a function's or class's name is
+a compile error. Calls are checked: a wrong argument count is a compile error
+when the function is known and `function f expects 2 arguments, got 1`
+otherwise. Recursion deeper than 100000 calls is a catchable
+`stack overflow` error.
+
+### Classes and enums
 
 ```
-i = 0
-while (i < 5) {
-    println i
-    i = i + 1
+def class Point {
+    field x;
+    field y = 0;                 // default: a literal
+    const field id;              // assignable only inside init()
+    static field count;
+    def init(x, y) { this.x = x; this.y = y }
+    def length2() { return this.x * this.x + this.y * this.y }
+    static def origin() { return new Point(0, 0) }
+    def toString() { return 'P(' + this.x + ',' + this.y + ')' }
 }
+p = new Point(3, 4)
+println p.length2()          // 25
+println Point.origin()       // P(0,0)
+Point.count = 1              // static fields and methods are reached through the class
+
+enum Color { RED, GREEN, BLUE }
+println Color.GREEN          // GREEN
+println Color.BLUE.ordinal   // 2
 ```
 
-### Functions
+Classes are closed: fields are fixed at declaration. The compiler rejects a
+field or method no class declares, `this.field` typos, wrong argument counts to
+`new`, static methods and `this.method()`. For a receiver of unknown class the
+VM reports `class A has no field 'x'` or `cannot read field 'x' on nil`. There is
+no inheritance. Instances with their own `toString`/`equals` are used by
+`print`, `str()` and `==`.
 
-Functions must be defined at the top level of the program (not nested inside
-a block), and support recursion.
-
-```
-def add(a, b) {
-    return a + b
-}
-println add(3, 4)
-
-def factorial(n) {
-    if (n == 0) {
-        return 1
-    }
-    return n * factorial(n - 1)
-}
-println factorial(5)   // 120
-```
-
-### Native calls
-
-`print`, `println`, and `wait` are built-in statements (not regular function
-calls — they take one expression directly, no parentheses):
+### Arrays, tuples, destructuring
 
 ```
-print 'no newline'
-println 'with newline'
-wait 1000   // sleep 1000 ms
+a = [10, 20, 30]
+push(a, 40)
+println a[0] + a[-1]     // 50   negative indexes count from the end
+println pop(a)           // 40
+t = (1, 'two')
+x, y = (1, 2)            // destructuring
 ```
 
-### Grouping
+### Imports
 
-Parentheses can be used to group any expression:
+`import 'path.bl0';` splices another file's top-level definitions in once
+(paths are relative to the importing file; `stdlib/...` falls back to the
+copy bundled in the jar).
 
-```
-r = (2 + 3) * 4   // 20
-```
+## Builtins
 
-## Full example
+| Area | Builtins |
+|---|---|
+| Values | `len(x)` `push(a, v)` `pop(a)` `int(x)` `float(x)` `str(x)` `typeOf(x)` `err(msg)` `isInt` `isFloat` `isString` `isBool` `isArray` `isNil` `isChar` `isTuple` `isErr` |
+| Strings | `strSub(s, from, to)` `strFind(s, sub, from)` `strUpper(s)` `strLower(s)` `strJoin(array, sep)` (used by the stdlib wrappers below) |
+| Errors | `throw(message)` `panic(message)` (halts every core, cannot be caught) |
+| Time | `ticks()` (ms since start) `wait(ms)` `setTimer(ms, vector)` `setInterval(ms, vector)` `cancelTimer(id)` |
+| Memory | `free(x)` `reserve(addr, size)` `peek8/16/32(addr)` `poke8/16/32(addr, v)` `in8/16/32(port)` `out8/16/32(port, v)` |
+| Cores | `coreCount()` `currentCore()` `dispatch(fn, core, arg)` `newMutex()` `lock(m)` `unlock(m)` `atomicAdd(addr, d)` `atomicCas(addr, expected, new)` |
+| Events | `newEvent()` `eventGen(e)` `signalEvent(e)` `waitEvent(e, gen, timeoutMs)` |
+| Interrupts | `registerHandler(fn, vector, priority)` `raiseInterrupt(v)` `raiseInterruptOn(core, v)` `disableInterrupts()` `enableInterrupts()` `haltCore()` |
+| Privilege | `dropToUserMode()` (one-way) `isPrivileged()` `syscall(vector, arg)` |
+| Other | `read()` (a line from stdin) `exec(path)` (run a compiled file) |
 
-```
-def is_even(n) {
-    return n % 2 == 0
-}
+A user function with the same name as a builtin takes precedence. Privileged
+(ring 0) only: `registerHandler`, `dispatch`, `exec`, `haltCore`, `reserve`,
+`disableInterrupts`, `enableInterrupts`, `in*`, `out*`.
 
-i = 0
-while (i < 10) {
-    label = is_even(i) ? 'even' : 'odd'
-    line = '' + i + ' is ' + label
-    println line
-    i = i + 1
-}
-```
+**Events** are broadcast latches: read `gen = eventGen(e)`, check your
+condition, then `waitEvent(e, gen, ms)` returns as soon as anything signalled
+the event after `gen` was read (so a signal between your check and your wait is
+not lost), on timeout (`false`), or when an interrupt this core can take is
+pending. `ms < 0` waits forever. Always re-check in a loop.
 
-Output:
+**Timers** raise an interrupt vector after a delay (`setInterval` repeatedly);
+`cancelTimer` returns whether it was still pending. **`raiseInterruptOn`** is an
+inter-processor interrupt: only that core ever takes it.
 
-```
-0 is even
-1 is odd
-2 is even
-3 is odd
-...
-9 is odd
-```
+## Standard library
+
+Namespaced static methods; `import 'stdlib/<file>';` first.
+
+| File | Contents |
+|---|---|
+| `arrlib.bl0` | `Arr.contains indexOf reverse slice join map filter reduce removeAt concat` |
+| `map.bl0` | `new Map(buckets)`: `set get has remove keys values`, fields `size`, `bucketCount`; grows automatically |
+| `mathlib.bl0` | `Math.abs min max floor ceil round sqrt clamp toHex` |
+| `str/substr find case split trim affix toArr char fmt` | `Substr.substr`, `Find.find/findFrom`, `Case.upper/lower`, `Split.split` (any separator length), `Trim.trim`, `Affix.startsWith/endsWith`, `ToArr.toArr`, `Char.char`, `Fmt.format` |
+| `net/nic ip udp tcp http dns` | a toy network stack over a virtual NIC: see below |
+
+`Fmt.format('{} + {} = {}', [3, 4, 7])` fills `{}` in order, `{2}` by index,
+`{{`/`}}` for braces, and `{:08x}` `{:>6}` `{:<6}` `{:04}` for hex, alignment,
+zero padding and width.
+
+### Network stack
+
+`Nic.init()` (or `Nic.initWithHostBridge()`), then `Udp.send/receive`,
+`TcpConn.listen/accept/connect/send/receive/waitData/close`, `Http.get/serve`,
+`Dns.resolve`. TCP has a real handshake and close, sequence numbers and
+checksums, and timeout-based retransmission with backoff (`TcpConn.rtoMs`,
+`TcpConn.maxRetries`; `TcpConn.connectTimeoutMs` bounds `connect()`, which
+returns `nil` on timeout). Waiting is event-driven (`Nic.recvWait`,
+`TcpConn.waitData`), not polling. `Nic.dropNext = N` drops the next N frames,
+for testing a lossy link. There is no congestion control and no out-of-order
+reassembly; HTTP is GET-only HTTP/1.0.
+
+## Memory and limits
+
+Values that do not fit in a register (strings, arrays, instances, closures)
+live in a heap and are released **manually with `free(x)`** (a second free is
+`double free`, using a freed value is `use after free`). The host can cap the
+heap with `vm.set_max_heap_entries(n)`: allocating past it is the catchable
+error `out of memory: heap entry limit (n) reached`. Operations that
+allocate without you asking: string concatenation and `str()` of non-strings,
+array/tuple literals, `new`, lambdas, and a cell for every variable of a
+function that contains a lambda. `typeOf()` and `str()` of a string/bool/nil
+allocate nothing.
+
+An optional mark-and-sweep collector exists for hosts that want a safety net
+(`vm.set_gc_enabled(true)`, single-core only); it is off by default.
+
+Other host-configurable limits: `set_max_call_depth` (100000),
+`set_max_string_length` (64M chars - longer results are an error),
+`set_core_count`, `set_interrupt_poll_interval`.
 
 ## Known limitations
 
-This is a PoC — the following are worth knowing before writing anything
-non-trivial:
-
-- **Semicolons are unreliable as statement separators.** `print`/`println`/
-  `wait` statements consume a trailing `;` themselves, but plain assignments,
-  expression statements, and `return` do not. A `;` left over from one of
-  those gets fed into the *next* statement, which breaks as soon as that next
-  statement is anything other than another bare assignment (an `if`,
-  `while`, `println`, or the closing `}` of a block all fail to parse).
-  Safest approach: don't write `;` at all except optionally after the very
-  last native call in the file.
-- **Mixed string/int `+` ignores operand order.** `i + ' items'` actually
-  evaluates as `' items' + i`, because the operator dispatch table
-  (`OperatorTable`) always normalizes to its registered `(String, Integer)`
-  order regardless of which side each operand was written on. Put a string
-  literal first (e.g. `'' + i`) to get natural left-to-right concatenation.
-- `<=` and `>=` — tokenized, but the compiler has no case for them; using
-  them throws at compile time.
-- `**` (exponent) — tokenized, but never consumed by the parser's expression
-  grammar, so it can't actually be written in a program.
-- Bare tuple expressions like `(1, 2, 3)` — parsed into a tuple node, but the
-  compiler doesn't handle it; using one throws at compile time.
-- `class` — no keyword mapping exists in the lexer yet, and class-definition
-  parsing is stubbed out (`TODO`). Not usable.
-- Lambdas, closures, and `new` — not implemented (marked `TODO` in the
-  parser's grammar comments).
-- Comments — there is no comment syntax in the language.
-- Instruction addresses, register indices, and register counts are encoded
-  as single bytes, so a compiled function/program is limited to 255
-  instructions and 255 registers.
-- Native calls (`print`/`println`/`wait`) accept exactly one argument.
+- No inheritance, no interfaces, no modules beyond textual `import`.
+- Closures created in a loop share the loop's variable (`() -> i` all see the
+  final `i`); a lambda body that reads a variable assigned only *after* the
+  lambda was written is a compile error.
+- A nested `def` is not hoisted: it can call itself and what is defined above
+  it, not a nested `def` below it.
+- Top-level `def` functions cannot see top-level variables (they are separate
+  scopes); pass values as parameters or keep them in static fields.
+- A `catch` variable cannot be captured by a lambda inside the catch body.
+- `int` is 32-bit and wraps silently; `int(1e300)` saturates.
+- Memory is not collected unless the host opts in (see above), and the interpreter
+  loop is not fast: roughly 60 million simple instructions per second.
+- The network stack is a teaching toy: one accepted connection per `listen()`,
+  fake 32-bit addresses, no IPv6.

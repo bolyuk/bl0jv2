@@ -18,8 +18,8 @@ import java.util.Set;
 
 /**
  * Resolves 'import "path";' statements by splicing the imported file's own
- * top-level statements in, source-AST-level, the same way Bl0jv2_Prelude's
- * content is merged in - not real relocatable-bytecode linking (the format
+ * top-level statements in, source-AST-level, not real
+ * relocatable-bytecode linking (the format
  * has no notion of that; addresses are absolute and assigned once, at
  * compile time). A path is resolved relative to the file that imports it,
  * so a chain of imports each sees paths relative to its own location.
@@ -28,13 +28,10 @@ import java.util.Set;
  * (diamond dependencies don't duplicate definitions), and the entry file's
  * own path seeds the visited set so an import cycle can't recurse forever.
  *
- * <p>stdlib itself no longer has to sit as loose files next to whatever is
- * being compiled: it ships as a classpath resource inside bl0jv2-runtime
- * (src/main/resources/stdlib/**) - the same "comes bundled with the
- * runtime" stance a language's own standard library usually takes,
- * independent of which module's code happens to read its source text (that
- * part stays this class's job, in bl0jv2-compiler - see readSource()'s own
- * doc on why that split needs no Maven dependency between the two). A path
+ * <p>stdlib itself does not have to sit as loose files next to whatever is
+ * being compiled: it ships as a classpath resource inside bl0jv2-compiler
+ * (src/main/resources/stdlib/**), the module whose code reads it (see
+ * readSource()). A path
  * that doesn't exist as a real file (an on-disk stdlib checkout being
  * absent - e.g. running from a packaged jar) falls back to the classpath
  * instead of failing outright, so every existing 'import "../stdlib/...'"'
@@ -79,15 +76,11 @@ public final class Bl0jv2_Linker {
     }
 
     // real file on disk first (a developer's own checkout, where stdlib
-    // sits wherever bl0jv2-runtime/src/main/resources/stdlib/ puts it,
+    // sits wherever bl0jv2-compiler/src/main/resources/stdlib/ puts it,
     // relative to whatever the importer's own path chain resolved to) -
     // falling back to a classpath resource only when that fails, so this
-    // never pays classloader lookup cost for the common case. The fallback
-    // needs no Maven dependency on bl0jv2-runtime: it's a plain
-    // getResourceAsStream() call, resolved against whatever happens to be
-    // on this process's OWN classpath at run time - true for every actual
-    // caller (bl0jv2-cli always depends on both), even though neither this
-    // class nor bl0jv2-compiler itself declares that dependency
+    // never pays classloader lookup cost for the common case. The fallback is
+    // a plain getResourceAsStream() call against this module's own classpath
     private static String readSource(Path resolvedPath, String importPath) {
         if (Files.exists(resolvedPath)) {
             try {
