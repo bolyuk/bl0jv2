@@ -14,6 +14,7 @@ import java.io.StringWriter;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -39,24 +40,55 @@ public final class DiskImport {
         }
     }
 
+    // what one spec turns into: a file on the host and the name it gets on the disk
+    private record Item(Path host, String name) {}
+
+    // a directory spec copies every file in it (recursively) under the name prefix
+    private static List<Item> expand(List<Spec> specs) throws IOException {
+        List<Item> items = new ArrayList<>();
+        for (Spec spec : specs) {
+            if (Files.isDirectory(spec.host())) {
+                String prefix = spec.name() != null ? spec.name() : spec.host().getFileName().toString();
+                try (var walk = Files.walk(spec.host())) {
+                    for (Path file : (Iterable<Path>) walk.filter(Files::isRegularFile).sorted()::iterator) {
+                        String relative = spec.host().relativize(file).toString().replace('\\', '/');
+                        items.add(new Item(file, prefix + "/" + (relative.endsWith(".bl0") ? relative + "c" : relative)));
+                    }
+                }
+            } else {
+                String fileName = spec.host().getFileName().toString();
+                String name = spec.name() != null ? spec.name() : (fileName.endsWith(".bl0") ? fileName + "c" : fileName);
+                items.add(new Item(spec.host(), name));
+            }
+        }
+        return items;
+    }
+
     public static void put(BlockDevice disk, List<Spec> specs, List<Path> includeDirs) throws IOException {
         StringBuilder src = new StringBuilder("import 'stdlib/fs/fs.bl0'; Disk.init(8192); ")
-                .append("if (!Fs.mount()) { Fs.format(); } ");
-        for (Spec spec : specs) {
-            byte[] data;
-            String name = spec.name();
-            String fileName = spec.host().getFileName().toString();
-            if (fileName.endsWith(".bl0")) {
-                data = compile(spec.host(), includeDirs);
-                if (name == null) name = fileName + "c";
-            } else {
-                data = Files.readAllBytes(spec.host());
-                if (name == null) name = fileName;
+                .append("if (!Fs.mount()) { Fs.format(); } ")
+                // a file travels as hex text in string constants (a push per byte would overflow
+                // the 16-bit instruction addresses for a program of any size)
+                .append("def unhex(chunks) { out = []; c = 0; while (c < len(chunks)) { s = chunks[c]; i = 0; ")
+                .append("while (i < len(s)) { a = int(s[i]); b = int(s[i + 1]); ")
+                .append("push(out, ((a < 58 ? a - 48 : a - 87) << 4) | (b < 58 ? b - 48 : b - 87)); i += 2; } c += 1; } return out; } ");
+        for (Item item : expand(specs)) {
+            byte[] data = item.host().getFileName().toString().endsWith(".bl0")
+                    ? compile(item.host(), includeDirs)
+                    : Files.readAllBytes(item.host());
+            src.append("Fs.writeData('").append(item.name().replace("\\", "\\\\").replace("'", "\\'")).append("', unhex([");
+            StringBuilder hex = new StringBuilder();
+            boolean firstChunk = true;
+            for (int i = 0; i < data.length; i++) {
+                hex.append(Character.forDigit((data[i] >> 4) & 15, 16)).append(Character.forDigit(data[i] & 15, 16));
+                if (hex.length() >= 8000 || i == data.length - 1) {
+                    if (!firstChunk) src.append(',');
+                    src.append('\'').append(hex).append('\'');
+                    firstChunk = false;
+                    hex.setLength(0);
+                }
             }
-            src.append("d = []; ");
-            for (byte b : data) src.append("push(d, ").append(b & 0xFF).append("); ");
-            src.append("Fs.writeData('").append(name.replace("\\", "\\\\").replace("'", "\\'")).append("', d); ");
-            src.append("free(d); ");
+            src.append("])); ");
         }
 
         var parser = new Bl0jv2_Parser();
