@@ -6,27 +6,35 @@ import '../lib/input.bl0';
 
 def main(words) {
     if (len(words) > 2) { sayErr('usage: wc [file]'); return nil; }
-    text = inputText(len(words) == 2 ? words[1] : nil);
-    if (text == nil) { sayErr(words[1] + ': no such file'); return nil; }
+    reader = openInput(len(words) == 2 ? words[1] : nil);
+    if (reader == nil) { sayErr(words[1] + ': no such file'); return nil; }
     lines = 0;
     wordCount = 0;
+    bytes = 0;
     inWord = false;
-    i = 0;
-    while (i < len(text)) {
-        c = text[i];
-        if (c == strChar(10)) { lines += 1; }
-        if (isSpace(c)) {
-            inWord = false;
-        } else if (!inWord) {
-            inWord = true;
-            wordCount += 1;
+    last = '';
+    while (true) {
+        text = reader.chunk();
+        if (text == nil) { break; }
+        encoded = Utf8.encode(text);
+        bytes += len(encoded);
+        free(encoded);
+        i = 0;
+        while (i < len(text)) {
+            c = text[i];
+            if (c == strChar(10)) { lines += 1; }
+            if (isSpace(c)) {
+                inWord = false;
+            } else if (!inWord) {
+                inWord = true;
+                wordCount += 1;
+            }
+            i += 1;
         }
-        i += 1;
+        if (len(text) > 0) { last = text[len(text) - 1]; }
     }
-    if (len(text) > 0 && text[len(text) - 1] != strChar(10)) { lines += 1; }
-    bytes = Utf8.encode(text);
-    say(Fmt.format('{} lines, {} words, {} bytes', [lines, wordCount, len(bytes)]));
-    free(bytes);
+    if (last != '' && last != strChar(10)) { lines += 1; }
+    say(Fmt.format('{} lines, {} words, {} bytes', [lines, wordCount, bytes]));
 }
 
 programMain(main);

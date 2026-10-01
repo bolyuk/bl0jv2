@@ -102,7 +102,10 @@ public final class Bl0jv2_Linker {
             }
 
             Path resolvedPath = baseDir.resolve(importNode.path).normalize();
-            if (!Files.exists(resolvedPath)) {
+            // a file next to the importer wins, then the stdlib that ships with the compiler, and only
+            // then the -I directories: an import of 'net.bl0' from inside stdlib/net must not be taken
+            // by some unrelated net.bl0 that happens to sit in a search directory
+            if (!Files.exists(resolvedPath) && !isBundledStdlib(resolvedPath)) {
                 for (Path dir : searchPaths) {
                     Path candidate = dir.toAbsolutePath().resolve(importNode.path).normalize();
                     if (Files.exists(candidate)) {
@@ -128,6 +131,11 @@ public final class Bl0jv2_Linker {
 
             resolveInto(importedProgram, resolvedPath.getParent(), searchPaths, shared, isShared, visited, out);
         }
+    }
+
+    private static boolean isBundledStdlib(Path resolvedPath) {
+        String resource = classpathResourceNameFor(resolvedPath);
+        return resource != null && Bl0jv2_Linker.class.getResource("/" + resource) != null;
     }
 
     /** the source of a file, from disk or - for stdlib files - from the classpath, as an import would read it */

@@ -272,4 +272,25 @@ class Bl0jv2_ExecTest {
         // and Path/Files accept identically
         return p.toString().replace('\\', '/');
     }
+
+    // programs loaded and unloaded by several cores at once: nobody loses a program, every run
+    // completes, and the pool is not corrupted (each run adds to a shared counter)
+    @Test
+    void coresMayLoadAndRunProgramsAtTheSameTime() throws IOException {
+        Path child = writeCompiled("count.bl0c", "def bump(n) { return n + 1; } atomicAdd(100, bump(0));");
+        byte[] image = PROGRAMS.get(child);
+        StringBuilder hex = new StringBuilder();
+        for (byte b : image) hex.append(Character.forDigit((b >> 4) & 15, 16)).append(Character.forDigit(b & 15, 16));
+        String program =
+                "def put(s, at) { i = 0; while (i < len(s)) { a = int(s[i]); b = int(s[i + 1]); " +
+                "poke8(at + (i / 2), ((a < 58 ? a - 48 : a - 87) << 4) | (b < 58 ? b - 48 : b - 87)); i += 2; } } " +
+                // every core has its own copy of the image to load from, and its own counter of finished runs
+                "def work(core) { base = 20000 + core * 4000; put('" + hex + "', base); i = 0; " +
+                "  while (i < 300) { execMem(base, " + image.length + ", 0); i += 1; } atomicAdd(200 + core * 4, 1); } " +
+                "poke32(100, 0); poke32(204, 0); poke32(208, 0); poke32(212, 0); " +
+                "dispatch(work, 1, 1); dispatch(work, 2, 2); dispatch(work, 3, 3); " +
+                "while (peek32(204) + peek32(208) + peek32(212) < 3) { wait(5); } " +
+                "print peek32(100);";
+        assertEquals("900", Bl0jv2_TestRunner.run(program, vm -> vm.set_core_count(4)));
+    }
 }

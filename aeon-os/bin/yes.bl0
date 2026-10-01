@@ -1,0 +1,13 @@
+// aeon-os program: print a line forever (or until the reader goes away or it is interrupted); yes [text]
+// Loaded from the virtual disk by the shell (bin/yes.bl0c).
+
+import '../lib/userland.bl0';
+
+def main(words) {
+    text = len(words) > 1 ? restOf(words, 1) : 'y';
+    while (true) {
+        say(text);
+    }
+}
+
+programMain(main);

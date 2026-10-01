@@ -69,6 +69,11 @@ def onUartIRQ(vector) {
         } else if (cause == 0x04 || cause == 0x0C) {
             while ((in8(base + 5) & 1) == 1) {
                 b = in8(base);
+                // Ctrl-C while a foreground program runs is a request to stop it, not text for it
+                if (b == 3 && Abort.base != nil && abortAnyForeground()) {
+                    abortForegroundJobs();
+                    continue;
+                }
                 head = peek32(Keyboard.base);
                 next = (head + 1) % Keyboard.size;
                 if (next != peek32(Keyboard.base + 4)) {
@@ -384,6 +389,18 @@ Tty.on = false;
 // runs ELEVATED (syscall()'s trap gate - see invokeAsTrap), regardless of which ring the
 // caller was in
 def sysConsoleWrite(text) {
+    // several cores may write at once: one at a time, so the escape sequences of one are not cut by another's
+    lock(Console.mutex);
+    try {
+        consoleWriteLocked(text);
+    } catch (e) {
+        unlock(Console.mutex);
+        throw(e);
+    }
+    unlock(Console.mutex);
+}
+
+def consoleWriteLocked(text) {
     n = len(text);
     i = 0;
     while (i < n) {
@@ -423,6 +440,7 @@ def sysConsoleWrite(text) {
 
 // call once, privileged: the serial port, the display if there is one, and the write syscall
 def initConsole() {
+    Console.mutex = newMutex();
     initUart();
     Console.columns = in16(0x0F50);
     Console.rows = in16(0x0F52);

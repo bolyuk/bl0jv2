@@ -1,0 +1,39 @@
+// aeon-os: what the network programs share - the network stack (shared libraries, so there is one
+// NIC, one set of connections, one address for the whole system) and two helpers.
+//
+// <host> in these programs is a dotted address (10.0.0.2) or a name, looked up with DNS. Reaching
+// anything beyond this machine's own loopback needs the host to attach a bridge (bl0jv2
+// --bridge-outbound ...): without one, frames only ever come back to this same VM, so a ping to
+// another address times out, which is the true answer.
+
+import '../../stdlib/net/icmp.bl0';
+import '../../stdlib/net/tcp.bl0';
+import '../../stdlib/net/udp.bl0';
+import '../../stdlib/net/dns.bl0';
+import '../../stdlib/net/http.bl0';
+import 'userland.bl0';
+
+def class NetUtil {
+    static field nextPort;
+}
+NetUtil.nextPort = 49152;
+
+def freePort() {
+    p = NetUtil.nextPort;
+    NetUtil.nextPort += 1;
+    if (NetUtil.nextPort > 65000) { NetUtil.nextPort = 49152; }
+    return p;
+}
+
+// an address: dotted quad as is, otherwise a DNS lookup; nil (after saying why) if neither works
+def hostAddress(name) {
+    addr = Ip.parseAddr(name);
+    if (addr != nil) { return addr; }
+    say('resolving ' + name + '...');
+    addr = Dns.resolve(name);
+    if (addr == 0) {
+        sayErr(name + ': name not found (no answer from DNS server ' + Ip.formatAddr(Dns.serverIp) + ')');
+        return nil;
+    }
+    return addr;
+}

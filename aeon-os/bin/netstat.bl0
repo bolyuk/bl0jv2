@@ -1,0 +1,21 @@
+// aeon-os program: the TCP connections
+// Loaded from the virtual disk by the shell (bin/netstat.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    say('proto  local                  remote                 state');
+    n = 0;
+    i = 0;
+    while (i < len(TcpRegistry.conns)) {
+        c = TcpRegistry.conns[i];
+        remote = '*';
+        if (c.remoteIp != nil) { remote = Ip.formatAddr(c.remoteIp) + ':' + c.remotePort; }
+        say(Fmt.format('tcp    {:<22} {:<22} {}', [Ip.formatAddr(c.localIp) + ':' + c.localPort, remote, c.state]));
+        n += 1;
+        i += 1;
+    }
+    if (n == 0) { say('(no connections)'); }
+}
+
+programMain(main);

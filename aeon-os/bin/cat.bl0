@@ -4,18 +4,26 @@
 import '../lib/userland.bl0';
 import '../lib/input.bl0';
 
+def copy(reader) {
+    while (true) {
+        piece = reader.chunk();
+        if (piece == nil) { break; }
+        sayRaw(piece);
+    }
+}
+
 def main(words) {
     if (len(words) == 1) {
-        sayRaw(inputText(nil));
+        copy(openInput(nil));
         return nil;
     }
     i = 1;
     while (i < len(words)) {
-        text = inputText(words[i]);
-        if (text == nil) {
+        reader = openInput(words[i]);
+        if (reader == nil) {
             sayErr(words[i] + ': no such file');
         } else {
-            sayRaw(text);
+            copy(reader);
         }
         i += 1;
     }

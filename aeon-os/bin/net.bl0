@@ -1,0 +1,14 @@
+// aeon-os program: address, DNS server, bridge and frame counters
+// Loaded from the virtual disk by the shell (bin/net.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    bridge = Nic.hostBridgeEnabled ? 'attached' : 'none (loopback only)';
+    say(Fmt.format('address  {}', [Ip.formatAddr(Net.localIp)]));
+    say(Fmt.format('dns      {}', [Ip.formatAddr(Dns.serverIp)]));
+    say(Fmt.format('bridge   {}', [bridge]));
+    say(Fmt.format('frames   {} sent, {} received, {} waiting, {} dropped by the IP layer', [Nic.txCount, Nic.rxCount, Nic.pending(), Net.dropped]));
+}
+
+programMain(main);

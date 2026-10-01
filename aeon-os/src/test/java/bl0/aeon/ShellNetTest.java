@@ -11,6 +11,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.function.Consumer;
 
 import bl0.bl0jv2.runtime.Bl0jv2_jVM;
@@ -21,13 +22,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 // the same host bridges the CLI starts with --bridge-outbound / --bridge-tcp
 class ShellNetTest {
 
+    // a shell on a copy of the OS image (the network commands are programs on it), with host bridges attached
     private static AeonSession shell(Consumer<Bl0jv2_jVM> bridges) throws Exception {
         var s = new AeonSession();
-        s.start(AeonSession.compile("shell.bl0"), 1, vm -> {
+        Path image = java.nio.file.Files.createTempDirectory("aeon-net").resolve("d.img");
+        s.start(AeonSession.compile("init.bl0"), 1, vm -> {
             vm.set_interrupt_poll_interval(1);
+            try {
+                vm.attach_disk(AeonImage.os(image));
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(e);
+            }
             bridges.accept(vm);
         });
-        assertTrue(s.waitFor("aeon-shell ready", 15_000), s.output());
+        assertTrue(s.waitFor("aeon-shell ready", 30_000), s.output());
         return s;
     }
 

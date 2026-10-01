@@ -1,0 +1,28 @@
+// aeon-os program: send a datagram and show the reply
+// Loaded from the virtual disk by the shell (bin/udp.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    if (len(words) < 4) { sayErr('usage: udp <host> <port> <text>'); return nil; }
+    addr = hostAddress(words[1]);
+    if (addr == nil) { return nil; }
+    port = portNumber(words[2]);
+    if (port == nil) { sayErr('bad port'); return nil; }
+    local = freePort();
+    Udp.send(Net.localIp, local, addr, port, restOf(words, 3));
+    // the datagram we just sent also comes back to us through the loopback NIC:
+    // skip it, wait for something that is not from ourselves
+    deadline = ticks() + 2000;
+    while (true) {
+        remaining = deadline - ticks();
+        if (remaining <= 0) { say('(no reply)'); return nil; }
+        pkt = Udp.recvWait(local, remaining);
+        if (pkt == nil) { say('(no reply)'); return nil; }
+        if (pkt.srcIp == Net.localIp && pkt.srcPort == local) { continue; }
+        say(Fmt.format('reply from {}:{}: {}', [Ip.formatAddr(pkt.srcIp), pkt.srcPort, pkt.message]));
+        return nil;
+    }
+}
+
+programMain(main);

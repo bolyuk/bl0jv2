@@ -1,0 +1,14 @@
+// aeon-os program: ask a process to stop; kill <pid>
+// Loaded from the virtual disk by the shell (bin/kill.bl0c); see lib/proc.bl0.
+// It is a request: the process stops at its next checkpoint (when it writes, reads or waits).
+
+import '../lib/proc.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: kill <pid>'); return nil; }
+    pid = portNumber(words[1]);
+    if (pid == nil) { sayErr(words[1] + ': not a process number'); return nil; }
+    if (!Proc.kill(pid)) { sayErr(words[1] + ': no such running process'); }
+}
+
+programMain(main);

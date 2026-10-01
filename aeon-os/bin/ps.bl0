@@ -1,0 +1,18 @@
+// aeon-os program: the processes - those running and the last 32 that ended
+// Loaded from the virtual disk by the shell (bin/ps.bl0c); see lib/proc.bl0.
+
+import '../lib/proc.bl0';
+
+def main(words) {
+    say(Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {}', ['pid', 'state', 'core', 'time ms', 'command']));
+    i = 0;
+    while (i < len(Proc.table)) {
+        p = Proc.table[i];
+        end = p.state == 'running' ? ticks() : p.ended;
+        say(Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {}', [p.pid, p.state, p.core, end - p.started, p.name]));
+        i += 1;
+    }
+    if (len(Proc.table) == 0) { say('(no processes)'); }
+}
+
+programMain(main);

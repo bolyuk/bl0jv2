@@ -69,7 +69,7 @@ public final class Bl0jv2_jVM {
         } catch (IOException e) {
             throw new Bl0j_VM_Exception("console write failed: " + e.getMessage());
         }
-    }, () -> this.interrupts.raiseInterrupt(2));
+    }, () -> this.interrupts.raiseInterruptOn(0, 2));   // the serial port's interrupt is taken by core 0, always: its handler is not written for two cores at once
     private final DisplayController display = new DisplayController(portIO, rawMemory);
     private final PortDevice[] devices = {disk, share, uart, display};
     private final InterruptController interrupts = new InterruptController();
@@ -98,11 +98,14 @@ public final class Bl0jv2_jVM {
     // hold as a NanBox REF index rather than inline - see Heap
     private final Heap heap = new Heap();
 
-    private long[] consts;
+    // volatile, and replaced only by whole new arrays under loadLock: loading a program on one core
+    // (execMem) while others execute must publish the grown pool and code to them, and an array
+    // a core is reading is never modified in place
+    private volatile long[] consts;
     // parallel to consts: the interned symbol id of a string constant, else -1
-    private int[] constSymbols = new int[0];
+    private volatile int[] constSymbols = new int[0];
     private final SymbolTable symbols = new SymbolTable();
-    private byte[] instructions;
+    private volatile byte[] instructions;
 
     // set fresh in feed_compiled_file(); ticks() reads elapsed time against
     // this, not against JVM startup, so it's monotonic per *program*, not
@@ -428,26 +431,26 @@ public final class Bl0jv2_jVM {
     private Object execBytes(byte[] fileBytes, String path, int mode) {
         boolean unprivileged = mode == 0;
         CoreContext ctx = currentContext();
-        long[] constsBefore = consts;
-        int[] symbolsBefore = constSymbols;
-        byte[] instructionsBefore = instructions;
+        Loaded loaded;
         int entryAddr;
         int registersLength;
         try {
-            int[] loaded = loadRelocated(fileBytes);
-            entryAddr = loaded[0] * C.INSTR_WIDTH;
-            registersLength = loaded[1];
+            loaded = loadRelocated(fileBytes);
+            entryAddr = loaded.entry() * C.INSTR_WIDTH;
+            registersLength = loaded.registers();
         } catch (Bl0j_VM_Exception e) {
             throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': " + e.getMessage());
         }
         if (mode == 2) {
             // a shared library: what it defines becomes linkable by the programs loaded after it
-            for (Object[] defined : definedNames) {
-                String name = (String) defined[0];
-                if (exports.containsKey(name))
-                    throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': it defines '" + name + "', which another shared library already exports");
+            synchronized (loadLock) {
+                for (Object[] defined : loaded.defined()) {
+                    String name = (String) defined[0];
+                    if (exports.containsKey(name))
+                        throw new Bl0j_VM_Exception("exec: cannot load '" + path + "': it defines '" + name + "', which another shared library already exports");
+                }
+                for (Object[] defined : loaded.defined()) exports.put((String) defined[0], (Long) defined[1]);
             }
-            for (Object[] defined : definedNames) exports.put((String) defined[0], (Long) defined[1]);
         }
 
         int stackDepthBefore = ctx.callStack.size();
@@ -478,19 +481,25 @@ public final class Bl0jv2_jVM {
             // unconditionally reset to kernel) rule invokeAsTrap()
             // already applies to interrupt/syscall handlers
             ctx.privileged = privilegedBefore;
-            // a user program leaves nothing loaded behind (see EXEC_MEM's doc). Not
-            // with several cores running: another core may be executing code
-            // out of the pool this would shrink.
-            if (unprivileged && coreCount == 1 && consts != constsBefore) {
-                for (int i = constsBefore.length; i < consts.length; i++) {
-                    long v = consts[i];
-                    if (NanBox.isBoxed(v) && NanBox.tagOf(v) == NanBox.TAG_REF && !externConsts.get(i))
-                        heap.free(NanBox.asRefIndex(v));
+            // a user program leaves nothing loaded behind (see EXEC_MEM's doc) - unless something else
+            // was loaded after it (another core's program may sit above it in the pool and be running
+            // right now): then it stays until the machine is idle again, which costs pool space, never
+            // correctness
+            if (unprivileged && loaded != null) {
+                synchronized (loadLock) {
+                    if (consts == loaded.constsAfter() && instructions == loaded.instructionsAfter()) {
+                        long[] before = loaded.constsBefore();
+                        for (int i = before.length; i < consts.length; i++) {
+                            long v = consts[i];
+                            if (NanBox.isBoxed(v) && NanBox.tagOf(v) == NanBox.TAG_REF && !externConsts.get(i))
+                                heap.free(NanBox.asRefIndex(v));
+                        }
+                        externConsts.clear(before.length, consts.length);
+                        consts = before;
+                        constSymbols = loaded.symbolsBefore();
+                        instructions = loaded.instructionsBefore();
+                    }
                 }
-                externConsts.clear(constsBefore.length, consts.length);
-                consts = constsBefore;
-                constSymbols = symbolsBefore;
-                instructions = instructionsBefore;
             }
         }
     }
@@ -913,7 +922,23 @@ public final class Bl0jv2_jVM {
     // Returns {entry instruction index, the loaded program's own top-level
     // register count} - the caller pushes its own frame sized to the
     // second value and starts executing at the first.
-    private int[] loadRelocated(byte[] fileBytes) {
+    // what loading a program changed: where it starts, how many registers its top level needs, and the pool and code
+    // as they were just before (so they can be put back) and just after (so it can be told whether anyone loaded
+    // anything since)
+    private record Loaded(int entry, int registers, long[] constsBefore, int[] symbolsBefore, byte[] instructionsBefore,
+                          long[] constsAfter, byte[] instructionsAfter, java.util.List<Object[]> defined) {}
+
+    // loads are serialised: each builds new arrays from the current ones and publishes them, so two cores loading
+    // at once cannot lose each other's program
+    private final Object loadLock = new Object();
+
+    private Loaded loadRelocated(byte[] fileBytes) {
+        synchronized (loadLock) {
+            return loadRelocatedLocked(fileBytes);
+        }
+    }
+
+    private Loaded loadRelocatedLocked(byte[] fileBytes) {
         ByteBuffer bytes = ByteBuffer.wrap(fileBytes);
         bytes.order(ByteOrder.BIG_ENDIAN);
 
@@ -962,10 +987,13 @@ public final class Bl0jv2_jVM {
         }
 
         int entryAddr = instrOffset;
+        long[] constsBefore = consts;
+        int[] symbolsBefore = constSymbols;
+        byte[] instructionsBefore = instructions;
         consts = newConsts;
         constSymbols = newConstSymbols;
         instructions = newInstructions;
-        return new int[]{entryAddr, registers_length};
+        return new Loaded(entryAddr, registers_length, constsBefore, symbolsBefore, instructionsBefore, newConsts, newInstructions, new java.util.ArrayList<>(definedNames));
     }
 
     // adds 'offset' to the big-endian u16 operand starting at arr[pos]
@@ -1387,6 +1415,14 @@ public final class Bl0jv2_jVM {
             // thread, so re-resolving per instruction would be pure waste
             CoreContext ctx = currentContext();
 
+            // the code and constant pool as they are when this run starts: reading a volatile field
+            // for every instruction would cost a third of the speed, and a run never needs code that
+            // another core loads after it began (it starts only what it was handed, which was loaded
+            // before). A nested run (invoke, execMem) takes its own copy.
+            final byte[] code = instructions;
+            final long[] pool = consts;
+            final int[] syms = constSymbols;
+
             int sinceLastPoll = 0;
 
             // the running frame's registers, kept in a local instead of being
@@ -1396,7 +1432,7 @@ public final class Bl0jv2_jVM {
             // the stack to where it was, so it needs nothing)
             long[] reg = ctx.callStack.peek().regs();
 
-            for(int addr = startAddr; addr < instructions.length;){
+            for(int addr = startAddr; addr < code.length;){
                 try {
 
                 // checked every instruction, on every core, regardless of
@@ -1422,16 +1458,16 @@ public final class Bl0jv2_jVM {
                     }
                 }
 
-                byte opcode = (byte) (instructions[addr] & 0xFF);
+                byte opcode = (byte) (code[addr] & 0xFF);
 
-                int a = ((instructions[addr+1] & 0xFF) << 8) | (instructions[addr+2] & 0xFF);
-                int b = ((instructions[addr+3] & 0xFF) << 8) | (instructions[addr+4] & 0xFF);
-                int c = ((instructions[addr+5] & 0xFF) << 8) | (instructions[addr+6] & 0xFF);
+                int a = ((code[addr+1] & 0xFF) << 8) | (code[addr+2] & 0xFF);
+                int b = ((code[addr+3] & 0xFF) << 8) | (code[addr+4] & 0xFF);
+                int c = ((code[addr+5] & 0xFF) << 8) | (code[addr+6] & 0xFF);
                 addr += C.INSTR_WIDTH;
 
                 switch (opcode) {
                     case OpCodes.LOAD_NIL -> reg[a] = NanBox.NIL;
-                    case OpCodes.LOAD_CONST -> reg[a] = consts[b];
+                    case OpCodes.LOAD_CONST -> reg[a] = pool[b];
 
                     // binary operators are three-operand: reg[c] = reg[a] OP reg[b]
                     // (no copy of the left operand into the destination first).
@@ -1556,7 +1592,7 @@ public final class Bl0jv2_jVM {
                         Object result = nativeFun.apply(unbox(reg[b]));
                         // -1 is the generic error sentinel of the older natives (wait() on
                         // interrupt...) - strFind legitimately answers -1 for 'not found'
-                        if (a != NativeMethods.STR_FIND && result instanceof Integer code && code == -1)
+                        if (a != NativeMethods.STR_FIND && result instanceof Integer failure && failure == -1)
                             throw new Bl0j_VM_Exception("native method " + a + " returned error");
                         reg[b] = result == null ? NanBox.NIL : box(result);
                     }
@@ -1646,7 +1682,7 @@ public final class Bl0jv2_jVM {
 
                     case OpCodes.GET_FIELD -> {
                         Bl0jInstance instance = requireInstance(reg[a], "read field", b);
-                        int slot = instance.cls.fieldSlot(constSymbols[b]);
+                        int slot = instance.cls.fieldSlot(syms[b]);
                         if (slot < 0)
                             throw noSuchMember(instance.cls, "field", b);
                         reg[c] = instance.getFieldRaw(slot);
@@ -1656,7 +1692,7 @@ public final class Bl0jv2_jVM {
                     // field name's const index
                     case OpCodes.SET_FIELD -> {
                         Bl0jInstance instance = requireInstance(reg[a], "set field", c);
-                        int slot = instance.cls.fieldSlot(constSymbols[c]);
+                        int slot = instance.cls.fieldSlot(syms[c]);
                         if (slot < 0)
                             throw noSuchMember(instance.cls, "field", c);
                         instance.setFieldRaw(slot, reg[b]);
@@ -1679,7 +1715,7 @@ public final class Bl0jv2_jVM {
                     // mutates a's own slot: object in, resolved FunDef out
                     case OpCodes.LOOKUP_METHOD -> {
                         Bl0jInstance instance = requireInstance(reg[a], "call method", b);
-                        int method = instance.cls.methodIndex(constSymbols[b]);
+                        int method = instance.cls.methodIndex(syms[b]);
                         if (method < 0)
                             throw noSuchMember(instance.cls, "method", b);
                         reg[c] = instance.cls.methodRef(method);

@@ -14,8 +14,10 @@ aeon-os/
   shell.bl0         the shell: built-ins, the network commands, program launcher
   child_*.bl0       small programs boot starts
   lib/              log, loader, drivers (UART, terminal emulator), userland (what a program imports), input (stdin),
-                    term/keys/lineedit (terminal output, key parsing, the line editor), cmdline (parser)
-  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir edit
+                    term/keys/lineedit (terminal output, key parsing, the line editor), cmdline (parser),
+                    pipe, proc (processes)
+  bin/              the commands: ls cat write append touch rm mv cp stat wc head tail grep hexdump df mkdir rmdir
+                    edit sleep yes ps kill wait, and the network commands
 ```
 
 ## There is no host filesystem
@@ -37,6 +39,33 @@ loader, the commands.
 * A program is linked to the **shared libraries** (below): its command line, working folder and
   redirections are variables of those libraries that the shell sets, and it reaches the machine
   only through syscalls.
+
+## Several programs at once
+
+The machine's cores are its processors: the shell runs on core 0, everything that runs at the same time
+as something else runs on a worker core (`-n N` gives N-1 of them; `aeon.sh` starts four). There is no
+time-slicing - a core runs one job to its end - so the number of jobs at once is the number of workers.
+
+* `command &` runs it in the background: the shell is back at once, `ps` lists the processes (the last 32
+  that ended too), `kill <pid>` asks one to stop, `wait [pid]` sleeps until it ends. When a background job
+  ends - or prints something - the line editor clears its line, prints the notice above it and draws the
+  line again, so it never lands in the middle of what is being typed.
+* A **pipeline** runs its stages at the same time, one per core, joined by real pipes
+  (`lib/pipe.bl0`: a bounded queue, a writer that gets ahead sleeps, a reader sleeps until there is
+  something): `cat big | grep x | wc` streams, and `yes | head -n 3` ends because `head` stops reading,
+  after which the producer's next write fails with 'broken pipe'. The last stage runs on the shell's core.
+  With too few cores - or a built-in among the stages, which only the shell can run - the pipeline falls back
+  to running the stages one after another through temporary files.
+* **Ctrl-C** while a program runs stops it (and every other stage of its pipeline); at the prompt it only
+  abandons the line. `kill` and Ctrl-C are *requests*: a program stops at its next checkpoint - when it
+  writes, reads, or waits - so one that does none of those cannot be stopped (there is no preemption).
+* Programs write with `say()` and read with `openInput()`/`Lines`; where that goes (terminal, file, pipe) is a
+  per-core `Ctx` that the shell or the process starter fills in, because programs on several cores must
+  not share one set of variables. A background job has no terminal to read.
+
+How it works under the VM: loading a program (`execMem`) is serialised and publishes whole new arrays, the
+interpreter keeps the code it started with, a user program is unloaded only if nothing was loaded after it,
+and the serial port's interrupt is always taken by core 0.
 
 ## Shared libraries
 
@@ -67,6 +96,20 @@ aeon-os/aeon.sh                 # builds aeon.img from the sources and boots it
 (`--disk-put aeon-os/bin:bin` copies a folder, compiling every `.bl0` to a
 `.bl0c`). The image keeps its files between runs; `--disk-put` rewrites what it
 names.
+
+### Windows
+
+```
+mvn -q -DskipTests compile
+aeon-os\aeon.cmd
+```
+
+`aeon.cmd` mirrors `aeon.sh` (`CORES`, `SHARE`, `SCREEN`, `BOOT` environment
+variables) and runs from `target\classes`. With `-k` the CLI switches the
+console into raw VT mode through a short PowerShell helper (kernel32
+`SetConsoleMode`, UTF-8 code pages) and restores it on exit. Use Windows
+Terminal or a recent conhost. Ctrl-C reaches the guest as a key, so leave with
+`exit`. This path has not been exercised on real Windows yet.
 
 ## The terminal
 

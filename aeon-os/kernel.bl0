@@ -57,6 +57,72 @@ def kfree(addr) {
     // no-op - see this section's own header comment
 }
 
+// --- interrupting a program: one word of raw memory per core says "stop what runs here". kill and
+// Ctrl-C set it; the program notices at its next checkpoint - checkAbort() is called wherever a
+// program writes, reads, or waits - and is stopped by the error 'interrupted'. A tight loop that
+// does none of those cannot be stopped: there is no preemption, only cooperation, and no signal to
+// deliver to code that never looks. One more word says a foreground program is running (the
+// keyboard driver then turns Ctrl-C into a request instead of text).
+def class Abort {
+    static field base;       // raw address: one word per core, then the foreground word
+    static field cores;
+}
+
+// privileged, once, after initHeap(). Words: [0, cores) the stop request of each core; then the shell's
+// foreground word; then, for each core, whether it runs a foreground job (a stage of a pipeline the user is
+// waiting for) - Ctrl-C asks all of those to stop.
+def initAbort(cores) {
+    Abort.cores = cores;
+    Abort.base = kalloc(4 * (2 * cores + 1));
+    i = 0;
+    while (i <= 2 * cores) {
+        poke32(Abort.base + 4 * i, 0);
+        i += 1;
+    }
+}
+
+def abortRequest(core) {
+    poke32(Abort.base + 4 * core, 1);
+}
+
+def abortForegroundWord() {
+    return Abort.base + 4 * Abort.cores;
+}
+
+// a worker core starts or ends a job the user is waiting for
+def abortSetForegroundJob(core, on) {
+    poke32(Abort.base + 4 * (Abort.cores + 1 + core), on ? 1 : 0);
+}
+
+def abortAnyForeground() {
+    if (peek32(abortForegroundWord()) != 0) { return true; }
+    core = 1;
+    while (core < Abort.cores) {
+        if (peek32(Abort.base + 4 * (Abort.cores + 1 + core)) != 0) { return true; }
+        core += 1;
+    }
+    return false;
+}
+
+// Ctrl-C: every core that runs something the user is waiting for is asked to stop
+def abortForegroundJobs() {
+    if (peek32(abortForegroundWord()) != 0) { abortRequest(0); }
+    core = 1;
+    while (core < Abort.cores) {
+        if (peek32(Abort.base + 4 * (Abort.cores + 1 + core)) != 0) { abortRequest(core); }
+        core += 1;
+    }
+}
+
+def checkAbort() {
+    if (Abort.base == nil) { return nil; }
+    word = Abort.base + 4 * currentCore();
+    if (peek32(word) != 0) {
+        poke32(word, 0);
+        throw('interrupted');
+    }
+}
+
 // --- keyboard input: bytes the terminal sent, in a ring buffer in RAW MEMORY that the
 // drivers (lib/drivers.bl0) fill from the serial port's interrupt and anyone reads. Head
 // and tail are words of that memory, not static fields: a program started from the disk
@@ -93,10 +159,12 @@ def kbHasInput() {
 // memory - and sleeps in short steps instead, which costs one timer wake-up per
 // step the way an idle loop does on any machine without a better primitive.
 def kbWait(timeoutMs) {
+    checkAbort();
     if (Keyboard.event == nil) {
         waited = 0;
         while (!kbHasInput() && waited < timeoutMs) {
             wait(5);
+            checkAbort();
             waited += 5;
         }
         return kbHasInput();
@@ -104,6 +172,7 @@ def kbWait(timeoutMs) {
     gen = eventGen(Keyboard.event);
     if (kbHasInput()) { return true; }
     waitEvent(Keyboard.event, gen, timeoutMs);
+    checkAbort();
     return kbHasInput();
 }
 
@@ -123,11 +192,55 @@ def class Console {
     static field sysWriteVector;
     static field columns;
     static field rows;
+    static field mutex;     // one writer at a time (set up by the driver)
 }
 Console.port = 0x0F40;       // the UART's data register: what 'reboot' in the shell tries to poke
 Console.sysWriteVector = 1;
 Console.columns = 80;
 Console.rows = 24;
+
+// Output from a job that is not at the keyboard (a background process, the notice that one ended)
+// must not land in the middle of whatever the user is typing: while the line editor is waiting for
+// input, consoleAsync() only queues the text and wakes the editor, which clears its line, prints the
+// text above it and draws the line again. When no editor is waiting the text is simply written.
+def class Console2 {
+    static field editing;     // the line editor is waiting for input
+    static field pending;     // text queued for it
+    static field mutex;
+}
+Console2.editing = false;
+Console2.pending = [];
+Console2.mutex = newMutex();
+
+def consoleAsync(text) {
+    lock(Console2.mutex);
+    if (Console2.editing) {
+        push(Console2.pending, text);
+        unlock(Console2.mutex);
+        if (Keyboard.event != nil) { signalEvent(Keyboard.event); }
+        return nil;
+    }
+    unlock(Console2.mutex);
+    consoleWrite(text);
+}
+
+// the queued text (all of it, as one string), or '' - for the line editor
+def consoleTakeAsync() {
+    lock(Console2.mutex);
+    text = '';
+    if (len(Console2.pending) > 0) {
+        text = strJoin(Console2.pending, '');
+        Console2.pending = [];
+    }
+    unlock(Console2.mutex);
+    return text;
+}
+
+def consoleSetEditing(on) {
+    lock(Console2.mutex);
+    Console2.editing = on;
+    unlock(Console2.mutex);
+}
 
 def consoleWrite(s) {
     if (len(s) > 0) { syscall(Console.sysWriteVector, s); }

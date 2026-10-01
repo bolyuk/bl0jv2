@@ -14,29 +14,64 @@ import '../../stdlib/str/split.bl0';
 import 'log.bl0';
 
 def class Loader {
-    static field buffer;
-    static field limit;
+    static field buffers;     // per core: where a program's bytes are put for execMem
+    static field limits;
+    static field mutex;
 }
-Loader.limit = 262144;
+Loader.mutex = newMutex();
+
+// each core loads from a buffer of its own (several cores may be starting programs at once): core 0, which
+// loads the shell and the libraries, gets a big one, the others room for a command
+def loaderBuffer(core) {
+    lock(Loader.mutex);
+    if (Loader.buffers == nil) {
+        Loader.buffers = [];
+        Loader.limits = [];
+        i = 0;
+        while (i < coreCount()) {
+            push(Loader.buffers, nil);
+            push(Loader.limits, i == 0 ? 262144 : 32768);
+            i += 1;
+        }
+    }
+    if (Loader.buffers[core] == nil) { Loader.buffers[core] = kalloc(Loader.limits[core]); }
+    address = Loader.buffers[core];
+    unlock(Loader.mutex);
+    return address;
+}
 
 // reads 'path' from the disk and runs it. mode 0 = user program, 1 = kernel
-// program. Errors (no such file, too big, a failing program) are thrown.
+// program, 2 = shared library. Errors (no such file, too big, a failing program) are thrown.
 def loadAndRun(path, mode) {
-    if (Loader.buffer == nil) { Loader.buffer = kalloc(Loader.limit); }
+    core = currentCore();
+    buffer = loaderBuffer(core);
+    limit = Loader.limits[core];
     data = Fs.readData(path);
     if (data == nil) { throw(path + ': no such file'); }
     size = len(data);
-    if (size == 0 || size > Loader.limit) {
+    if (size == 0 || size > limit) {
         free(data);
-        throw(path + ': not a program (' + size + ' bytes; at most ' + Loader.limit + ')');
+        throw(path + ': not a program (' + size + ' bytes; at most ' + limit + ' on this core)');
     }
     i = 0;
     while (i < size) {
-        poke8(Loader.buffer + i, data[i]);
+        poke8(buffer + i, data[i]);
         i += 1;
     }
     free(data);
-    execMem(Loader.buffer, size, mode);
+    execMem(buffer, size, mode);
+}
+
+// What went wrong in a program, as its author wrote it: execMem wraps the error of a failed program
+// ("exec: 'memory at 4711' failed: Exception on address: 15614 - boom"); this is "boom". Whether the program
+// was stopped from outside (kill, Ctrl-C) is told apart by this text being 'interrupted'.
+def programError(text) {
+    marker = ' - ';
+    cut = -1;
+    i = strFind(text, 'Exception on address: ', 0);
+    if (i >= 0) { cut = strFind(text, marker, i); }
+    if (cut < 0) { return text; }
+    return strSub(text, cut + len(marker), len(text));
 }
 
 // The shared libraries (see libs.txt): lib/MANIFEST on the disk names their images, in load order.

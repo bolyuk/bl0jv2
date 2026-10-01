@@ -1,0 +1,217 @@
+// aeon-os: processes. A process is a program running on a core of its own: the shell starts one
+// with 'command &' (or as a stage of a pipeline), the starter picks a worker core that is free,
+// prepares that core's Ctx (command line, folder, redirections, pipes) and dispatches the job to
+// it; the job loads the program from the disk, runs it in user mode, records how it ended and
+// frees the core. There is no time-slicing - a core runs one job at a time to its end - so the number
+// of processes at once is the number of worker cores (the VM's -n option minus the one the shell
+// itself runs on).
+//
+// Everything about a process is in the Process table, which any program can read (ps) and add a stop
+// request to (kill): a request, because a program stops only at a checkpoint (see kernel.bl0's
+// checkAbort).
+
+import '../kernel.bl0';
+import 'loader.bl0';
+import '../../stdlib/arrlib.bl0';
+import 'userland.bl0';
+
+def class Process {
+    field pid;
+    field name;
+    field path;
+    field core;
+    field state;       // 'running', 'done', 'failed' (an error ended it) or 'killed'
+    field message;     // what ended it, when it did not simply finish
+    field started;
+    field ended;
+    field reported;    // the shell has told the user it ended
+    field background;
+
+    def init(pid, name, path, core) {
+        this.pid = pid;
+        this.name = name;
+        this.path = path;
+        this.core = core;
+        this.state = 'running';
+        this.message = '';
+        this.started = ticks();
+        this.ended = 0;
+        this.reported = false;
+        this.background = false;
+    }
+}
+
+def class Proc {
+    static field table;
+    static field nextPid;
+    static field mutex;
+    static field changed;    // signalled whenever a process ends
+    static field busy;       // per core: running a job
+
+    // privileged, once, after Ctx and the abort words exist
+    static def init() {
+        Proc.table = [];
+        Proc.nextPid = 1;
+        Proc.mutex = newMutex();
+        Proc.changed = newEvent();
+        Proc.busy = [];
+        i = 0;
+        while (i < coreCount()) {
+            push(Proc.busy, false);
+            i += 1;
+        }
+    }
+
+    static def workers() {
+        return coreCount() - 1;
+    }
+
+    // number of worker cores with no job
+    static def freeCores() {
+        n = 0;
+        i = 1;
+        while (i < coreCount()) {
+            if (!Proc.busy[i]) { n += 1; }
+            i += 1;
+        }
+        return n;
+    }
+
+    static def find(pid) {
+        i = 0;
+        while (i < len(Proc.table)) {
+            if (Proc.table[i].pid == pid) { return Proc.table[i]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    // Starts 'path' with 'words' as its command line on a free worker core, and returns the Process.
+    // Privileged (it dispatches): the shell calls it through a syscall. 'io' is [inPath, outPath, pipeIn,
+    // pipeOut, background].
+    static def spawn(path, words, cwd, io) {
+        lock(Proc.mutex);
+        core = -1;
+        i = 1;
+        while (i < coreCount() && core < 0) {
+            if (!Proc.busy[i]) { core = i; }
+            i += 1;
+        }
+        if (core < 0) {
+            unlock(Proc.mutex);
+            throw('no free core to run it on (the machine has ' + coreCount() + '; -n sets that)');
+        }
+        Proc.busy[core] = true;
+        pid = Proc.nextPid;
+        Proc.nextPid += 1;
+        p = new Process(pid, words[0], path, core);
+        p.background = io[4];
+        push(Proc.table, p);
+        unlock(Proc.mutex);
+        Proc.trim();
+        c = Ctx.table[core];
+        c.reset();
+        c.words = words;
+        c.cwd = cwd;
+        c.inPath = io[0];
+        c.outPath = io[1];
+        c.pipeIn = io[2];
+        c.pipeOut = io[3];
+        c.background = io[4];
+        c.pid = pid;
+        poke32(Abort.base + 4 * core, 0);
+        abortSetForegroundJob(core, !io[4]);
+        dispatch(procEntry, core, pid);
+        return p;
+    }
+
+    // drops the oldest finished processes beyond 32
+    static def trim() {
+        lock(Proc.mutex);
+        finished = 0;
+        i = 0;
+        while (i < len(Proc.table)) {
+            if (Proc.table[i].state != 'running') { finished += 1; }
+            i += 1;
+        }
+        i = 0;
+        while (finished > 32 && i < len(Proc.table)) {
+            if (Proc.table[i].state != 'running') {
+                Proc.table = Arr.concat(Arr.slice(Proc.table, 0, i), Arr.slice(Proc.table, i + 1, len(Proc.table)));
+                finished -= 1;
+            } else {
+                i += 1;
+            }
+        }
+        unlock(Proc.mutex);
+    }
+
+    static def finish(p, state, message) {
+        lock(Proc.mutex);
+        p.state = state;
+        p.message = message;
+        p.ended = ticks();
+        Proc.busy[p.core] = false;
+        abortSetForegroundJob(p.core, false);
+        unlock(Proc.mutex);
+        signalEvent(Proc.changed);
+        if (p.background) {
+            // tell the user, without breaking into what they are typing
+            text = '[' + p.pid + '] ' + p.name + ' ';
+            if (state == 'done') { text = text + 'done'; }
+            else if (state == 'killed') { text = text + 'killed'; }
+            else { text = text + 'failed: ' + message; }
+            p.reported = true;
+            consoleAsync(text + '\n');
+        }
+    }
+
+    // asks the process to stop; true if there was a running process of that number
+    static def kill(pid) {
+        p = Proc.find(pid);
+        if (p == nil || p.state != 'running') { return false; }
+        abortRequest(p.core);
+        return true;
+    }
+
+    // sleeps until process 'pid' is no longer running (all of them when pid is 0)
+    static def waitFor(pid) {
+        while (true) {
+            gen = eventGen(Proc.changed);
+            if (!Proc.anyRunning(pid)) { return nil; }
+            checkAbort();
+            waitEvent(Proc.changed, gen, 200);
+        }
+    }
+
+    static def anyRunning(pid) {
+        i = 0;
+        while (i < len(Proc.table)) {
+            p = Proc.table[i];
+            if (p.state == 'running' && (pid == 0 || p.pid == pid)) { return true; }
+            i += 1;
+        }
+        return false;
+    }
+}
+
+// the job on a worker core (dispatched by Proc.spawn): runs the program to its end and records how it ended
+def procEntry(pid) {
+    p = Proc.find(pid);
+    c = Ctx.table[currentCore()];
+    state = 'done';
+    message = '';
+    try {
+        loadAndRun(p.path, 0);
+    } catch (e) {
+        text = programError(str(e));
+        if (text == 'interrupted') {
+            state = 'killed';
+        } else {
+            state = 'failed';
+            message = text;
+        }
+    }
+    c.finish();
+    Proc.finish(p, state, message);
+}

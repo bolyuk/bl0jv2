@@ -1,0 +1,14 @@
+// aeon-os program: set the DNS server
+// Loaded from the virtual disk by the shell (bin/setdns.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+
+def main(words) {
+    if (len(words) != 2) { sayErr('usage: setdns <a.b.c.d>'); return nil; }
+    addr = Ip.parseAddr(words[1]);
+    if (addr == nil) { sayErr(words[1] + ': not an address'); return nil; }
+    Dns.serverIp = addr;
+    say('dns server is now ' + Ip.formatAddr(addr));
+}
+
+programMain(main);

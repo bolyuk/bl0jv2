@@ -14,15 +14,93 @@
 // through syscalls the kernel offers. When it returns, the shell is back.
 
 import '../kernel.bl0';
+import 'pipe.bl0';
 import '../../stdlib/fs/dirs.bl0';
 import '../../stdlib/str/split.bl0';
 import '../../stdlib/str/fmt.bl0';
 import '../../stdlib/arrlib.bl0';
 import '../../stdlib/fs/hostfs.bl0';
 
-def class Prog {
-    static field cwd;
-    static field words;
+// What a program knows about the job it is part of - one per core, because programs may run on
+// several cores at once: its command line (words[0] is the command), the folder it started in, where
+// its standard input and output go (a file path, a pipe, or the terminal when both are empty), the
+// text it has queued for a file, and the number of the process it is. The shell (or the process
+// starter, for a program on another core) fills it in before the program starts; the shared libraries
+// make this the same table for everyone.
+def class Ctx {
+    static field table;
+
+    field words;
+    field cwd;
+    field inPath;
+    field outPath;
+    field pipeIn;
+    field pipeOut;
+    field buffer;
+    field size;
+    field pid;
+    field background;     // no terminal: reading standard input gives nothing
+
+    def init() {
+        this.words = [];
+        this.cwd = '';
+        this.inPath = '';
+        this.outPath = '';
+        this.pipeIn = nil;
+        this.pipeOut = nil;
+        this.buffer = [];
+        this.size = 0;
+        this.pid = 0;
+        this.background = false;
+    }
+
+    // the context of the core running this code
+    static def me() {
+        if (Ctx.table == nil) { Ctx.setup(coreCount()); }
+        return Ctx.table[currentCore()];
+    }
+
+    static def setup(cores) {
+        table = [];
+        i = 0;
+        while (i < cores) {
+            push(table, new Ctx());
+            i += 1;
+        }
+        Ctx.table = table;
+    }
+
+    // start afresh for a new job
+    def reset() {
+        this.inPath = '';
+        this.outPath = '';
+        this.pipeIn = nil;
+        this.pipeOut = nil;
+        this.buffer = [];
+        this.size = 0;
+        this.background = false;
+    }
+
+    // what was queued for a file goes to it
+    def flush() {
+        if (len(this.buffer) == 0) { return nil; }
+        text = strJoin(this.buffer, '');
+        this.buffer = [];
+        this.size = 0;
+        Fs.append(this.outPath, text);
+    }
+
+    // the job's output is complete: queued file text is written, and the ends of its pipes close so
+    // the other side sees the end
+    def finish() {
+        try {
+            this.flush();
+        } catch (e) {
+            // the file could not be written: the job is over anyway
+        }
+        if (this.pipeOut != nil) { this.pipeOut.closeWrite(); }
+        if (this.pipeIn != nil) { this.pipeIn.closeRead(); }
+    }
 }
 
 // the words of a command line, without the empty pieces repeated spaces leave
@@ -78,38 +156,25 @@ def isSpace(c) {
 //
 // A program writes with say() and reads with inputText(); where that goes is the
 // shell's business: the terminal, or a file when the command line redirected or
-// piped it (the shell sets Io.inPath and Io.outPath). Output to a file is
+// piped it (the shell sets that in the Ctx of the core the program runs on). Output to a file is
 // collected and appended in blocks. Messages that are about the command itself -
 // usage, "no such file" - go to sayErr(), which is always the terminal, so that a
 // pipe carries only data.
 
-def class Io {
-    static field outPath;
-    static field inPath;
-    static field buffer;
-    static field size;
-
-    static def flush() {
-        if (len(Io.buffer) == 0) { return nil; }
-        text = strJoin(Io.buffer, '');
-        Io.buffer = [];
-        Io.size = 0;
-        Fs.append(Io.outPath, text);
-    }
-}
-Io.outPath = '';
-Io.inPath = '';
-Io.buffer = [];
-Io.size = 0;
-
 def sayRaw(text) {
-    if (Io.outPath == '') {
-        consoleWrite(text);
+    checkAbort();
+    c = Ctx.me();
+    if (c.pipeOut != nil) {
+        c.pipeOut.put(text);
         return nil;
     }
-    push(Io.buffer, text);
-    Io.size += len(text);
-    if (Io.size > 2048) { Io.flush(); }
+    if (c.outPath == '') {
+        if (c.background) { consoleAsync(text); } else { consoleWrite(text); }
+        return nil;
+    }
+    push(c.buffer, text);
+    c.size += len(text);
+    if (c.size > 2048) { c.flush(); }
 }
 
 def say(text) {
@@ -117,12 +182,16 @@ def say(text) {
 }
 
 def sayErr(text) {
-    consoleWriteLine(text);
+    if (Ctx.me().background) {
+        consoleAsync(text + '\n');
+    } else {
+        consoleWriteLine(text);
+    }
 }
 
 // a path as typed -> the stored name, relative to the folder the shell was in
 def inCwd(path) {
-    return FsPath.resolve(Prog.cwd, path);
+    return FsPath.resolve(Ctx.me().cwd, path);
 }
 
 // a destination for cp/mv: an existing folder means "inside it"
@@ -133,10 +202,9 @@ def destination(from, to) {
 }
 
 // call first thing in a program; false (after saying why) when there is no filesystem to use.
-// The shell has put the command line (Prog.words), the working folder (Prog.cwd) and the
-// redirections (Io.inPath, Io.outPath) where this program finds them: everything here is a
-// shared library, so those are the same variables the shell uses, not copies. The disk driver,
-// the keyboard, the console are likewise the system's own.
+// The shell has put the command line, the working folder and the redirections in this core's Ctx:
+// everything here is a shared library, so that is the same table the shell uses, not a copy. The
+// disk driver, the keyboard, the console are likewise the system's own.
 def startProgram() {
     if (!Fs.mounted) {
         sayErr('the disk has no filesystem');
@@ -145,15 +213,24 @@ def startProgram() {
     return true;
 }
 
-// runs the program: Prog.words[0] is the command name, the rest its arguments; whatever
-// it printed to a file is written out even if it fails
+// the command line of the running program: words[0] is the command name, the rest its arguments
+def progWords() {
+    return Ctx.me().words;
+}
+
+// the folder the running program was started in
+def progCwd() {
+    return Ctx.me().cwd;
+}
+
+// runs the program; whatever it printed to a file is written out even if it fails
 def programMain(main) {
     if (!startProgram()) { return nil; }
     try {
-        main(Prog.words);
+        main(progWords());
     } catch (e) {
-        Io.flush();
+        Ctx.me().flush();
         throw(e);
     }
-    Io.flush();
+    Ctx.me().flush();
 }
