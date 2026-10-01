@@ -23,14 +23,14 @@ class Bl0jv2_IpiTest {
 
     @Test
     void ipiToAWorkerRunsTheHandlerOnThatWorkerNotOnCoreZero() {
-        // core 0 keeps busy-looping long enough that, with a plain
-        // raiseInterrupt(), it would very likely take the interrupt itself;
-        // an IPI must reach core 2 regardless
+        // both workers keep polling until the handler has run (a worker that
+        // had already finished its task could never take the interrupt);
+        // an IPI must reach core 2, never core 1 or core 0
         String out = run(
                 "def class S { static field core; } S.core = -1; " +
                 "def isr(v) { S.core = currentCore(); } " +
                 "registerHandler(isr, 9, 1); " +
-                "def idler(arg) { i = 0; while (i < 20000) { i = i + 1; wait(0); } } " +
+                "def idler(arg) { i = 0; while (S.core == -1 && i < 5000) { i = i + 1; wait(1); } } " +
                 "dispatch(idler, 1, 0); dispatch(idler, 2, 0); " +
                 "wait(50); raiseInterruptOn(2, 9); " +
                 "i = 0; while (i < 200 && S.core == -1) { i = i + 1; wait(5); } " +

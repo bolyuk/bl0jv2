@@ -100,6 +100,9 @@ public final class Bl0jv2_jVM {
     private final ReentrantReadWriteLock heapLock = new ReentrantReadWriteLock();
 
     private long[] consts;
+    // parallel to consts: the interned symbol id of a string constant, else -1
+    private int[] constSymbols = new int[0];
+    private final SymbolTable symbols = new SymbolTable();
     private byte[] instructions;
 
     // set fresh in feed_compiled_file(); ticks() reads elapsed time against
@@ -445,8 +448,8 @@ public final class Bl0jv2_jVM {
     public static boolean valuesEqual(Object left, Object right) {
         if (isNumeric(left) && isNumeric(right))
             return toDouble(left) == toDouble(right);
-        if (left instanceof Bl0jInstance li && li.cls.hasMethod("equals")) {
-            Object result = li.owner.invoke(li.cls.method("equals"), li.owner.box(li), li.owner.box(right));
+        if (left instanceof Bl0jInstance li && li.cls.equalsMethod() != null) {
+            Object result = li.owner.invoke(li.cls.equalsMethod(), li.owner.box(li), li.owner.box(right));
             return result instanceof Boolean b && b;
         }
         return Objects.equals(left, right);
@@ -534,6 +537,20 @@ public final class Bl0jv2_jVM {
         throw new Bl0j_VM_Exception("unknown type: " + value.getClass().getSimpleName());
     }
 
+    // the receiver of a field/method access must be a class instance;
+    // anything else (nil above all - an uninitialised or failed lookup) gets
+    // a message naming the member, not a Java ClassCastException
+    private Bl0jInstance requireInstance(long bits, String action, int nameConst) {
+        Object value = unbox(bits);
+        if (value instanceof Bl0jInstance instance)
+            return instance;
+        throw new Bl0j_VM_Exception("cannot " + action + " '" + unbox(consts[nameConst]) + "' on " + typeName(value));
+    }
+
+    private Bl0j_VM_Exception noSuchMember(Bl0jClass cls, String kind, int nameConst) {
+        return new Bl0j_VM_Exception("class " + cls.name + " has no " + kind + " '" + unbox(consts[nameConst]) + "'");
+    }
+
     private static Bl0jEvent requireEvent(Object value) {
         if (value instanceof Bl0jEvent e)
             return e;
@@ -548,6 +565,75 @@ public final class Bl0jv2_jVM {
                 return stdin.readLine(); // null on EOF
             } catch (IOException e) {
                 throw new Bl0j_VM_Exception("read failed: " + e.getMessage());
+            }
+        }
+    }
+
+    // reads 'count' constants from the file into target[constOffset ..]
+    // (shared by feed_compiled_file(), where both offsets are 0, and
+    // loadRelocated(), where a later program is appended to this VM's own
+    // pool). Every index stored INSIDE a constant (a class's field default
+    // and method FunDef) is local to the file being loaded, so it is shifted
+    // by constOffset; a FUN constant's own entry address is an instruction
+    // index local to the file, shifted by instrOffset.
+    //
+    // targetSymbols[i] is the interned symbol id of constant i when it is a
+    // string (-1 otherwise): GET_FIELD/SET_FIELD/LOOKUP_METHOD name their
+    // member by a string constant's index, and a class finds the member by
+    // symbol id, so this is the one array read that connects the two.
+    private void loadConstants(ByteBuffer bytes, int count, long[] target, int[] targetSymbols,
+                               int constOffset, int instrOffset) {
+        for (int i = 0; i < count; i++) {
+            int idx = constOffset + i;
+            targetSymbols[idx] = -1;
+            byte type = bytes.get();
+            switch (type) {
+                case Constants.INT -> target[idx] = NanBox.ofInt(bytes.getInt());
+                case Constants.STRING -> {
+                    String str = get_str(bytes);
+                    target[idx] = boxRef(str);
+                    targetSymbols[idx] = symbols.intern(str);
+                }
+                case Constants.BOOL -> target[idx] = NanBox.ofBoolean(bytes.get() != 0);
+                case Constants.FUN -> target[idx] = boxRef(new FunDef(
+                        get_str(bytes),
+                        (bytes.getInt() & 0xFFFF) + instrOffset,
+                        bytes.getShort(),
+                        bytes.getShort()));
+                case Constants.BYTE -> target[idx] = NanBox.ofInt(bytes.get());
+                case Constants.FLOAT -> target[idx] = Double.doubleToLongBits(bytes.getDouble());
+                // methods are always registered (and thus loaded) before
+                // the class itself, so target[methodConstIdx] is already
+                // populated whenever we get here - see ClassDef's javadoc
+                case Constants.CLASS -> {
+                    String className = get_str(bytes);
+                    int fieldCount = bytes.getShort() & 0xFFFF;
+                    String[] fieldNames = new String[fieldCount];
+                    int[] fieldSymbols = new int[fieldCount];
+                    long[] fieldDefaults = new long[fieldCount];
+                    Arrays.fill(fieldDefaults, NanBox.NIL);
+                    for (int f = 0; f < fieldCount; f++) {
+                        fieldNames[f] = get_str(bytes);
+                        fieldSymbols[f] = symbols.intern(fieldNames[f]);
+                        if (bytes.get() != 0) // hasDefault
+                            fieldDefaults[f] = target[constOffset + (bytes.getShort() & 0xFFFF)];
+                    }
+                    int methodCount = bytes.getShort() & 0xFFFF;
+                    String[] methodNames = new String[methodCount];
+                    int[] methodSymbols = new int[methodCount];
+                    FunDef[] methodDefs = new FunDef[methodCount];
+                    long[] methodRefs = new long[methodCount];
+                    for (int m = 0; m < methodCount; m++) {
+                        methodNames[m] = get_str(bytes);
+                        methodSymbols[m] = symbols.intern(methodNames[m]);
+                        methodRefs[m] = target[constOffset + (bytes.getShort() & 0xFFFF)];
+                        methodDefs[m] = (FunDef) unbox(methodRefs[m]);
+                    }
+                    int staticFieldCount = bytes.getShort() & 0xFFFF;
+                    target[idx] = boxRef(new Bl0jClass(className, fieldNames, fieldSymbols, fieldDefaults,
+                            methodNames, methodSymbols, methodDefs, methodRefs, staticFieldCount));
+                }
+                default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
             }
         }
     }
@@ -585,46 +671,9 @@ public final class Bl0jv2_jVM {
         interrupts.reset();
         programStartNanos = System.nanoTime();
 
-        for (int i = 0; i < constants_length; i++) {
-            byte type = bytes.get();
-            switch (type) {
-                case Constants.INT -> consts[i] = NanBox.ofInt(bytes.getInt());
-                case Constants.STRING -> consts[i] = boxRef(get_str(bytes));
-                case Constants.BOOL -> consts[i] = NanBox.ofBoolean(bytes.get() != 0);
-                case Constants.FUN -> consts[i] = boxRef(new FunDef(
-                        get_str(bytes),
-                        bytes.getInt() & 0xFFFF,
-                        bytes.getShort(),
-                        bytes.getShort()));
-                case Constants.BYTE -> consts[i] = NanBox.ofInt(bytes.get());
-                case Constants.FLOAT -> consts[i] = Double.doubleToLongBits(bytes.getDouble());
-                // methods are always registered (and thus loaded) before
-                // the class itself, so consts[methodConstIdx] is already
-                // populated whenever we get here - see ClassDef's javadoc
-                case Constants.CLASS -> {
-                    String className = get_str(bytes);
-                    int fieldCount = bytes.getShort() & 0xFFFF;
-                    List<String> fieldNames = new ArrayList<>();
-                    long[] fieldDefaults = new long[fieldCount];
-                    Arrays.fill(fieldDefaults, NanBox.NIL);
-                    for (int f = 0; f < fieldCount; f++) {
-                        fieldNames.add(get_str(bytes));
-                        if (bytes.get() != 0) // hasDefault
-                            fieldDefaults[f] = consts[bytes.getShort() & 0xFFFF];
-                    }
-                    int methodCount = bytes.getShort() & 0xFFFF;
-                    Map<String, FunDef> methods = new HashMap<>();
-                    for (int m = 0; m < methodCount; m++) {
-                        String methodName = get_str(bytes);
-                        int methodConstIdx = bytes.getShort() & 0xFFFF;
-                        methods.put(methodName, (FunDef) unbox(consts[methodConstIdx]));
-                    }
-                    int staticFieldCount = bytes.getShort() & 0xFFFF;
-                    consts[i] = boxRef(new Bl0jClass(className, fieldNames, fieldDefaults, methods, staticFieldCount));
-                }
-                default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
-            }
-        }
+        symbols.clear();
+        constSymbols = new int[constants_length];
+        loadConstants(bytes, constants_length, consts, constSymbols, 0, 0);
 
         int remaining = bytes.remaining();
 
@@ -682,50 +731,8 @@ public final class Bl0jv2_jVM {
         int instrOffset = instructions.length / C.INSTR_WIDTH;
 
         long[] newConsts = Arrays.copyOf(consts, consts.length + constants_length);
-
-        for (int i = 0; i < constants_length; i++) {
-            byte type = bytes.get();
-            switch (type) {
-                case Constants.INT -> newConsts[constOffset + i] = NanBox.ofInt(bytes.getInt());
-                case Constants.STRING -> newConsts[constOffset + i] = boxRef(get_str(bytes));
-                case Constants.BOOL -> newConsts[constOffset + i] = NanBox.ofBoolean(bytes.get() != 0);
-                // + instrOffset: this function's own entry address, an
-                // instruction index local to the file being loaded
-                case Constants.FUN -> newConsts[constOffset + i] = boxRef(new FunDef(
-                        get_str(bytes),
-                        (bytes.getInt() & 0xFFFF) + instrOffset,
-                        bytes.getShort(),
-                        bytes.getShort()));
-                case Constants.BYTE -> newConsts[constOffset + i] = NanBox.ofInt(bytes.get());
-                case Constants.FLOAT -> newConsts[constOffset + i] = Double.doubleToLongBits(bytes.getDouble());
-                case Constants.CLASS -> {
-                    String className = get_str(bytes);
-                    int fieldCount = bytes.getShort() & 0xFFFF;
-                    List<String> fieldNames = new ArrayList<>();
-                    long[] fieldDefaults = new long[fieldCount];
-                    Arrays.fill(fieldDefaults, NanBox.NIL);
-                    for (int f = 0; f < fieldCount; f++) {
-                        fieldNames.add(get_str(bytes));
-                        // + constOffset: the default value's own index,
-                        // local to the file being loaded
-                        if (bytes.get() != 0)
-                            fieldDefaults[f] = newConsts[constOffset + (bytes.getShort() & 0xFFFF)];
-                    }
-                    int methodCount = bytes.getShort() & 0xFFFF;
-                    Map<String, FunDef> methods = new HashMap<>();
-                    for (int m = 0; m < methodCount; m++) {
-                        String methodName = get_str(bytes);
-                        // + constOffset: same reasoning as the field
-                        // default above
-                        int methodConstIdx = constOffset + (bytes.getShort() & 0xFFFF);
-                        methods.put(methodName, (FunDef) unbox(newConsts[methodConstIdx]));
-                    }
-                    int staticFieldCount = bytes.getShort() & 0xFFFF;
-                    newConsts[constOffset + i] = boxRef(new Bl0jClass(className, fieldNames, fieldDefaults, methods, staticFieldCount));
-                }
-                default -> throw new Bl0j_VM_Exception("Unknown const type: " + type);
-            }
-        }
+        int[] newConstSymbols = Arrays.copyOf(constSymbols, consts.length + constants_length);
+        loadConstants(bytes, constants_length, newConsts, newConstSymbols, constOffset, instrOffset);
 
         int remaining = bytes.remaining();
         if (remaining % C.INSTR_WIDTH != 0)
@@ -767,6 +774,7 @@ public final class Bl0jv2_jVM {
 
         int entryAddr = instrOffset;
         consts = newConsts;
+        constSymbols = newConstSymbols;
         instructions = newInstructions;
         return new int[]{entryAddr, registers_length};
     }
@@ -1232,17 +1240,22 @@ public final class Bl0jv2_jVM {
                     case OpCodes.NEW_INSTANCE -> reg[a] = boxRef(new Bl0jInstance((Bl0jClass) unbox(reg[a]), this));
 
                     case OpCodes.GET_FIELD -> {
-                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
-                        String name = (String) unbox(consts[b]);
-                        reg[a] = instance.getFieldRaw(name);
+                        Bl0jInstance instance = requireInstance(reg[a], "read field", b);
+                        int slot = instance.cls.fieldSlot(constSymbols[b]);
+                        if (slot < 0)
+                            throw noSuchMember(instance.cls, "field", b);
+                        reg[a] = instance.getFieldRaw(slot);
                     }
 
                     // field name's const index and the value sit at reg[b]
                     // and reg[b+1], same packing trick as INDEX_SET
                     case OpCodes.SET_FIELD -> {
-                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
-                        String name = (String) unbox(consts[(int) unbox(reg[b])]);
-                        instance.setFieldRaw(name, reg[b + 1]);
+                        int nameConst = NanBox.asInt(reg[b]);
+                        Bl0jInstance instance = requireInstance(reg[a], "set field", nameConst);
+                        int slot = instance.cls.fieldSlot(constSymbols[nameConst]);
+                        if (slot < 0)
+                            throw noSuchMember(instance.cls, "field", nameConst);
+                        instance.setFieldRaw(slot, reg[b + 1]);
                     }
 
                     // b is the static field's own index, resolved at
@@ -1262,9 +1275,11 @@ public final class Bl0jv2_jVM {
 
                     // mutates a's own slot: object in, resolved FunDef out
                     case OpCodes.LOOKUP_METHOD -> {
-                        Bl0jInstance instance = (Bl0jInstance) unbox(reg[a]);
-                        String name = (String) unbox(consts[b]);
-                        reg[a] = box(instance.cls.method(name));
+                        Bl0jInstance instance = requireInstance(reg[a], "call method", b);
+                        int method = instance.cls.methodIndex(constSymbols[b]);
+                        if (method < 0)
+                            throw noSuchMember(instance.cls, "method", b);
+                        reg[a] = instance.cls.methodRef(method);
                     }
 
                     case OpCodes.MAKE_CELL -> reg[a] = boxRef(new Bl0jCell());

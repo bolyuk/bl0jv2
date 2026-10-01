@@ -1,14 +1,16 @@
 package bl0.bl0jv2.runtime.values;
 
+import bl0.bl0jv2.data.FunDef;
 import bl0.bl0jv2.runtime.Bl0jv2_jVM;
 
 import java.util.Arrays;
 
 /**
  * A class instance. Field storage is a flat long[] of NaN-boxed values,
- * same representation as everything else here - name-to-index resolution
- * goes through the shared Bl0jClass rather than being baked into the
- * instance, so all instances of the same class share one lookup.
+ * same representation as everything else here - name-to-slot resolution
+ * goes through the shared Bl0jClass (by interned symbol id, see its doc)
+ * rather than being baked into the instance, so all instances of the same
+ * class share one lookup table.
  *
  * <p>Not safe for concurrent mutation: {@link #setFieldRaw} is a plain
  * array write, no locking. An instance shared across cores (e.g. handed to
@@ -30,26 +32,27 @@ public final class Bl0jInstance {
         this.owner = owner;
     }
 
-    public long getFieldRaw(String name) {
-        return fields[cls.fieldIndex(name)];
+    public long getFieldRaw(int slot) {
+        return fields[slot];
     }
 
-    public void setFieldRaw(String name, long value) {
-        fields[cls.fieldIndex(name)] = value;
+    public void setFieldRaw(int slot, long value) {
+        fields[slot] = value;
     }
 
     @Override
     public String toString() {
         // a class that declares its own toString() gets to decide its own
         // display form instead of the default field dump
-        if (cls.hasMethod("toString"))
-            return String.valueOf(owner.invoke(cls.method("toString"), owner.box(this)));
+        FunDef toStringMethod = cls.toStringMethod();
+        if (toStringMethod != null)
+            return String.valueOf(owner.invoke(toStringMethod, owner.box(this)));
 
         StringBuilder sb = new StringBuilder(cls.name).append("{");
         var names = cls.fieldNames();
-        for (int i = 0; i < names.size(); i++) {
+        for (int i = 0; i < names.length; i++) {
             if (i > 0) sb.append(", ");
-            sb.append(names.get(i)).append(": ").append(owner.unbox(fields[i]));
+            sb.append(names[i]).append(": ").append(owner.unbox(fields[i]));
         }
         return sb.append("}").toString();
     }
