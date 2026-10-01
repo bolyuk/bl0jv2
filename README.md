@@ -37,6 +37,8 @@ bl0jv2 [-cdekVh] [-n <cores>] <source> [<dest>]
   -b, --bridge-udp PORT          relay a real UDP socket into the VM's NIC
       --bridge-tcp HOSTPORT:VMPORT  relay a real TCP socket to a Tcp listener
       --bridge-outbound          let VM code open real sockets (see below)
+      --disk FILE [--disk-sectors N]  present FILE as a block device (created if missing)
+  -I, --include DIR  look an import up in DIR when it is not next to the importing file
 ```
 
 ```
@@ -185,8 +187,10 @@ x, y = (1, 2)            // destructuring
 ### Imports
 
 `import 'path.bl0';` splices another file's top-level definitions in once
-(paths are relative to the importing file; `stdlib/...` falls back to the
-copy bundled in the jar).
+(paths are relative to the importing file; then each `-I` directory in order;
+`stdlib/...` falls back to the copy bundled in the jar). The linker follows
+imports by itself, so the CLI needs no list of files; `-I` only adds places to
+look. It works at the `-t` prompt too.
 
 ## Builtins
 
@@ -227,11 +231,42 @@ Namespaced static methods; `import 'stdlib/<file>';` first.
 | `map.bl0` | `new Map(buckets)`: `set get has remove keys values`, fields `size`, `bucketCount`; grows automatically |
 | `mathlib.bl0` | `Math.abs min max floor ceil round sqrt clamp toHex` |
 | `str/substr find case split trim affix toArr char fmt` | `Substr.substr`, `Find.find/findFrom`, `Case.upper/lower`, `Split.split` (any separator length), `Trim.trim`, `Affix.startsWith/endsWith`, `ToArr.toArr`, `Char.char`, `Fmt.format` |
+| `str/utf8` | `Utf8.encode(text)` to an array of bytes, `Utf8.decode(bytes)` back (bad input becomes U+FFFD) |
+| `fs/disk fs` | block-device driver and a filesystem: see below |
 | `net/nic ip udp tcp http dns` | a toy network stack over a virtual NIC: see below |
 
 `Fmt.format('{} + {} = {}', [3, 4, 7])` fills `{}` in order, `{2}` by index,
 `{{`/`}}` for braces, and `{:08x}` `{:>6}` `{:<6}` `{:04}` for hex, alignment,
 zero padding and width.
+
+### Files
+
+The VM's only file primitive is a **block device**, the thing every machine
+already has: `--disk image` presents a host file as sectors of 512 bytes behind
+five ports (`0x0F00` sector count, `0x0F04` sector, `0x0F08` buffer address,
+`0x0F0C` command 1 = read / 2 = write, `0x0F0D` status). The controller moves a
+sector by DMA between the device and a buffer in raw memory and the command has
+finished when `out8` returns. Everything above that is bl0:
+
+```
+import 'stdlib/fs/fs.bl0';
+Disk.init(kalloc(512));      // privileged, once: reserves the sector buffer
+Fs.mount() || Fs.format();   // mount() is false on a blank disk
+Fs.write('notes/a.txt', 'привет');  Fs.append('notes/a.txt', '!');
+print Fs.read('notes/a.txt');       // nil if there is no such file
+Fs.list('notes/')  // [[name, size], ...] sorted;  Fs.rename Fs.remove Fs.size Fs.exists Fs.info
+```
+
+Layout: superblock, a FAT, a flat directory (64-byte entries, up to 128 files,
+names up to 47 bytes - `/` is just a character, `Fs.list(prefix)` makes it
+look like folders), data. Text is stored as UTF-8. A write goes to fresh
+sectors first and only then switches the directory entry, so a failure keeps the
+old contents. Errors are `try/catch`-able messages starting `fs: `. After
+`dropToUserMode()` the same calls work: the privileged port writes go through
+a syscall (vector 6), while the sector buffer is read with `peek`/`poke`.
+
+To port to another machine, replace `fs/disk.bl0` (`Disk.read/write/sectors`)
+and nothing else. The aeon-os shell has `ls cat write append rm mv cp df format`.
 
 ### Network stack
 

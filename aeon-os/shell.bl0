@@ -45,6 +45,7 @@ import '../stdlib/net/dns.bl0';
 import '../stdlib/net/http.bl0';
 import '../stdlib/str/split.bl0';
 import '../stdlib/str/fmt.bl0';
+import '../stdlib/fs/fs.bl0';
 
 // when boot.bl0 exec()s this file, it already called kernel.bl0's
 // initHeap() with ITS OWN reserved regions accounted for (see its own
@@ -69,10 +70,16 @@ initConsole();
 Nic.initAuto();
 Dns.myIp = Net.localIp;
 TcpConn.connectTimeoutMs = 5000;
+// the disk, if the host attached one (privileged, like the NIC): a sector buffer
+// in raw memory, then mount - an unformatted disk stays unmounted until 'format'
+Disk.init(kalloc(512));
+if (Disk.present()) { Fs.mount(); }
 
 // --- built-in commands ---
 def cmdHelp() {
     consoleWriteLine('available commands: help, echo <text>, uptime, whoami, reboot, exit');
+    consoleWriteLine('files:   ls [prefix], cat <file>, write <file> <text>, append <file> <text>, rm <file>,');
+    consoleWriteLine('         mv <from> <to>, cp <from> <to>, df, format yes');
     consoleWriteLine('network: net, netstat, setip <ip>, setdns <ip>, ping <host>, resolve <host>,');
     consoleWriteLine('         http <host[:port]> [path], tcp <host> <port> <text>, udp <host> <port> <text>, httpd <port>');
 }
@@ -316,10 +323,113 @@ def cmdHttpd(words) {
     consoleWriteLine('served one request');
 }
 
+// --- file commands ---
+//
+// The disk is the host's --disk image behind the block-device ports; Fs (a
+// filesystem written in bl0) does the rest. Names are flat: 'docs/a.txt' is one
+// name, and 'ls docs/' lists the ones starting with that prefix.
+
+// true when the files can be used; otherwise says why
+def fsReady() {
+    if (!Disk.present()) {
+        consoleWriteLine('no disk attached (start with --disk <image>)');
+        return false;
+    }
+    if (!Fs.mounted) {
+        consoleWriteLine('the disk has no filesystem: run "format yes" to create one (erases the disk)');
+        return false;
+    }
+    return true;
+}
+
+def cmdLs(words) {
+    if (!fsReady()) { return nil; }
+    prefix = '';
+    if (len(words) > 1) { prefix = words[1]; }
+    entries = Fs.list(prefix);
+    i = 0;
+    while (i < len(entries)) {
+        consoleWriteLine(Fmt.format('{:>8}  {}', [entries[i][1], entries[i][0]]));
+        i += 1;
+    }
+    if (len(entries) == 0) { consoleWriteLine('(no files)'); }
+}
+
+def cmdCat(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: cat <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    text = Fs.read(words[1]);
+    if (text == nil) {
+        consoleWriteLine(words[1] + ': no such file');
+    } else {
+        consoleWriteLine(text);
+    }
+}
+
+def cmdWrite(words) {
+    if (len(words) < 2) { consoleWriteLine('usage: write <file> <text>'); return nil; }
+    if (!fsReady()) { return nil; }
+    text = restOf(words, 2);
+    Fs.write(words[1], text);
+    consoleWriteLine(Fmt.format('wrote {} bytes to {}', [Fs.size(words[1]), words[1]]));
+}
+
+def cmdAppend(words) {
+    if (len(words) < 3) { consoleWriteLine('usage: append <file> <text>'); return nil; }
+    if (!fsReady()) { return nil; }
+    Fs.append(words[1], restOf(words, 2));
+    consoleWriteLine(Fmt.format('{} is now {} bytes', [words[1], Fs.size(words[1])]));
+}
+
+def cmdRm(words) {
+    if (len(words) != 2) { consoleWriteLine('usage: rm <file>'); return nil; }
+    if (!fsReady()) { return nil; }
+    if (!Fs.remove(words[1])) { consoleWriteLine(words[1] + ': no such file'); }
+}
+
+def cmdMv(words) {
+    if (len(words) != 3) { consoleWriteLine('usage: mv <from> <to>'); return nil; }
+    if (!fsReady()) { return nil; }
+    if (!Fs.rename(words[1], words[2])) { consoleWriteLine(words[1] + ': no such file'); }
+}
+
+def cmdCp(words) {
+    if (len(words) != 3) { consoleWriteLine('usage: cp <from> <to>'); return nil; }
+    if (!fsReady()) { return nil; }
+    text = Fs.read(words[1]);
+    if (text == nil) { consoleWriteLine(words[1] + ': no such file'); return nil; }
+    Fs.write(words[2], text);
+}
+
+def cmdDf(words) {
+    if (!fsReady()) { return nil; }
+    info = Fs.info();
+    consoleWriteLine(Fmt.format('{} files, {} of {} data sectors free ({} bytes free)', [info[3], info[2], info[1], info[2] * 512]));
+}
+
+def cmdFormat(words) {
+    if (!Disk.present()) { consoleWriteLine('no disk attached (start with --disk <image>)'); return nil; }
+    if (len(words) != 2 || words[1] != 'yes') {
+        consoleWriteLine('this erases the whole disk: run "format yes" to go ahead');
+        return nil;
+    }
+    Fs.format();
+    consoleWriteLine('formatted ' + Disk.sectors + ' sectors');
+}
+
 def class ShellState {
     static field running;
 }
 ShellState.running = true;
+
+// a file command that fails (disk full, bad name, ...) reports it and the shell carries on
+def guarded(command, words) {
+    try {
+        command(words);
+    } catch (e) {
+        consoleWriteLine(str(e));
+    }
+}
 
 def runCommand(line) {
     if (line == 'help') { cmdHelp(); return nil; }
@@ -340,6 +450,15 @@ def runCommand(line) {
     words = tokens(line);
     if (len(words) == 0) { return nil; }
     cmd = words[0];
+    if (cmd == 'ls') { guarded(cmdLs, words); return nil; }
+    if (cmd == 'cat') { guarded(cmdCat, words); return nil; }
+    if (cmd == 'write') { guarded(cmdWrite, words); return nil; }
+    if (cmd == 'append') { guarded(cmdAppend, words); return nil; }
+    if (cmd == 'rm') { guarded(cmdRm, words); return nil; }
+    if (cmd == 'mv') { guarded(cmdMv, words); return nil; }
+    if (cmd == 'cp') { guarded(cmdCp, words); return nil; }
+    if (cmd == 'df') { guarded(cmdDf, words); return nil; }
+    if (cmd == 'format') { guarded(cmdFormat, words); return nil; }
     if (cmd == 'net') { cmdNet(); return nil; }
     if (cmd == 'netstat') { cmdNetstat(); return nil; }
     if (cmd == 'setip') { cmdSetIp(words); return nil; }
