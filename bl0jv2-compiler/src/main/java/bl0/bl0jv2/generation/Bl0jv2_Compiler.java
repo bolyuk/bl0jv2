@@ -515,6 +515,43 @@ public final class Bl0jv2_Compiler {
         return startReg;
     }
 
+    // setTimer(ms, vector) / setInterval(ms, vector): value-producing (the
+    // timer id). Both pack [ms, vector, periodic] into one array for the
+    // one-operand native; the periodic flag is a compile-time constant.
+    private Integer compileSetTimer(FunCall funCall, String name, int periodic) {
+        if (!isBuiltinCall(funCall, name, 2))
+            return null;
+
+        int msReg = compileInner(funCall.args.get(0));
+        int vectorReg = compileInner(funCall.args.get(1));
+        int periodicReg = compileInner(new NumberNode(periodic));
+
+        int startReg = regIndex++;
+        for (int argReg : new int[]{msReg, vectorReg, periodicReg}) {
+            _emit(OpCodes.MOV, regIndex, argReg);
+            regIndex++;
+        }
+        _emit(OpCodes.NEW_ARRAY, startReg, 3);
+
+        int arrRef = regIndex++; // see compileWaitEvent on why the array is freed
+        _emit(OpCodes.MOV, arrRef, startReg);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.SET_TIMER, startReg);
+        _emit(OpCodes.FREE, arrRef);
+        return startReg;
+    }
+
+    // cancelTimer(id): 1-arg, value-producing (true if it was still pending)
+    private Integer compileCancelTimer(FunCall funCall) {
+        if (!isBuiltinCall(funCall, "cancelTimer", 1))
+            return null;
+
+        int idRegRaw = compileInner(funCall.args.get(0));
+        int idReg = regIndex++;
+        _emit(OpCodes.MOV, idReg, idRegRaw);
+        _emit(OpCodes.CALL_NATIVE, NativeMethods.CANCEL_TIMER, idReg);
+        return idReg;
+    }
+
     // eventGen(e): 1-arg, value-producing (the event's current generation) -
     // same shape as exec(path)
     private Integer compileEventGen(FunCall funCall) {
@@ -954,6 +991,9 @@ public final class Bl0jv2_Compiler {
         if ((r = compileNewEvent(funCall)) != null) return r;
         if ((r = compileSignalEvent(funCall)) != null) return r;
         if ((r = compileRaiseInterruptOn(funCall)) != null) return r;
+        if ((r = compileSetTimer(funCall, "setTimer", 0)) != null) return r;
+        if ((r = compileSetTimer(funCall, "setInterval", 1)) != null) return r;
+        if ((r = compileCancelTimer(funCall)) != null) return r;
         if ((r = compileEventGen(funCall)) != null) return r;
         if ((r = compileWaitEvent(funCall)) != null) return r;
         if ((r = compileRaiseInterrupt(funCall)) != null) return r;

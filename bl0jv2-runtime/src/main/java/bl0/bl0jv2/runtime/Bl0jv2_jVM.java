@@ -5,6 +5,7 @@ import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 import bl0.bl0jv2.exceptions.Bl0j_VM_Panic;
 import bl0.bl0jv2.runtime.arithmetic.ArithmeticOperators;
 import bl0.bl0jv2.runtime.interrupt.InterruptController;
+import bl0.bl0jv2.runtime.interrupt.TimerService;
 import bl0.bl0jv2.runtime.memory.PortIO;
 import bl0.bl0jv2.runtime.memory.RawMemory;
 import bl0.bl0jv2.runtime.values.*;
@@ -60,6 +61,7 @@ public final class Bl0jv2_jVM {
     // is deliberately separate from rawMemory
     private final PortIO portIO = new PortIO();
     private final InterruptController interrupts = new InterruptController();
+    private final TimerService timers = new TimerService(interrupts);
 
     // one call stack / try-catch handler stack per core (Java thread) - see
     // CoreContext. Bound lazily as core 0 the first time an unregistered
@@ -188,6 +190,23 @@ public final class Bl0jv2_jVM {
                 throw new Bl0j_VM_Exception("raiseInterruptOn: no such core " + core + " (core count " + coreCount + ")");
             interrupts.raiseInterruptOn(core, vector);
             return null;
+        });
+        // setTimer/setInterval(ms, vector) -> timer id; cancelTimer(id) ->
+        // true if it was still pending. Packed [ms, vector, periodic] -
+        // see Bl0jv2_Compiler's compileSetTimer. The vector's handler runs
+        // through the ordinary cooperative interrupt poll when it fires.
+        nativeMethods.put(NativeMethods.SET_TIMER, (arg) -> {
+            if (!(arg instanceof Bl0jArray args) || args.length() != 3)
+                throw new Bl0j_VM_Exception("setTimer: expected (ms, vector, periodic)");
+            if (!(unbox(args.getRaw(0)) instanceof Integer ms) || !(unbox(args.getRaw(1)) instanceof Integer vector)
+                    || !(unbox(args.getRaw(2)) instanceof Integer periodic))
+                throw new Bl0j_VM_Exception("setTimer: ms and vector must be ints");
+            return timers.start(ms, vector, periodic != 0);
+        });
+        nativeMethods.put(NativeMethods.CANCEL_TIMER, (id) -> {
+            if (!(id instanceof Integer timerId))
+                throw new Bl0j_VM_Exception("cancelTimer: timer id must be an int");
+            return timers.cancel(timerId);
         });
         // masking is per-core state (see CoreContext.disableDepth's own
         // comment) - a counter, not a flag, so nested disable/enable pairs
@@ -562,6 +581,7 @@ public final class Bl0jv2_jVM {
         consts = new long[constants_length];
 
         rawMemory.reset();
+        timers.cancelAll();
         interrupts.reset();
         programStartNanos = System.nanoTime();
 

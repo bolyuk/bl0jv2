@@ -37,4 +37,8 @@ public final class NativeMethods {
     public static final byte EVENT_GEN = 0x15;
     // inter-processor interrupt: raises a vector on ONE specific core
     public static final byte RAISE_INTERRUPT_ON = 0x16;
+    // timers: raise a vector after a delay (SET_TIMER, packed [ms, vector,
+    // periodic]) and cancel one by id
+    public static final byte SET_TIMER = 0x17;
+    public static final byte CANCEL_TIMER = 0x18;
 }
