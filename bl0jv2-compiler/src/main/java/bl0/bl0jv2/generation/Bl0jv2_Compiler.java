@@ -1751,12 +1751,41 @@ public final class Bl0jv2_Compiler {
         }
 
         if (target instanceof IdentityNode idNode) {
+            // 'f = (n) -> ... f(n - 1) ...': the lambda's own body names the
+            // variable it is about to be assigned to. Left alone, 'f' would
+            // not exist in any enclosing scope yet while the lambda is
+            // compiled (the assignment only creates it AFTER the value), so
+            // it would not be captured and the call inside would hit a
+            // fresh nil local. Declaring the (cell-backed) variable first,
+            // as nil, makes the lambda capture the very cell the assignment
+            // below then fills in - the same cell, so by the time the
+            // lambda actually runs it sees itself.
+            if (valueNode instanceof LambdaNode lambda && lambdaMentionsFreely(lambda, idNode.name)) {
+                FunctionScope scope = currentScope();
+                if (!scope.identityMapping.containsKey(idNode.name) && scope.isCell(idNode.name)) {
+                    VarRef ref = resolve(idNode.name);
+                    int nilReg = regIndex++;
+                    _emit(OpCodes.LOAD_NIL, nilReg);
+                    _emit(OpCodes.MAKE_CELL, ref.reg());
+                    _emit(OpCodes.CELL_SET, ref.reg(), nilReg);
+                }
+            }
+
             int valueRegRaw = compileInner(valueNode);
             writeToIdentity(idNode.name, valueRegRaw);
             return valueRegRaw;
         }
 
         throw new Bl0j_CompilerException("cannot assign to " + target);
+    }
+
+    // does the lambda's body refer to 'name' without it being one of the
+    // lambda's own parameters (i.e. as a free variable)?
+    private boolean lambdaMentionsFreely(LambdaNode lambda, String name) {
+        FreeVarScan scan = new FreeVarScan();
+        scan.bound.addAll(lambda.params.args);
+        scanFree(lambda.body, scan);
+        return scan.free.contains(name);
     }
 
     // is 'name' bound anywhere in the enclosing scope chain (excluding
