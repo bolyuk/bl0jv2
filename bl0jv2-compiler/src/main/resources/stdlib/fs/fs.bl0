@@ -65,6 +65,7 @@ def class Fs {
     static field volumes;     // the file systems found on the drives: [unit, total, fatStart, fatSectors, dirStart, dirSectors, dataStart, dataSectors, hint]; [0] is the root (nil = gone)
     static field mounts;      // [[folder, index into volumes], ...]: other drives shown as folders of the root
     static field current;     // the volume the statics above describe
+    static field providers;   // [[folder, function], ...]: virtual folders whose files are made by code, not stored (see provide)
 
     // ---- sector buffer helpers ----
 
@@ -913,6 +914,10 @@ def class Fs {
 
     // the operation for user 'uid', group 'gid': what it creates is theirs
     static def runAs(uid, gid, op, a, b) {
+        if (len(Fs.providers) > 0 && isString(a) && op != 5 && op != 8 && op != 9 && op < 16) {
+            v = Fs.virtualOf(a);
+            if (v != nil) { return Fs.virtualOp(uid, gid, op, a, b, v); }
+        }
         lock(Fs.lock);
         Fs.curUid = uid;
         Fs.curGid = gid;
@@ -952,6 +957,64 @@ def class Fs {
         else if (op == 19) { result = Fs.doMounts(); }
         else if (op == 20) { result = Fs.doUnits(); }
         return result;
+    }
+
+    // ---- virtual folders: files made by code ----
+    //
+    // Fs.provide('dev', fn) (kernel only) makes 'dev' a folder whose contents fn makes up. fn(op, rel, arg, uid, gid)
+    // is asked, for a name 'dev/<rel>' and on behalf of user uid, group gid:
+    //   2   read                     -> the text, or nil if there is no such file
+    //   1   write, 10 append         arg = the text; nothing is returned. (A shell redirection first writes '' - a
+    //                                provider ignores that - and then appends what the command printed.)
+    //   3   remove                   -> true, or false if there is no such file
+    //   4   list                     -> [[name, size], ...] for the files whose rel name starts with rel (names are
+    //                                relative to the folder; folders appear as the beginning of names, or as 'x/')
+    //   13  stat                     -> [owner, group, mode, size, kind] (kind 0 file, 1 folder), or nil
+    // It may throw ('fs: ...') to refuse. It runs outside Fs.lock: it may wait for something, and it must not
+    // call Fs itself for other folders' sake while holding anything it needs back.
+
+    static def provide(folder, fn) {
+        if (!isPrivileged()) { throw('fs: only the kernel makes a virtual folder'); }
+        push(Fs.providers, [folder, fn]);
+    }
+
+    // [function, name inside the folder, folder] for a name in a virtual folder, nil otherwise
+    static def virtualOf(name) {
+        i = 0;
+        while (i < len(Fs.providers)) {
+            point = Fs.providers[i][0];
+            if (name == point || name == point + '/') { return [Fs.providers[i][1], '', point]; }
+            if (strFind(name, point + '/', 0) == 0) { return [Fs.providers[i][1], strSub(name, len(point) + 1, len(name)), point]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    static def virtualOp(uid, gid, op, name, b, v) {
+        fn = v[0];
+        rel = v[1];
+        if (op == 2) { return fn(2, rel, nil, uid, gid); }
+        if (op == 11) {
+            text = fn(2, rel, nil, uid, gid);
+            if (text == nil) { return nil; }
+            return Utf8.encode(text);
+        }
+        if (op == 1 || op == 10) { fn(op, rel, b, uid, gid); return nil; }
+        if (op == 12) { fn(10, rel, Utf8.decode(b), uid, gid); return nil; }
+        if (op == 3) { return fn(3, rel, nil, uid, gid); }
+        if (op == 13) { return fn(13, rel, nil, uid, gid); }
+        if (op == 6) {
+            st = fn(13, rel, nil, uid, gid);
+            if (st == nil || st[4] == 1) { return -1; }
+            return st[3];
+        }
+        if (op == 4) {
+            names = Fs.withPoint(fn(4, rel, nil, uid, gid), v[2]);
+            if (rel == '') { push(names, [v[2] + '/', 0]); }
+            Fs.sortEntries(names);
+            return names;
+        }
+        throw('fs: ' + name + ' is virtual: it has a fixed owner and mode');
     }
 
     // ---- other drives, mounted as folders ----
@@ -994,7 +1057,7 @@ def class Fs {
     }
 
     static def routed(op, a, b) {
-        if (len(Fs.mounts) == 0 || op >= 16 || op == 8 || op == 9) { return Fs.dispatch(op, a, b); }
+        if ((len(Fs.mounts) == 0 && len(Fs.providers) == 0) || op >= 16 || op == 8 || op == 9) { return Fs.dispatch(op, a, b); }
         if (op == 5) { return Fs.routedRename(a, b); }
         if (a == nil) { return Fs.dispatch(op, a, b); }
         if (op == 4) { return Fs.routedList(a); }
@@ -1035,6 +1098,19 @@ def class Fs {
             return names;
         }
         result = Fs.dispatch(4, prefix, nil);
+        // virtual folders below the prefix (a prefix inside one never gets here: runAs answers it)
+        i = 0;
+        while (i < len(Fs.providers)) {
+            point = Fs.providers[i][0];
+            if (strFind(point + '/', prefix, 0) == 0) {
+                fn = Fs.providers[i][1];
+                inside = Fs.withPoint(fn(4, '', nil, Fs.curUid, Fs.curGid), point);
+                push(result, [point + '/', 0]);
+                j = 0;
+                while (j < len(inside)) { push(result, inside[j]); j += 1; }
+            }
+            i += 1;
+        }
         i = 0;
         while (i < len(Fs.mounts)) {
             point = Fs.mounts[i][0];
@@ -1050,6 +1126,7 @@ def class Fs {
     }
 
     static def routedRename(from, to) {
+        if (Fs.virtualOf(from) != nil || Fs.virtualOf(to) != nil) { throw('fs: a virtual file cannot be renamed'); }
         ra = Fs.resolve(from, 5);
         rb = Fs.resolve(to, 5);
         i = 0;
@@ -1213,6 +1290,7 @@ Fs.mounted = false;
 Fs.lock = newMutex();
 Fs.volumes = [];
 Fs.mounts = [];
+Fs.providers = [];
 Fs.current = 0;
 Fs.curUid = 0;
 Fs.curGid = 0;
