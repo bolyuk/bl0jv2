@@ -1,0 +1,193 @@
+// aeon-os: who may do what to which file. This is the kernel's side of the file-system gate (see Fs.run in
+// stdlib/fs/fs.bl0): a program in user mode never touches the disk, it asks the kernel, and the kernel asks
+// Perm.check() whether the caller's user and group may do that, then does it on the caller's behalf.
+//
+// A file or folder has an owner, a group and nine permission bits, rwx for the owner, the group and
+// everyone else (Fs.stat). Of the three classes the first that matches the caller applies - the owner's
+// bits if the caller owns it, else the group's if the caller is in its group, else the others'. User 0 (root)
+// is always allowed. The rules, by what is asked:
+//   read a file                       r on it
+//   write or append to a file         w on it; creating one needs w on the folder it goes in
+//   remove, rename                    w on the folder(s) involved (not on the file itself)
+//   list a folder                     r on it
+//   look at a name at all             x on every folder above it
+//   chmod                             the owner (or root)       chown, format, mount      root only
+// A folder that has no entry of its own (it exists because a file is below it) counts as root's, 0755.
+// The shared host folder (host/) has no owners and is open to everyone.
+//
+// What this protects, and what it does not: the check is made in the kernel, on the path every file operation
+// of a user-mode program takes. The virtual machine has no memory protection between programs, though, so a
+// program that goes out of its way to overwrite the kernel's variables (a Ctx's user id, say) is not stopped;
+// on real hardware those would live in memory only the kernel can map.
+
+import '../../stdlib/fs/fs.bl0';
+
+// the numbers of the system calls the kernel offers for identity and files (the shell registers them)
+def class Sys {
+    static field fsGate;       // every file operation of a program in user mode
+    static field login;        // [name, password, firstLogin] -> [uid, gid, home, name] or an error text
+    static field logout;       // back to who the shell was before su
+    static field who;          // [uid, gid, home, name] of the caller
+    static field setPassword;  // [user, old, new] -> '' or why not
+}
+// (vectors 1-9 are the console, keyboard, NIC, host NIC, disk, exec, host folder and spawn)
+Sys.fsGate = 12;
+Sys.login = 13;
+Sys.logout = 14;
+Sys.who = 15;
+Sys.setPassword = 16;
+
+def class Perm {
+    // a name without a trailing '/', which a folder's own entry has
+    static def plain(name) {
+        if (len(name) > 0 && strSub(name, len(name) - 1, len(name)) == '/') { return strSub(name, 0, len(name) - 1); }
+        return name;
+    }
+
+    // the folder 'name' is in ('' for the root)
+    static def parent(name) {
+        i = len(name) - 1;
+        while (i >= 0) {
+            if (strSub(name, i, i + 1) == '/') { return strSub(name, 0, i); }
+            i -= 1;
+        }
+        return '';
+    }
+
+    // true when user 'uid' of group 'gid' has all of 'want' (4 read, 2 write, 1 search/execute) on
+    // something whose Fs.stat is 'st'
+    static def allows(uid, gid, st, want) {
+        if (uid == 0) { return true; }
+        shift = 0;
+        if (uid == st[0]) { shift = 6; }
+        else if (gid == st[1]) { shift = 3; }
+        return (((st[2] >> shift) & 7) & want) == want;
+    }
+
+    static def deny(what, name) {
+        throw('fs: permission denied' + (name == '' && what != 'create' && what != 'remove' ? '' : ': /' + name) + (what == '' ? '' : ' (' + what + ')'));
+    }
+
+    // every folder above 'name' must be searchable
+    static def traverse(uid, gid, name) {
+        dir = Perm.parent(name);
+        while (dir != '') {
+            st = Fs.stat(dir);
+            if (st != nil && !Perm.allows(uid, gid, st, 1)) { Perm.deny('search', dir); }
+            dir = Perm.parent(dir);
+        }
+    }
+
+    // 'name' (which must exist, else nothing is asked of it) allows 'want'
+    static def need(uid, gid, name, want, what) {
+        st = Fs.stat(name);
+        if (st != nil && !Perm.allows(uid, gid, st, want)) { Perm.deny(what, name); }
+    }
+
+    // the folder 'name' goes into must exist for the caller to change
+    static def needFolder(uid, gid, name, want, what) {
+        folder = Perm.parent(name);
+        st = Fs.stat(folder);
+        if (st == nil) { Perm.deny(what, folder); }
+        if (!Perm.allows(uid, gid, st, want)) { Perm.deny(what, folder); }
+    }
+
+    // throws unless user 'uid' / group 'gid' may do operation 'op' (the numbers of Fs.run) on a and b
+    static def check(uid, gid, op, a, b) {
+        if (uid == 0) { return nil; }
+        if (op == 8 || op == 9) { Perm.deny('only root', ''); }
+        if (op == 7) { return nil; }
+        if (op == 15) { Perm.deny('only root may change an owner', a); }
+        name = Perm.plain(a);
+        if (op == 4) {
+            // a listing: the prefix names a folder ('docs/') or begins a name inside one ('docs/rep')
+            folder = len(a) > 0 && strSub(a, len(a) - 1, len(a)) == '/' ? name : Perm.parent(name);
+            if (folder != '') {
+                Perm.traverse(uid, gid, folder);
+                Perm.need(uid, gid, folder, 4, 'read');
+            }
+            return nil;
+        }
+        if (name == '') { return nil; }
+        Perm.traverse(uid, gid, name);
+        if (op == 6 || op == 13) { return nil; }
+        if (op == 2 || op == 11) { Perm.need(uid, gid, name, 4, 'read'); return nil; }
+        if (op == 14) {
+            st = Fs.stat(name);
+            if (st != nil && st[0] != uid) { Perm.deny('only the owner may change the mode', name); }
+            return nil;
+        }
+        if (op == 1 || op == 10 || op == 12) {
+            st = Fs.stat(name);
+            if (st != nil) { Perm.need(uid, gid, name, 2, 'write'); }
+            else { Perm.needFolder(uid, gid, name, 3, 'create'); }
+            return nil;
+        }
+        if (op == 3) {
+            if (Fs.stat(name) != nil) { Perm.needFolder(uid, gid, name, 3, 'remove'); }
+            return nil;
+        }
+        if (op == 5) {
+            Perm.needFolder(uid, gid, name, 3, 'remove');
+            to = Perm.plain(b);
+            Perm.traverse(uid, gid, to);
+            Perm.needFolder(uid, gid, to, 3, 'create');
+            return nil;
+        }
+    }
+
+    // 'rwxr-xr--' for permission bits 0-511
+    static def modeText(bits) {
+        out = '';
+        shift = 6;
+        while (shift >= 0) {
+            b = (bits >> shift) & 7;
+            out = out + ((b & 4) != 0 ? 'r' : '-') + ((b & 2) != 0 ? 'w' : '-') + ((b & 1) != 0 ? 'x' : '-');
+            shift -= 3;
+        }
+        return out;
+    }
+
+    // the new permission bits for 'spec' applied to 'bits': an octal number ('644'), or symbolic
+    // ('u+x', 'go-w', 'a=r', 'ug+rw'); nil when it makes no sense
+    static def applyMode(bits, spec) {
+        if (len(spec) > 0 && strFind('01234567', strSub(spec, 0, 1), 0) >= 0) {
+            n = 0;
+            i = 0;
+            while (i < len(spec)) {
+                d = strFind('01234567', strSub(spec, i, i + 1), 0);
+                if (d < 0) { return nil; }
+                n = n * 8 + d;
+                i += 1;
+            }
+            return n > 511 ? nil : n;
+        }
+        who = 0;
+        i = 0;
+        while (i < len(spec) && strFind('ugoa', strSub(spec, i, i + 1), 0) >= 0) {
+            c = strSub(spec, i, i + 1);
+            if (c == 'u' || c == 'a') { who = who | 0x1C0; }
+            if (c == 'g' || c == 'a') { who = who | 0x38; }
+            if (c == 'o' || c == 'a') { who = who | 0x7; }
+            i += 1;
+        }
+        if (who == 0) { who = 0x1FF; }
+        if (i >= len(spec)) { return nil; }
+        op = strSub(spec, i, i + 1);
+        if (op != '+' && op != '-' && op != '=') { return nil; }
+        i += 1;
+        what = 0;
+        while (i < len(spec)) {
+            c = strSub(spec, i, i + 1);
+            if (c == 'r') { what = what | 0x124; }
+            else if (c == 'w') { what = what | 0x92; }
+            else if (c == 'x') { what = what | 0x49; }
+            else { return nil; }
+            i += 1;
+        }
+        what = what & who;
+        if (op == '+') { return bits | what; }
+        if (op == '-') { return bits & ~what; }
+        return (bits & ~who) | what;
+    }
+}

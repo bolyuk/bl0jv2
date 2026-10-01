@@ -1,0 +1,25 @@
+// aeon-os program: change who may read, write and use a file or folder; chmod <mode> <path>...
+// The mode is octal ('644' = rw-r--r--) or symbolic: who (u g o a) then + - = then r w x, e.g. 'u+x', 'go-w', 'a=r'.
+// Only the owner (or root) may. Loaded from the virtual disk by the shell (bin/chmod.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/perm.bl0';
+
+def main(words) {
+    if (len(words) < 3) { sayErr('usage: chmod <mode> <path>...'); return nil; }
+    i = 2;
+    while (i < len(words)) {
+        name = inCwd(words[i]);
+        st = Fs.stat(name);
+        if (st == nil) {
+            sayErr(words[i] + ': no such file or folder');
+        } else {
+            bits = Perm.applyMode(st[2], words[1]);
+            if (bits == nil) { sayErr(words[1] + ': not a mode (try 644, u+x, go-w)'); return nil; }
+            Fs.chmod(name, bits);
+        }
+        i += 1;
+    }
+}
+
+programMain(main);

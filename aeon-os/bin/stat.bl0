@@ -1,19 +1,24 @@
-// aeon-os program: size and kind of a file or folder
+// aeon-os program: size, kind, owner and mode of a file or folder
 // Loaded from the virtual disk by the shell (bin/stat.bl0c); see lib/userland.bl0.
 
 import '../lib/userland.bl0';
+import '../lib/perm.bl0';
+import '../lib/users.bl0';
 
 def main(words) {
     if (len(words) != 2) { sayErr('usage: stat <path>'); return nil; }
     name = inCwd(words[1]);
-    size = Fs.size(name);
-    if (size >= 0) {
-        say(Fmt.format('{}: file, {} bytes, {} sectors', [name, size, (size + 511) >> 9]));
-    } else if (Dirs.isDir(name)) {
-        say(Fmt.format('{}: folder, {} entries', [name == '' ? '/' : name, len(Dirs.list(name))]));
+    st = Fs.stat(name);
+    if (st == nil) { sayErr(words[1] + ': no such file or folder'); return nil; }
+    owner = Users.nameOf(st[0]) + ' (' + st[0] + '), group ' + st[1];
+    mode = Perm.modeText(st[2]) + ' (' + ((st[2] >> 6) & 7) + ((st[2] >> 3) & 7) + (st[2] & 7) + ')';
+    if (st[4] == 0) {
+        say(Fmt.format('{}: file, {} bytes, {} sectors', [name, st[3], (st[3] + 511) >> 9]));
     } else {
-        sayErr(words[1] + ': no such file or folder');
+        say(Fmt.format('{}: folder, {} entries', [name == '' ? '/' : name, len(Dirs.list(name))]));
     }
+    say('owner ' + owner);
+    say('mode  ' + mode);
 }
 
 programMain(main);

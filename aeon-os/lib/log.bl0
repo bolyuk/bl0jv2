@@ -12,8 +12,22 @@ def class Log {
     static field path;
     static field maxBytes;
     static field dropped;
+    static field vector;      // the system call user-mode callers use
 
+    // a program in user mode asks the kernel (the log is only writable by it); the kernel writes it
     static def write(message) {
+        if (isPrivileged()) {
+            Log.writeDirect(message);
+            return nil;
+        }
+        try {
+            syscall(Log.vector, message);
+        } catch (e) {
+            Log.dropped += 1;
+        }
+    }
+
+    static def writeDirect(message) {
         if (!Fs.mounted) {
             Log.dropped += 1;
             return nil;
@@ -32,3 +46,4 @@ def class Log {
 Log.path = 'var/log/aeon.log';
 Log.maxBytes = 16384;
 Log.dropped = 0;
+Log.vector = 17;

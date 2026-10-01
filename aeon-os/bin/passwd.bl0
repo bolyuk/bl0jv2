@@ -1,0 +1,28 @@
+// aeon-os program: set a password; passwd [user]
+// Without a name it is your own, and asks for the old one first. Root may set anyone's. The password is
+// typed without being shown. Loaded from the virtual disk by the shell (bin/passwd.bl0c).
+
+import '../lib/userland.bl0';
+import '../lib/perm.bl0';
+import '../lib/lineedit.bl0';
+
+def main(words) {
+    if (len(words) > 2) { sayErr('usage: passwd [user]'); return nil; }
+    me = syscall(Sys.who, nil);
+    target = len(words) == 2 ? words[1] : me[3];
+    old = '';
+    if (me[0] != 0) {
+        old = LineEditor.readSecret('Current password: ');
+        if (old == nil) { return nil; }
+    }
+    first = LineEditor.readSecret('New password: ');
+    if (first == nil) { return nil; }
+    second = LineEditor.readSecret('Retype new password: ');
+    if (second == nil) { return nil; }
+    if (first != second) { sayErr('passwd: the passwords do not match'); return nil; }
+    problem = syscall(Sys.setPassword, [target, old, first]);
+    if (problem != '') { sayErr('passwd: ' + problem); return nil; }
+    say('password changed for ' + target);
+}
+
+programMain(main);

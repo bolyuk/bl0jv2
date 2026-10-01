@@ -147,6 +147,23 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
   on the line before it is split, so a value is parsed like typed text. `sh file [args]` runs the lines of a
   text file as commands (empty lines and `#` comments skipped); `$0`, `$1`... are the file's name and the
   arguments while it runs.
+* **Users and permissions** (`lib/perm.bl0`, `lib/users.bl0`, the file-system gate in `stdlib/fs/fs.bl0`):
+  - Every file and folder has an owner, a group and nine permission bits (`ls -l`, `stat`; `chmod 644 f`, `chmod u+x f`,
+    `chown alice f` - only the owner may chmod, only root chown). The bits sit in the 8 spare bytes of the 64-byte
+    directory entry; entries from before count as root-owned 0644 files and 0755 folders. A new file belongs to whoever
+    makes it, with mode 0666/0777 less the umask 022.
+  - A program in user mode never touches the disk: `Fs.run` sends it through a system call, and the kernel checks
+    the caller's user against the file (`Perm.check`: read needs `r`, writing `w`, creating or removing needs `w` on the
+    folder, every folder above must be searchable, root may do anything) before doing it for them. The shell itself is
+    such a program. What it does not stop: the VM has no memory protection between programs, so one that overwrites the
+    kernel's own variables is not caught; on hardware those live where only the kernel can reach.
+  - `etc/passwd` (`name:uid:gid:home`) and `etc/shadow` (`name:salt:hash`, mode 0600, SHA-256 applied 200 times to
+    salt+password). `useradd name` (root) makes the user, a locked password and `home/name` (0700); `passwd [user]` sets one
+    (the old one is asked for unless you are root); `userdel`. `id`, `whoami`, `su [user]` (root needs no password, anybody
+    else does), and `exit` goes back to who you were before su.
+  - On a fresh disk the shell starts as root without asking. Once root has a password it asks `login:` and starts the
+    user in their home folder. The prompt shows the user's name when it is not root. History, `tmp/` for pipes and the
+    system log are per-user, world-writable and kernel-written respectively.
 * **Aliases, PATH, history**:
   - `alias name='text'` makes `name` stand for a simple command (`alias` lists them, `unalias name` removes one,
     `which name` says what a word is). Only the first word of a command is replaced; an alias naming another

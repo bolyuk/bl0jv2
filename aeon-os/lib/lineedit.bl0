@@ -283,6 +283,23 @@ def class LineEditor {
         LineEditor.redrawAll();
     }
 
+    // one line typed without being shown (a password); nil on Ctrl-C or Ctrl-D
+    static def readSecret(prompt) {
+        consoleWrite(prompt);
+        secret = '';
+        while (true) {
+            key = Keys.read(250);
+            LineEditor.flushAsync();
+            if (key == nil) { continue; }
+            name = key.name;
+            if (name == nil) { secret = secret + key.text; }
+            else if (name == 'ENTER') { consoleWrite('\n'); return secret; }
+            else if (name == 'BACKSPACE') { if (len(secret) > 0) { secret = strSub(secret, 0, len(secret) - 1); } }
+            else if (name == 'CTRL-U') { secret = ''; }
+            else if (name == 'CTRL-C' || name == 'CTRL-D') { consoleWrite('\n'); return nil; }
+        }
+    }
+
     static def read(prompt) {
         consoleSetEditing(true);
         try {

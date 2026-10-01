@@ -41,6 +41,9 @@ def class Ctx {
     field size;
     field pid;
     field background;     // no terminal: reading standard input gives nothing
+    field uid;            // who the job runs for (see lib/perm.bl0); the kernel sets these
+    field gid;
+    field stack;          // the identities su has switched away from, newest last
 
     def init() {
         this.words = [];
@@ -53,6 +56,9 @@ def class Ctx {
         this.size = 0;
         this.pid = 0;
         this.background = false;
+        this.uid = 0;
+        this.gid = 0;
+        this.stack = [];
     }
 
     // the context of the core running this code
@@ -97,7 +103,8 @@ def class Ctx {
         try {
             this.flush();
         } catch (e) {
-            // the file could not be written: the job is over anyway
+            // the file could not be written (no permission, no space): say so, the job is over anyway
+            sayErr(str(e));
         }
         if (this.pipeOut != nil) { this.pipeOut.closeWrite(); }
         if (this.pipeIn != nil) { this.pipeIn.closeRead(); }
@@ -119,6 +126,20 @@ def tokens(text) {
 // everything from word 'from' on, joined with single spaces
 def restOf(words, from) {
     return Arr.join(Arr.slice(words, from, len(words)), ' ');
+}
+
+// a non-negative whole number written in decimal (up to nine digits), or nil
+def unsignedNumber(text) {
+    n = 0;
+    i = 0;
+    if (len(text) == 0 || len(text) > 9) { return nil; }
+    while (i < len(text)) {
+        c = int(text[i]);
+        if (c < 48 || c > 57) { return nil; }
+        n = n * 10 + (c - 48);
+        i += 1;
+    }
+    return n;
 }
 
 def portNumber(text) {
