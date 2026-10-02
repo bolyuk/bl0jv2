@@ -67,7 +67,7 @@ class CmdlineTest {
     private static String expand(String line) throws Exception {
         String escaped = line.replace("\\", "\\\\").replace("'", "\\'");
         return AeonSession.runSnippet("import 'lib/cmdline.bl0'; " +
-                "try { print Cmdline.expand('" + escaped + "', (n) -> n == 'a' ? 'one' : (n == 'b' ? 'two words' : nil)); } " +
+                "try { print Cmdline.expand('" + escaped + "', (n) -> n == 'a' ? 'one' : (n == 'b' ? 'two words' : (n == 'n' ? '7' : nil)), (c) -> '<' + c + '>'); } " +
                 "catch (e) { print 'ERR ' + str(e); }");
     }
 
@@ -80,5 +80,15 @@ class CmdlineTest {
         assertEquals("echo \\$a", expand("echo \\$a"));                  // a backslash keeps it literal
         assertEquals("echo  and $", expand("echo $nosuch and $"));       // unknown is empty; a lone $ stays
         assertEquals("ERR syntax error: unterminated ${", expand("echo ${a"));
+    }
+
+    @Test
+    void commandsAndSumsAreSubstituted() throws Exception {
+        assertEquals("x<ls -l>y", expand("x$(ls -l)y"));
+        assertEquals("<echo (a) b>", expand("$(echo (a) b)"));
+        assertEquals("3 14 7 1", expand("$((1+2)) $(( ($n + 1) * 2 - 2 )) $((n)) $((n > 6 && 2 < 3))"));
+        assertEquals("$(not closed", expand("'$(not closed'").replace("'", ""));
+        assertEquals("ERR arithmetic: division by zero", expand("$((1/0))"));
+        assertEquals("ERR syntax error: unterminated $(", expand("$(ls"));
     }
 }

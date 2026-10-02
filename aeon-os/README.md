@@ -243,6 +243,26 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
 Limits: one terminal cell per character (no double-width or combining marks); there is no
 preemption (see Several programs at once), and a background job cannot read the terminal.
 
+## The shell as a language
+
+A line is commands joined by `;`, `&&` and `||`. Every command ends with a status in `$?`: 0 when it went well, 1 when it
+reported an error (the way Plan 9's rc takes an error message as failure), so no program has to say so by a number.
+`$#` and `$*` are the number and the list of a script's arguments (`$1`...`$9`; `shift` moves them).
+
+```
+if [ -f notes.txt ]; then wc notes.txt; else echo none; fi
+for f in *.txt; do echo $f; done
+i=0; while [ $i -lt 3 ]; do echo round $i; i=$((i + 1)); done
+today=$(date)
+```
+
+`if`/`elif`/`else`/`fi`, `while`/`do`/`done` and `for x in ...; do ... done` work in a script (`sh file [arguments]`) and on
+one typed line; `break`, `continue` and `exit [n]` (which in a script ends only the script), and Ctrl-C stops a loop.
+`test` (or `[ ... ]`) knows `-e -f -d -z -n`, `= !=` and `-eq -ne -lt -le -gt -ge`, and `!`. `*` and `?` in a name stand for
+the names that fit (`*.txt`, `w/???.log`; quoted, they are text; nothing fitting leaves the word). `$(command)` is what the
+command prints, `$((1 + 2))` a whole-number sum. `read [-p text] name` takes a variable from the keyboard.
+What is not there: functions, `case`, here-documents, redirecting a whole loop.
+
 ## Devices, processes and the network are files
 
 Three folders are made by the kernel, not stored on the disk (`Fs.provide`, see `stdlib/fs/fs.bl0`): a file in them is

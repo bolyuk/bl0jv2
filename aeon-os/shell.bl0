@@ -48,6 +48,7 @@ import 'lib/userland.bl0';
 import 'lib/lineedit.bl0';
 import 'lib/cmdline.bl0';
 import 'lib/script.bl0';
+import 'lib/glob.bl0';
 import 'lib/proc.bl0';
 import 'lib/perm.bl0';
 import 'lib/users.bl0';
@@ -95,7 +96,8 @@ Log.write('shell: started');
 // --- built-in commands ---
 def cmdHelp() {
     say('built in: help, clear, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
-    say('          test (or [ ]), true, false, shift, break, continue; a && b, a || b, a; b ($? is the status);');
+    say('          test (or [ ]), true, false, shift, break, continue, read [-p text] name; a && b, a || b, a; b ($? is the status);');
+    say('          $(command)  $((1 + 2))  patterns in names: *.txt  ???.log  (quote them to keep them as they are)');
     say('          if .. then .. elif .. else .. fi, while .. do .. done, for x in .. do .. done (in a script or on one line)');
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
@@ -238,6 +240,7 @@ def class ShellState {
     static field signal;       // '' or what a script is doing: 'break' 'continue' 'exit' (see execNodes)
     static field exitCode;
     static field loops;        // loops being run
+    static field capture;      // the file the output of a $( ) goes to while one is run, or nil
     static field home;         // the folder of whoever is logged in (their history lives there)
     static field userName;
 }
@@ -251,6 +254,7 @@ ShellState.status = 0;
 ShellState.signal = '';
 ShellState.exitCode = 0;
 ShellState.loops = 0;
+ShellState.capture = nil;
 ShellState.home = 'root';
 ShellState.userName = 'root';
 
@@ -561,6 +565,7 @@ def runStage(words) {
     if (cmd == 'test' || cmd == '[') { guarded(cmdTest, words); return nil; }
     if (cmd == 'true') { return nil; }
     if (cmd == 'false') { Ctx.me().failed = true; return nil; }
+    if (cmd == 'read') { guarded(cmdRead, words); return nil; }
     if (cmd == 'shift') { guarded(cmdShift, words); return nil; }
     if (cmd == 'break' || cmd == 'continue') { cmdLoopSignal(cmd); return nil; }
     if (cmd == 'su') { cmdSu(words); return nil; }
@@ -789,9 +794,23 @@ def runSimple(line) {
 }
 
 def runOne(line) {
+    single = Cmdline.singleAssignment(line);
+    if (single != nil) {
+        // the value is one word whatever it expands to: the words of a $( ) result are joined back
+        try {
+            tokens = Cmdline.tokenize(Cmdline.expand(single[1], varGet, captureOutput));
+            words = [];
+            i = 0;
+            while (i < len(tokens)) { push(words, tokens[i][1]); i += 1; }
+            varSet(single[0], strJoin(words, ' '));
+        } catch (e) {
+            sayErr(str(e));
+        }
+        return nil;
+    }
     stages = [];
     try {
-        stages = Cmdline.parse(Cmdline.expand(line, varGet));
+        stages = Cmdline.parse(Cmdline.expand(line, varGet, captureOutput));
     } catch (e) {
         sayErr(str(e));
         return nil;
@@ -806,7 +825,15 @@ def runOne(line) {
         return nil;
     }
     if (len(stages) > 0) {
+        if (ShellState.capture != nil && !stages[len(stages) - 1].background) {
+            last = stages[len(stages) - 1];
+            if (last.outFile == nil) {
+                last.outFile = ShellState.capture;
+                last.append = true;
+            }
+        }
         expandAliases(stages);
+        expandGlobs(stages);
         try {
             runPipeline(stages);
         } catch (e) {
@@ -896,6 +923,7 @@ def expandAliases(stages) {
             if (text == nil) { break; }
             push(seen, stages[i].words[0]);
             parsed = Cmdline.parse(text);
+            stages[i].globs = Arr.concat(parsed[0].globs, Arr.slice(stages[i].globs, 1, len(stages[i].globs)));
             stages[i].words = Arr.concat(parsed[0].words, Arr.slice(stages[i].words, 1, len(stages[i].words)));
         }
         i += 1;
@@ -1062,6 +1090,30 @@ def cmdSh(words) {
 }
 
 
+// what a command prints, for $( ): run with its output going to a file, which is read and removed. The text loses
+// its trailing line breaks, and the ones inside become spaces, as sh does with the words of an unquoted result.
+def captureOutput(text) {
+    if (!fsReady()) { return ''; }
+    ShellState.pipeSeq += 1;
+    path = 'tmp/sub' + ShellState.pipeSeq;
+    saved = ShellState.capture;
+    ShellState.capture = '/' + path;      // absolute: it is looked up from wherever the shell is
+    Fs.write(path, '');
+    try {
+        runCommand(text);
+    } catch (e) {
+        ShellState.capture = saved;
+        Fs.remove(path);
+        throw(e);
+    }
+    ShellState.capture = saved;
+    out = Fs.read(path);
+    Fs.remove(path);
+    if (out == nil) { return ''; }
+    while (len(out) > 0 && strSub(out, len(out) - 1, len(out)) == strChar(10)) { out = strSub(out, 0, len(out) - 1); }
+    return strJoin(Split.split(out, strChar(10)), ' ');
+}
+
 // the lines of a script (or one typed line with an if, while or for): read, then run
 def runScript(lines) {
     nodes = nil;
@@ -1144,17 +1196,54 @@ def execNodes(nodes) {
     }
 }
 
-// the words a text stands for: variables replaced, quotes taken off
+// the words a text stands for: variables replaced, quotes taken off, patterns replaced by the names that fit
 def expandWords(text) {
-    tokens = Cmdline.tokenize(Cmdline.expand(text, varGet));
-    out = [];
+    tokens = Cmdline.tokenize(Cmdline.expand(text, varGet, captureOutput));
+    words = [];
+    globs = [];
     i = 0;
     while (i < len(tokens)) {
         if (tokens[i][0]) { throw('syntax error: ' + tokens[i][1] + ' cannot be in a list of words'); }
-        push(out, tokens[i][1]);
+        push(words, tokens[i][1]);
+        push(globs, tokens[i][2]);
+        i += 1;
+    }
+    return globWords(words, globs, 0);
+}
+
+// 'words' with every one that holds a pattern (flagged in 'globs', from index 'from' on) replaced by the names it
+// matches; no name matching leaves it
+def globWords(words, globs, from) {
+    out = [];
+    i = 0;
+    while (i < len(words)) {
+        found = [];
+        if (i >= from && globs[i] && Fs.mounted) {
+            parts = Glob.split(words[i]);
+            folder = parts[0] == '' ? '.' : parts[0];
+            names = [];
+            try {
+                entries = Dirs.list(here(folder));
+                j = 0;
+                while (j < len(entries)) { push(names, entries[j][0]); j += 1; }
+            } catch (e) {
+                names = [];
+            }
+            found = Glob.expand(words[i], names);
+        }
+        if (len(found) == 0) { push(out, words[i]); } else { out = Arr.concat(out, found); }
         i += 1;
     }
     return out;
+}
+
+// patterns in the words of every stage (the command name itself is left alone)
+def expandGlobs(stages) {
+    i = 0;
+    while (i < len(stages)) {
+        stages[i].words = globWords(stages[i].words, stages[i].globs, 1);
+        i += 1;
+    }
 }
 
 // exit [n]: in a script it ends the script; at the prompt it leaves the shell (or the user's session)
@@ -1173,6 +1262,17 @@ def cmdExitWords(words) {
 def cmdLoopSignal(name) {
     if (ShellState.loops == 0) { sayErr(name + ': not in a loop'); return nil; }
     ShellState.signal = name;
+}
+
+// read [-p prompt] <name>: a line typed at the terminal becomes the variable (status 1 when none came: Ctrl-D)
+def cmdRead(words) {
+    prompt = '';
+    i = 1;
+    if (i < len(words) && words[i] == '-p' && i + 1 < len(words)) { prompt = words[i + 1]; i += 2; }
+    if (i != len(words) - 1) { sayErr('usage: read [-p prompt] <name>'); return nil; }
+    line = LineEditor.read(prompt);
+    if (line == nil) { Ctx.me().failed = true; line = ''; }
+    varSet(words[i], line);
 }
 
 // shift: $2 becomes $1, $3 becomes $2, ...
@@ -1288,7 +1388,7 @@ def histSave(line) {
 }
 
 def shellBuiltins() {
-    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec', 'sh', 'set', 'unset', 'alias', 'unalias', 'which', 'history', 'su', 'id', 'test', '[', 'true', 'false', 'shift', 'break', 'continue'];
+    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec', 'sh', 'set', 'unset', 'alias', 'unalias', 'which', 'history', 'su', 'id', 'test', '[', 'true', 'false', 'shift', 'break', 'continue', 'read'];
 }
 
 // Tab: what could replace the word under the cursor. The first word is a command

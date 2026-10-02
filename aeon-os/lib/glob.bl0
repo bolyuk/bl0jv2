@@ -1,0 +1,66 @@
+// aeon-os: file name patterns. * stands for any run of characters (none too), ? for exactly one. A pattern is
+// matched against one name: Glob.match('*.txt', 'a.txt'). Glob.expand(pattern, list) says what a word with a
+// pattern stands for in a folder listing: the matching names (cut at the last / of the pattern, which has to be
+// plain text), in order; a name that begins with a dot is matched only by a pattern that begins with one too.
+// Nothing matching leaves the word as it is, so 'echo *.zzz' prints *.zzz, as sh does.
+
+import 'userland.bl0';
+
+def class Glob {
+    static def match(pattern, name) {
+        return Glob.at(pattern, 0, name, 0);
+    }
+
+    static def at(p, pi, s, si) {
+        while (pi < len(p)) {
+            c = strSub(p, pi, pi + 1);
+            if (c == '*') {
+                k = si;
+                while (k <= len(s)) {
+                    if (Glob.at(p, pi + 1, s, k)) { return true; }
+                    k += 1;
+                }
+                return false;
+            }
+            if (si >= len(s)) { return false; }
+            if (c != '?' && c != strSub(s, si, si + 1)) { return false; }
+            pi += 1;
+            si += 1;
+        }
+        return si == len(s);
+    }
+
+    // the folder part of a pattern (with its closing /) and the name part
+    static def split(pattern) {
+        cut = -1;
+        i = 0;
+        while (i < len(pattern)) {
+            if (strSub(pattern, i, i + 1) == '/') { cut = i; }
+            i += 1;
+        }
+        return [strSub(pattern, 0, cut + 1), strSub(pattern, cut + 1, len(pattern))];
+    }
+
+    // the names of 'names' that fit the name part, each with the folder part in front, sorted
+    static def expand(pattern, names) {
+        parts = Glob.split(pattern);
+        dot = strSub(parts[1], 0, 1) == '.';
+        found = [];
+        i = 0;
+        while (i < len(names)) {
+            n = names[i];
+            if ((dot || strSub(n, 0, 1) != '.') && Glob.match(parts[1], n)) { push(found, parts[0] + n); }
+            i += 1;
+        }
+        // an insertion sort: a listing is short
+        i = 1;
+        while (i < len(found)) {
+            v = found[i];
+            j = i - 1;
+            while (j >= 0 && found[j] > v) { found[j + 1] = found[j]; j -= 1; }
+            found[j + 1] = v;
+            i += 1;
+        }
+        return found;
+    }
+}

@@ -88,14 +88,60 @@ class ShellScriptTest {
     @Test
     void ctrlCStopsALoop(@TempDir Path dir) throws Exception {
         var s = AeonSession.shellOnOsDisk(dir);
-        command(s, "while true; do sleep 1; done", "$");      // the echo of the line
+        command(s, "while true; do sleep 1; done", "while");      // the echo of the line
         Thread.sleep(500);
         s.type("\u0003");
         command(s, "echo back", "back");
         assertTrue(s.output().contains("^C"), s.output());
-        command(s, "while true; do echo x > /dev/null; done", "$");
+        command(s, "while true; do echo x > /dev/null; done", "while");
         Thread.sleep(500);
         s.type("\u0003");
         command(s, "echo back2", "back2");
+    }
+
+    @Test
+    void patternsStandForTheNamesThatFit(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir);
+        command(s, "mkdir w", "$");
+        command(s, "cd w", "$");
+        command(s, "echo a > one.txt; echo b > two.txt; echo c > three.log; echo d > .hidden.txt", "$");
+        command(s, "echo *.txt", "one.txt two.txt");
+        command(s, "echo t*", "three.log two.txt");
+        command(s, "echo ???.txt", "one.txt two.txt");
+        command(s, "echo *.zzz", "*.zzz");                              // nothing fits: the word stays
+        command(s, "echo '*.txt'", "*.txt");                            // quoted: no pattern
+        command(s, "echo .h*", ".hidden.txt");
+        command(s, "cd ..", "$");
+        command(s, "echo w/*.log", "w/three.log");
+        command(s, "cd w", "$");
+        command(s, "cat *.txt", "b");
+        command(s, "for f in *.txt; do echo file $f; done", "file two.txt");
+        command(s, "rm *.txt; ls", "three.log");
+    }
+
+    @Test
+    void outputAndSumsGoIntoTheLine(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir);
+        command(s, "echo today is $(echo fine)", "today is fine");
+        command(s, "x=$(echo a; echo b)", "$");
+        command(s, "echo [$x]", "[a b]");
+        command(s, "echo $(echo $(echo nested))", "nested");
+        command(s, "echo one two three > w.txt", "$");
+        command(s, "echo words: $(cat w.txt | wc)", "1 lines, 3 words");
+        command(s, "n=5; echo $((n * 2 + 1))", "11");
+        command(s, "i=0; while [ $i -lt 3 ]; do echo round $i; i=$((i + 1)); done", "round 2");
+        command(s, "echo $((7 / 0))", "division by zero");
+        command(s, "echo $(nosuchcommand)", "command not found");
+        command(s, "ls tmp", "$");
+        assertTrue(!s.output().contains(" sub"), s.output());                 // nothing is left behind
+    }
+
+    @Test
+    void readTakesAVariableFromTheKeyboard(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir);
+        s.type("read -p 'name? ' who\r");
+        Thread.sleep(200);
+        s.type("Ada\r");
+        command(s, "echo hello $who", "hello Ada");
     }
 }
