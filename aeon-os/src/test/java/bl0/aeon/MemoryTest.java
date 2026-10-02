@@ -76,4 +76,40 @@ class MemoryTest {
         command(s, "kill 3", "$");
         command(s, "kill 4", "$");
     }
+
+    private static int heapUsed(AeonSession s) throws Exception {
+        int before = s.output().length();
+        s.type("cat proc/meminfo\r");
+        long deadline = System.currentTimeMillis() + 20_000;
+        java.util.regex.Matcher m = null;
+        while (System.currentTimeMillis() < deadline) {
+            m = java.util.regex.Pattern.compile("heap_used: (\\d+)").matcher(s.output().substring(before));
+            if (m.find()) return Integer.parseInt(m.group(1));
+            Thread.sleep(20);
+        }
+        throw new AssertionError("no heap_used in:\n" + s.output().substring(before));
+    }
+
+    @Test
+    void whatEndedProcessesLeaveBehindIsCollected(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir, 2);
+        command(s, "seq 1 20000 > /tmp/big.txt", "$");
+        command(s, "sort /tmp/big.txt | tail -n 1", "9999");              // one run, to warm everything up
+        int baseline = heapUsed(s);
+        for (int i = 0; i < 6; i++) command(s, "sort /tmp/big.txt | tail -n 1", "9999");
+        int after = heapUsed(s);
+        // without a collector each run would leave about 2 MB behind
+        assertTrue(after - baseline < 1_500_000, "the heap grew from " + baseline + " to " + after);
+    }
+
+    @Test
+    void gcFreesWhatNothingReachesAndOnlyRootMayAskForIt(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir, 2);
+        command(s, "gc", "objects freed");
+        command(s, "useradd alice", "added alice");
+        command(s, "su alice", "$");
+        command(s, "gc", "only root may do that");
+        command(s, "exit", "$");
+        command(s, "free", "collections so far");
+    }
 }

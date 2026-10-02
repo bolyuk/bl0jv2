@@ -279,9 +279,11 @@ system. Sizes are estimates: a fixed cost per object plus what a string, array o
   nothing else is touched; a user over the process limit gets `too many processes`. Root is unlimited by default.
 - the VM's own limits: `--heap-kb N` caps the heap in all, `--raw-kb N` sizes the raw memory.
 
-What it does not do yet: the heap is not collected on a multi-core machine (and not on a single one either unless the host
-turns the collector on), so a process's account only goes down by `free()`, and what ended processes leave behind stays in the
-system account. Taking the object heap out of the VM and into raw memory under an allocator of the OS's own would fix that.
+The heap is collected: the machine stops every core for a moment (they park at the next poll or are asleep in a blocking call)
+and frees everything no core, no static field and no queued job reaches - after every few MB of allocation (the OS sets that:
+`Mem.startCollector`), right after a process that held much, and on request (`gc`, root only). So a process's account falls when
+it lets go of something, what an ended process left behind is freed, and the limits mean what is held, not what was ever made.
+`gc` says how much a collection freed. What the system account holds is real state (the shell, the libraries, caches).
 
 ## Devices, processes and the network are files
 

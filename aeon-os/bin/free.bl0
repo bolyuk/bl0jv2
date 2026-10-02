@@ -13,7 +13,7 @@ def main(words) {
     say(paintBold(7, Fmt.format('{:<12} {:>12} {:>12}', ['', 'in use', 'limit'])));
     say(Fmt.format('{:<12} {:>12} {:>12}', ['heap', Mem.size(h[1]), h[2] > 0 ? Mem.size(h[2]) : 'none']));
     say(Fmt.format('{:<12} {:>12} {:>12}', ['raw memory', Mem.size(r[0]), Mem.size(r[1])]));
-    say(h[0] + ' objects on the heap');
+    say(h[0] + ' objects on the heap, ' + memory(4, 4, 0) + ' collections so far');
     say('');
     say(paintBold(7, Fmt.format('{:<12} {:>12} {:>12}', ['charged to', 'held', 'limit'])));
     say(Fmt.format('{:<12} {:>12} {:>12}', ['system', Mem.size(Mem.used(0)), 'none']));

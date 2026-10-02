@@ -105,7 +105,7 @@ def cmdHelp() {
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo service logs shutdown mount umount mkfs df mkdir rmdir edit sleep yes ps top free limits kill wait wm sshd - and any program you put there, run by its name');
+    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo service logs shutdown mount umount mkfs df mkdir rmdir edit sleep yes ps top free gc limits kill wait wm sshd - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd sshd');
 }
@@ -334,6 +334,7 @@ def sysSpawn(request) {
 registerHandler(sysSpawn, Exec.spawnVector, 1);
 Clock.init();
 Random.init();
+Mem.startCollector(4194304);
 
 // ---- who may do what: the kernel's half (system calls, so they run privileged) ----
 
@@ -1364,6 +1365,15 @@ def testHolds(args) {
     throw('test: too many arguments');
 }
 
+
+// root asks for a collection: everything no process reaches any more is freed (what ended processes left, whatever core
+// made it); says how many bytes the heap holds afterwards
+def sysMemory(request) {
+    if (Ctx.me().uid != 0) { throw('memory: only root may do that'); }
+    if (request == 'collect') { Mem.collect(); }
+    return memory(4, 1, 0);
+}
+registerHandler(sysMemory, Sys.memory, 1);
 
 // --- commands for remote users (sshd) ---
 //

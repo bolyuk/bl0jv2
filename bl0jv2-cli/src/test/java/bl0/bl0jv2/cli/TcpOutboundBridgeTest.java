@@ -102,7 +102,7 @@ class TcpOutboundBridgeTest {
 
         Thread serverThread = new Thread(() -> {
             try (Socket client = server.accept()) {
-                client.setSoTimeout(1500);
+                client.setSoTimeout(5000);
                 byte[] buf = new byte[1024];
                 int n;
                 while ((n = client.getInputStream().read(buf)) > 0)

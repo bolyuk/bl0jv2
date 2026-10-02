@@ -8,6 +8,7 @@
 
 def class Mem {
     static field foreground;
+    static field collectAbove;     // a process that held more than this (bytes) when it ended is followed by a collection
 
     // the account of a process
     static def accountOf(pid) {
@@ -35,8 +36,24 @@ def class Mem {
     static def end(account) {
         memory(0, 0, 0);
         held = memory(1, account, 0);
+        // a process that made much garbage is cleaned up after at once, not left for the next collection
+        if (held > Mem.collectAbove) { memory(10, 0, 0); }
         memory(6, account, 0);
         return held;
+    }
+
+    // privileged, once: the garbage collector on, collecting after every 'bytes' of allocation (estimated). It stops every
+    // core for a moment (see the VM's collectGarbage), so this is a trade: a smaller number keeps the heap small and
+    // pauses more often.
+    static def startCollector(bytes) {
+        memory(9, bytes, 0);
+        memory(8, 1, 0);
+    }
+
+    // privileged: collect now - what a process that has ended left unreachable is freed, and every account's numbers
+    // fall with it
+    static def collect() {
+        memory(10, 0, 0);
     }
 
     // '1.5 MB', '312 KB', '800 B'
@@ -50,3 +67,4 @@ def class Mem {
     }
 }
 Mem.foreground = 4095;
+Mem.collectAbove = 262144;
