@@ -119,7 +119,7 @@ class CronTest {
 
     @Test
     void aUsersOwnTableRunsAsThemInTheirHome(@TempDir Path dir) throws Exception {
-        var s = AeonSession.shellOnOsDisk(dir, 4);
+        var s = AeonSession.shellOnOsDisk(dir, 6);
         command(s, "useradd alice", "added alice");
         command(s, "echo '* * * * * date' > /tmp/mine", "$");
         command(s, "echo '*/5 * * * * seq 3 | wc > counted.txt' >> /tmp/mine", "$");

@@ -1,0 +1,132 @@
+// aeon-os: whole-number arithmetic for the shell's $(( ... )). Arith.eval(text, lookup) -> a number.
+//   numbers, names (what lookup(name) says, a number; 0 when there is none), ( ), unary -, * / %, + -,
+//   < <= > >= (1 or 0), == != (1 or 0), && || (1 or 0), in that order of binding.
+// Division by zero and anything unreadable are thrown as "arithmetic: ...".
+
+import 'userland.bl0';
+
+def class Arith {
+    field text;
+    field pos;
+    field lookup;
+
+    def init(text, lookup) {
+        this.text = text;
+        this.pos = 0;
+        this.lookup = lookup;
+    }
+
+    static def eval(text, lookup) {
+        a = new Arith(text, lookup);
+        v = a.orExpr();
+        a.skip();
+        if (a.pos < len(text)) { throw('arithmetic: unexpected ' + strSub(text, a.pos, a.pos + 1)); }
+        return v;
+    }
+
+    def skip() {
+        while (this.pos < len(this.text) && strSub(this.text, this.pos, this.pos + 1) == ' ') { this.pos += 1; }
+    }
+
+    // true (and past it) when the text continues with 'op'
+    def take(op) {
+        this.skip();
+        if (this.pos + len(op) <= len(this.text) && strSub(this.text, this.pos, this.pos + len(op)) == op) {
+            this.pos += len(op);
+            return true;
+        }
+        return false;
+    }
+
+    def orExpr() {
+        v = this.andExpr();
+        while (this.take('||')) {
+            r = this.andExpr();
+            v = (v != 0 || r != 0) ? 1 : 0;
+        }
+        return v;
+    }
+
+    def andExpr() {
+        v = this.equality();
+        while (this.take('&&')) {
+            r = this.equality();
+            v = (v != 0 && r != 0) ? 1 : 0;
+        }
+        return v;
+    }
+
+    def equality() {
+        v = this.relation();
+        while (true) {
+            if (this.take('==')) { v = v == this.relation() ? 1 : 0; }
+            else if (this.take('!=')) { v = v != this.relation() ? 1 : 0; }
+            else { return v; }
+        }
+    }
+
+    def relation() {
+        v = this.sum();
+        while (true) {
+            if (this.take('<=')) { v = v <= this.sum() ? 1 : 0; }
+            else if (this.take('>=')) { v = v >= this.sum() ? 1 : 0; }
+            else if (this.take('<')) { v = v < this.sum() ? 1 : 0; }
+            else if (this.take('>')) { v = v > this.sum() ? 1 : 0; }
+            else { return v; }
+        }
+    }
+
+    def sum() {
+        v = this.product();
+        while (true) {
+            if (this.take('+')) { v = v + this.product(); }
+            else if (this.take('-')) { v = v - this.product(); }
+            else { return v; }
+        }
+    }
+
+    def product() {
+        v = this.unary();
+        while (true) {
+            if (this.take('*')) { v = v * this.unary(); }
+            else if (this.take('/')) {
+                d = this.unary();
+                if (d == 0) { throw('arithmetic: division by zero'); }
+                v = v / d;
+            } else if (this.take('%')) {
+                d = this.unary();
+                if (d == 0) { throw('arithmetic: division by zero'); }
+                v = v % d;
+            } else { return v; }
+        }
+    }
+
+    def unary() {
+        if (this.take('-')) { return 0 - this.unary(); }
+        if (this.take('+')) { return this.unary(); }
+        if (this.take('(')) {
+            v = this.orExpr();
+            if (!this.take(')')) { throw('arithmetic: ) is missing'); }
+            return v;
+        }
+        this.skip();
+        start = this.pos;
+        while (this.pos < len(this.text) && strFind('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_', strSub(this.text, this.pos, this.pos + 1), 0) >= 0) { this.pos += 1; }
+        word = strSub(this.text, start, this.pos);
+        if (word == '') { throw('arithmetic: a number is missing at ' + (start + 1)); }
+        if (strFind('0123456789', strSub(word, 0, 1), 0) >= 0) {
+            n = unsignedNumber(word);
+            if (n == nil) { throw('arithmetic: ' + word + ' is not a number'); }
+            return n;
+        }
+        find = this.lookup;
+        value = find == nil ? nil : find(word);
+        if (value == nil || value == '') { return 0; }
+        n = unsignedNumber(value);
+        if (n == nil) {
+            if (strSub(value, 0, 1) == '-') { n = unsignedNumber(strSub(value, 1, len(value))); if (n != nil) { return 0 - n; } }
+            throw('arithmetic: ' + word + ' is not a number');
+        }
+        return n;
+    }
+}
