@@ -95,7 +95,7 @@ public final class DiskImport {
         for (Item item : expand(specs)) {
             byte[] data = item.host().getFileName().toString().endsWith(".bl0")
                     ? compileSource(Files.readString(item.host()), item.host(), includeDirs, shared)
-                    : Files.readAllBytes(item.host());
+                    : unixText(Files.readAllBytes(item.host()));
             appendFile(src, item.name(), data);
         }
 
@@ -143,5 +143,20 @@ public final class DiskImport {
                 ? Bl0jv2_Linker.resolveImports(ast, file, includeDirs)
                 : Bl0jv2_Linker.resolveImports(ast, file, includeDirs, shared.keys());
         return new Bl0jv2_Compiler().compile(linked);
+    }
+
+    /**
+     * Text goes onto the disk with LF line ends, however the host checked it out (a Windows checkout may have CRLF): the
+     * guest splits lines at LF, so a CR would end up inside the last word of a line - in a file name, say. A file with a
+     * NUL byte is not text and is stored as it is.
+     */
+    static byte[] unixText(byte[] data) {
+        for (byte b : data) if (b == 0) return data;
+        var out = new java.io.ByteArrayOutputStream(data.length);
+        for (int i = 0; i < data.length; i++) {
+            if (data[i] == '\r' && i + 1 < data.length && data[i + 1] == '\n') continue;
+            out.write(data[i]);
+        }
+        return out.toByteArray();
     }
 }

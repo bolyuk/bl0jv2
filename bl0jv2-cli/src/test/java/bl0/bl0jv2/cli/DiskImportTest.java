@@ -14,6 +14,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class DiskImportTest {
 
     @Test
+    void textGetsLfLineEndsAndBinaryStaysAsItIs() {
+        assertEquals("a\nb\rc\n", new String(DiskImport.unixText("a\r\nb\rc\r\n".getBytes())));
+        byte[] binary = {1, 13, 10, 0, 13, 10};
+        assertEquals(java.util.Arrays.toString(binary), java.util.Arrays.toString(DiskImport.unixText(binary)));
+    }
+
+    @Test
     void putFilesAreReadableByTheGuestFilesystem(@TempDir Path dir) throws Exception {
         Path text = dir.resolve("note.txt");
         Files.writeString(text, "привет");
