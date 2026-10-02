@@ -1,0 +1,138 @@
+// Poly1305 (RFC 8439): a one-time authenticator. Poly1305.mac(key, data) -> the 16-byte tag, for a 32-byte key
+// (r, then s) and an array of bytes. The 130-bit numbers are 11 limbs of 12 bits - the VM's integers are 32 bits -
+// reduced mod 2^130 - 5 the way f25519.bl0 does mod 2^255 - 19. Not constant-time.
+
+def class Poly1305 {
+    static def limbs(bytes) {
+        out = [];
+        acc = 0;
+        bits = 0;
+        i = 0;
+        while (i < len(bytes)) {
+            acc = acc | (bytes[i] << bits);
+            bits += 8;
+            while (bits >= 12) {
+                push(out, acc & 4095);
+                acc = acc >>> 12;
+                bits -= 12;
+            }
+            i += 1;
+        }
+        if (bits > 0) { push(out, acc); }
+        while (len(out) < 11) { push(out, 0); }
+        return out;
+    }
+
+    // the first 11 limbs of t (each under 2^31) tight: limbs under 4096, the top under 1024 (bits 130 and up
+    // fold in as 5)
+    static def carry(t) {
+        while (true) {
+            i = 0;
+            while (i < 10) {
+                c = t[i] >>> 12;
+                t[i] = t[i] & 4095;
+                t[i + 1] = t[i + 1] + c;
+                i += 1;
+            }
+            c = t[10] >>> 10;
+            t[10] = t[10] & 1023;
+            if (c == 0) { return t; }
+            t[0] = t[0] + c * 5;
+        }
+    }
+
+    static def mul(a, b) {
+        t = [];
+        i = 0;
+        while (i < 22) { push(t, 0); i += 1; }
+        i = 0;
+        while (i < 11) {
+            j = 0;
+            while (j < 11) {
+                t[i + j] = t[i + j] + a[i] * b[j];
+                j += 1;
+            }
+            i += 1;
+        }
+        i = 0;
+        while (i < 21) {
+            c = t[i] >>> 12;
+            t[i] = t[i] & 4095;
+            t[i + 1] = t[i + 1] + c;
+            i += 1;
+        }
+        // limb 11 weighs 2^132 = 4 * 2^130 = 20
+        i = 11;
+        while (i < 22) {
+            t[i - 11] = t[i - 11] + t[i] * 20;
+            i += 1;
+        }
+        return Poly1305.carry(t);
+    }
+
+    static def mac(key, data) {
+        rb = [];
+        i = 0;
+        while (i < 16) { push(rb, key[i]); i += 1; }
+        rb[3] = rb[3] & 15; rb[7] = rb[7] & 15; rb[11] = rb[11] & 15; rb[15] = rb[15] & 15;
+        rb[4] = rb[4] & 252; rb[8] = rb[8] & 252; rb[12] = rb[12] & 252;
+        r = Poly1305.limbs(rb);
+        h = [];
+        i = 0;
+        while (i < 11) { push(h, 0); i += 1; }
+        at = 0;
+        while (at < len(data)) {
+            block = [];
+            i = 0;
+            while (i < 16 && at + i < len(data)) { push(block, data[at + i]); i += 1; }
+            push(block, 1);
+            n = Poly1305.limbs(block);
+            sum = [];
+            i = 0;
+            while (i < 11) { push(sum, h[i] + n[i]); i += 1; }
+            h = Poly1305.mul(Poly1305.carry(sum), r);
+            at += 16;
+        }
+        // h mod 2^130 - 5: if h + 5 reaches 2^130 it is h - (2^130 - 5)
+        g = [];
+        i = 0;
+        while (i < 11) { push(g, h[i]); i += 1; }
+        g[0] = g[0] + 5;
+        i = 0;
+        while (i < 10) {
+            c = g[i] >>> 12;
+            g[i] = g[i] & 4095;
+            g[i + 1] = g[i + 1] + c;
+            i += 1;
+        }
+        if ((g[10] >>> 10) != 0) {
+            g[10] = g[10] & 1023;
+            h = g;
+        }
+        // (h + s) mod 2^128, as bytes
+        out = [];
+        acc = 0;
+        bits = 0;
+        i = 0;
+        while (i < 11) {
+            acc = acc | (h[i] << bits);
+            bits += 12;
+            while (bits >= 8) {
+                push(out, acc & 255);
+                acc = acc >>> 8;
+                bits -= 8;
+            }
+            i += 1;
+        }
+        tag = [];
+        carry = 0;
+        i = 0;
+        while (i < 16) {
+            v = out[i] + key[16 + i] + carry;
+            push(tag, v & 255);
+            carry = v >>> 8;
+            i += 1;
+        }
+        return tag;
+    }
+}

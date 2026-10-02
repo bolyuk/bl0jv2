@@ -1,0 +1,74 @@
+// ChaCha20 in the form OpenSSH uses: a 256-bit key, a 64-bit block counter and a 64-bit nonce (RFC 8439's layout
+// with a 32-bit counter and a 96-bit nonce whose first four bytes are zero is the same stream). Arrays of numbers
+// 0-255. ChaCha20.crypt(key, counter, nonce, data) -> data xor the stream that starts at block 'counter'.
+
+def class ChaCha20 {
+    static def rotl(x, n) {
+        return (x << n) | (x >>> (32 - n));
+    }
+
+    // the quarter round on the words of 'x' at a, b, c, d
+    static def quarter(x, a, b, c, d) {
+        x[a] = x[a] + x[b]; x[d] = ChaCha20.rotl(x[d] ^ x[a], 16);
+        x[c] = x[c] + x[d]; x[b] = ChaCha20.rotl(x[b] ^ x[c], 12);
+        x[a] = x[a] + x[b]; x[d] = ChaCha20.rotl(x[d] ^ x[a], 8);
+        x[c] = x[c] + x[d]; x[b] = ChaCha20.rotl(x[b] ^ x[c], 7);
+    }
+
+    static def word(bytes, at) {
+        return bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24);
+    }
+
+    // the 64 bytes of block number 'counter'
+    static def block(key, counter, nonce) {
+        s = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
+        i = 0;
+        while (i < 8) { push(s, ChaCha20.word(key, 4 * i)); i += 1; }
+        push(s, counter);
+        push(s, 0);
+        push(s, ChaCha20.word(nonce, 0));
+        push(s, ChaCha20.word(nonce, 4));
+        x = [];
+        i = 0;
+        while (i < 16) { push(x, s[i]); i += 1; }
+        round = 0;
+        while (round < 10) {
+            ChaCha20.quarter(x, 0, 4, 8, 12);
+            ChaCha20.quarter(x, 1, 5, 9, 13);
+            ChaCha20.quarter(x, 2, 6, 10, 14);
+            ChaCha20.quarter(x, 3, 7, 11, 15);
+            ChaCha20.quarter(x, 0, 5, 10, 15);
+            ChaCha20.quarter(x, 1, 6, 11, 12);
+            ChaCha20.quarter(x, 2, 7, 8, 13);
+            ChaCha20.quarter(x, 3, 4, 9, 14);
+            round += 1;
+        }
+        out = [];
+        i = 0;
+        while (i < 16) {
+            w = x[i] + s[i];
+            push(out, w & 255);
+            push(out, (w >>> 8) & 255);
+            push(out, (w >>> 16) & 255);
+            push(out, (w >>> 24) & 255);
+            i += 1;
+        }
+        return out;
+    }
+
+    static def crypt(key, counter, nonce, data) {
+        out = [];
+        at = 0;
+        while (at < len(data)) {
+            stream = ChaCha20.block(key, counter, nonce);
+            counter += 1;
+            i = 0;
+            while (i < 64 && at + i < len(data)) {
+                push(out, data[at + i] ^ stream[i]);
+                i += 1;
+            }
+            at += 64;
+        }
+        return out;
+    }
+}
