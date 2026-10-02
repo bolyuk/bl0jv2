@@ -139,7 +139,7 @@ class ShellUsersTest {
         var second = new AeonSession();
         second.start(AeonSession.compile("init.bl0"), 1, vm -> {
             try {
-                vm.attach_disk(new bl0.bl0jv2.cli.FileDisk(dir.resolve("d.img"), AeonImage.SECTORS));
+                vm.attach_disk(AeonImage.open(dir.resolve("d.img"), AeonImage.SECTORS));
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);
             }

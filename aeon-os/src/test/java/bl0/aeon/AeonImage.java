@@ -47,14 +47,34 @@ final class AeonImage {
         return template;
     }
 
+    private static final List<FileDisk> OPEN = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /** an image file opened for a test; DiskCleanup closes it when the test is over (Windows cannot delete an open file) */
+    static FileDisk open(Path image, int sectorsIfNew) throws IOException {
+        var disk = new FileDisk(image, sectorsIfNew);
+        OPEN.add(disk);
+        return disk;
+    }
+
+    /** closes every image the test opened */
+    static void closeAll() {
+        for (var disk : OPEN) {
+            try {
+                disk.close();
+            } catch (IOException ignored) {
+            }
+        }
+        OPEN.clear();
+    }
+
     /** a fresh copy of the OS disk at 'target' */
     static FileDisk os(Path target) throws IOException {
         Files.copy(template(), target, StandardCopyOption.REPLACE_EXISTING);
-        return new FileDisk(target, SECTORS);
+        return open(target, SECTORS);
     }
 
     /** a blank disk (no filesystem) */
     static FileDisk blank(Path target, int sectors) throws IOException {
-        return new FileDisk(target, sectors);
+        return open(target, sectors);
     }
 }

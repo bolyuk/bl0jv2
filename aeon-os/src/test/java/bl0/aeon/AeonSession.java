@@ -93,7 +93,7 @@ public final class AeonSession {
             vm.set_clock(s.clock::get);
             try {
                 if (share != null) vm.attach_share(new bl0.bl0jv2.cli.DirShare(share));
-                vm.attach_disk(fresh ? AeonImage.os(image) : new bl0.bl0jv2.cli.FileDisk(image, AeonImage.SECTORS));
+                vm.attach_disk(fresh ? AeonImage.os(image) : AeonImage.open(image, AeonImage.SECTORS));
                 for (var drive : drives) vm.attach_disk(drive);
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);

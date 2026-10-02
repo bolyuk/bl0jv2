@@ -25,7 +25,7 @@ class ShellMountTest {
     }
 
     private static AeonSession withDrive(Path dir) throws Exception {
-        return AeonSession.shellOn(dir.resolve("d.img"), true, null, 1, List.of(new FileDisk(dir.resolve("usb.img"), 256)));
+        return AeonSession.shellOn(dir.resolve("d.img"), true, null, 1, List.of(AeonImage.blank(dir.resolve("usb.img"), 256)));
     }
 
     @Test
@@ -85,7 +85,7 @@ class ShellMountTest {
         first.thread.join(10_000);
 
         var second = AeonSession.shellOn(dir.resolve("d.img"), false, null, 1,
-                List.of(new FileDisk(dir.resolve("usb.img"), 256)));
+                List.of(AeonImage.blank(dir.resolve("usb.img"), 256)));
         command(second, "cat mnt/usb/k.txt", "kept");
         command(second, "cat var/log/aeon.log", "fstab: 9 mnt/nowhere");
         command(second, "useradd bob", "added bob");
