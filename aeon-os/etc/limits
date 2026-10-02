@@ -1,0 +1,7 @@
+# what a user may use (see lib/limits.bl0 or: man limits)
+#   user   resource   value
+#   memory: KB of heap one process may hold; processes: how many may run at once; 0 = no limit
+*        memory      16384
+*        processes   4
+root     memory      0
+root     processes   0

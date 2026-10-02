@@ -1,0 +1,27 @@
+// aeon-os program: what a user may use; limits [user]
+// Memory (the heap one process may hold) and processes (how many may run at once), from etc/limits - see lib/limits.bl0.
+// Loaded from the virtual disk by the shell (bin/limits.bl0c).
+
+import '../lib/limits.bl0';
+import '../lib/proc.bl0';
+import '../lib/mem.bl0';
+import '../lib/perm.bl0';
+import '../lib/users.bl0';
+
+def main(words) {
+    if (len(words) > 2) { sayErr('usage: limits [user]'); return nil; }
+    uid = Ctx.me().uid;
+    name = Limits.nameOf(uid);
+    if (len(words) == 2) {
+        u = Users.find(words[1]);
+        if (u == nil) { sayErr(words[1] + ': no such user'); return nil; }
+        uid = u[1];
+        name = u[0];
+    }
+    l = Limits.of(uid);
+    say(name + ':');
+    say('  memory     ' + (l[0] > 0 ? Mem.size(l[0]) + ' for each process' : 'no limit'));
+    say('  processes  ' + (l[1] > 0 ? l[1] + ' at once (' + Proc.countOf(uid) + ' running now)' : 'no limit'));
+}
+
+programMain(main);

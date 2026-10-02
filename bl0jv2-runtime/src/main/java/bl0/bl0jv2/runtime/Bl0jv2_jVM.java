@@ -141,6 +141,7 @@ public final class Bl0jv2_jVM {
     private record DispatchedWork(Object callee, long argRaw) {}
 
     public Bl0jv2_jVM() {
+        heap.setAccounting(() -> currentContext().memoryAccount, () -> gcEnabled && coreCount == 1, () -> currentContext().privileged);
         nativeMethods.put(NativeMethods.PRINT, (d) -> {
             synchronized (ioLock) {
                 if (out != null) {
@@ -427,6 +428,46 @@ public final class Bl0jv2_jVM {
             byte[] fileBytes = new byte[size];
             rawMemory.readBytes(addr, fileBytes);
             return execBytes(fileBytes, "memory at " + addr, mode);
+        });
+
+        // memory(op, a, b): who holds how much of the heap. Accounts are numbers 0 - 4095; a core's allocations are
+        // charged to the account the kernel set for it, 0 (the system) at first.
+        //   0 set this core's account to a (privileged)      1 bytes held by account a      2 limit account a to b
+        //   bytes, 0 for none (privileged)                    3 the limit of account a
+        //   4 a statistic: a = 0 objects, 1 bytes in all, 2 limit of the whole heap, 3 slots made, 4 collections,
+        //     5 bytes of raw memory in use, 6 bytes of raw memory
+        //   5 limit the whole heap to a bytes (privileged)    6 account a's objects go to account 0 and its limit
+        //   ends (privileged: the process has ended)          7 recount sizes now
+        // Sizes are estimates (a fixed cost per object, plus what a string, array or instance holds).
+        nativeMethods.put(NativeMethods.MEMORY, (arg) -> {
+            Object[] a = nativeArgs(arg, 3, "memory(op, a, b)");
+            int op = requireInt(a[0], "memory"), x = requireInt(a[1], "memory");
+            long y = requireInt(a[2], "memory");
+            if (op == 0 || op == 2 || op == 5 || op == 6) requirePrivileged(currentContext(), "memory");
+            if (x < 0 || x >= Heap.ACCOUNTS) if (op != 4 && op != 5 && op != 7) throw new Bl0j_VM_Exception("memory: no such account " + x);
+            switch (op) {
+                case 0 -> { currentContext().memoryAccount = x; return 0; }
+                case 1 -> { return (int) Math.min(heap.usedBy(x), Integer.MAX_VALUE); }
+                case 2 -> { heap.setLimit(x, y); return 0; }
+                case 3 -> { return (int) Math.min(heap.limitOf(x), Integer.MAX_VALUE); }
+                case 4 -> {
+                    long v = switch (x) {
+                        case 0 -> heap.liveCount();
+                        case 1 -> heap.usedTotal();
+                        case 2 -> heap.totalLimit();
+                        case 3 -> heap.slotCapacity();
+                        case 4 -> collections;
+                        case 5 -> rawMemory.peek(0, 4) & 0xFFFFFFFFL;
+                        case 6 -> rawMemory.sizeBytes();
+                        default -> throw new Bl0j_VM_Exception("memory: no such statistic " + x);
+                    };
+                    return (int) Math.min(v, Integer.MAX_VALUE);
+                }
+                case 5 -> { heap.setTotalLimit(x); return 0; }
+                case 6 -> { heap.releaseAccount(x); return 0; }
+                case 7 -> { heap.recount(); return 0; }
+                default -> throw new Bl0j_VM_Exception("memory: no such operation " + op);
+            }
         });
     }
 
@@ -1105,6 +1146,11 @@ public final class Bl0jv2_jVM {
     /** number of automatic collections performed so far */
     public long gc_collections() {
         return collections;
+    }
+
+    /** the most bytes (estimated) the heap may hold in all; 0 for no limit. An allocation past it fails with 'out of memory'. */
+    public void set_heap_limit_bytes(long bytes) {
+        heap.setTotalLimit(bytes);
     }
 
     public void set_max_heap_entries(long maxHeapEntries){
@@ -2093,6 +2139,9 @@ public final class Bl0jv2_jVM {
 
         // how many invoke() calls (Java -> bl0jv2) are active on this core's Java stack
         int invokeDepth = 0;
+
+        // the account the heap objects this core makes are charged to (0 = the system); the kernel sets it
+        int memoryAccount = 0;
 
         CoreContext(int coreId) {
             this.coreId = coreId;

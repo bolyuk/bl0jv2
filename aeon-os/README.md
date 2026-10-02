@@ -263,6 +263,26 @@ the names that fit (`*.txt`, `w/???.log`; quoted, they are text; nothing fitting
 command prints, `$((1 + 2))` a whole-number sum. `read [-p text] name` takes a variable from the keyboard.
 What is not there: functions, `case`, here-documents, redirecting a whole loop.
 
+## Memory and limits
+
+The VM counts the heap per account and refuses an allocation that would take an account over its limit; the OS decides the rest
+(`lib/mem.bl0`, `lib/limits.bl0`). A process on a worker core is charged to an account of its own, a program run from the prompt
+to the foreground account, and the system (the shell, the libraries, what ended processes left behind) to account 0; the
+limits bind a program in user mode, never the kernel running on its behalf. When a process ends, what it held goes to the
+system. Sizes are estimates: a fixed cost per object plus what a string, array or instance holds.
+
+- `free` - the heap and the raw memory (program buffers, device rings), and what each running process holds.
+- `ps`, `top` - a memory column; `proc/N/status` and `proc/meminfo` - the same as files.
+- `limits [user]` - what a user may use. The numbers are in `etc/limits`, a line per user and resource (`*` is everybody; a
+  user's own line wins): `memory` is the KB of heap one process may hold, `processes` how many a user may have running at once
+  (background jobs and pipeline stages; 0 means no limit). A process over its memory limit fails with `out of memory` and
+  nothing else is touched; a user over the process limit gets `too many processes`. Root is unlimited by default.
+- the VM's own limits: `--heap-kb N` caps the heap in all, `--raw-kb N` sizes the raw memory.
+
+What it does not do yet: the heap is not collected on a multi-core machine (and not on a single one either unless the host
+turns the collector on), so a process's account only goes down by `free()`, and what ended processes leave behind stays in the
+system account. Taking the object heap out of the VM and into raw memory under an allocator of the OS's own would fix that.
+
 ## Devices, processes and the network are files
 
 Three folders are made by the kernel, not stored on the disk (`Fs.provide`, see `stdlib/fs/fs.bl0`): a file in them is

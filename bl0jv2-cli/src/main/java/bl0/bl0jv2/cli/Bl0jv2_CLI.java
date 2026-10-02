@@ -38,6 +38,8 @@ public class Bl0jv2_CLI {
     // it has to run before run_instructions() spawns the workers, earlier
     // than any bl0jv2 code gets to run at all), so it has to come from here
     private int cores = 1;
+    private long heapKb = 0;      // --heap-kb: the most the heap may hold (0: no limit)
+    private long rawKb = 0;       // --raw-kb: the size of the raw memory (0: the default, 1 MiB)
     // -1 = disabled. The real host UDP port to bind - see UdpBridge's own
     // doc for what this actually relays and the fake-IP addressing it uses
     private int bridgeUdpPort = -1;
@@ -91,6 +93,24 @@ public class Bl0jv2_CLI {
                         cores = Integer.parseInt(args[++i]);
                     } catch (NumberFormatException e) {
                         System.err.println("--cores value must be an integer: " + args[i]);
+                        System.exit(1);
+                    }
+                }
+                case "--heap-kb" -> {
+                    if (i + 1 >= args.length) { System.err.println("--heap-kb requires a number"); System.exit(1); }
+                    try {
+                        heapKb = Long.parseLong(args[++i]);
+                    } catch (NumberFormatException e) {
+                        System.err.println("--heap-kb value must be an integer: " + args[i]);
+                        System.exit(1);
+                    }
+                }
+                case "--raw-kb" -> {
+                    if (i + 1 >= args.length) { System.err.println("--raw-kb requires a number"); System.exit(1); }
+                    try {
+                        rawKb = Long.parseLong(args[++i]);
+                    } catch (NumberFormatException e) {
+                        System.err.println("--raw-kb value must be an integer: " + args[i]);
                         System.exit(1);
                     }
                 }
@@ -230,6 +250,9 @@ public class Bl0jv2_CLI {
         System.out.println("                  aeon-os/boot.bl0 and aeon-os/shell.bl0 both use);");
         System.out.println("                  only meaningful together with -e");
         System.out.println("  -n, --cores N   worker core count (core 0 + N-1 workers); default 1.");
+        System.out.println("      --heap-kb N  the most the heap may hold, in KiB (estimated); an allocation past it fails with");
+        System.out.println("                   'out of memory'. Default: no limit.");
+        System.out.println("      --raw-kb N   the size of the raw memory (kalloc, program buffers), in KiB; default 1024.");
         System.out.println("                  aeon-os/smp_boot.bl0 needs -n 4 to match its own");
         System.out.println("                  Kernel.numCores; only meaningful together with -e");
         System.out.println("  -b, --bridge-udp PORT  relay a real host UDP socket (bound to PORT)");
@@ -449,6 +472,8 @@ public class Bl0jv2_CLI {
                 // itself doesn't care about ordering, so either side of it is
                 // fine, this just keeps VM setup grouped together
                 vm.set_core_count(cores);
+                if (heapKb > 0) vm.set_heap_limit_bytes(heapKb * 1024);
+                if (rawKb > 0) vm.set_max_raw_bytes(rawKb * 1024);
                 vm.feed_compiled_file(ByteBuffer.wrap(bytes));
                 vm.set_uart_baud(uartBaud);
                 if (bridgeFsDir != null) {

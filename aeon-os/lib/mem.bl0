@@ -1,0 +1,52 @@
+// aeon-os: memory. The VM keeps count of the heap per account and refuses an allocation that takes an account over its
+// limit (memory(), see the runtime); everything else is decided here: which account a process is charged to, how much
+// it may hold, and what is shown. A process on a worker core is account (pid mod 4000) + 1, a program run from the
+// shell's prompt is account 4095, the system (the shell, the libraries, what ended processes left) is account 0.
+// Sizes are estimates: a fixed cost per object plus what a string, array or instance holds.
+//
+// The limits are in etc/limits (see lib/limits.bl0), one line per user and resource.
+
+def class Mem {
+    static field foreground;
+
+    // the account of a process
+    static def accountOf(pid) {
+        return (pid % 4000) + 1;
+    }
+
+    static def used(account) { return memory(1, account, 0); }
+
+    static def limitOf(account) { return memory(3, account, 0); }
+
+    // the whole heap: [objects, bytes, limit (0: none)]
+    static def heap() { return [memory(4, 0, 0), memory(4, 1, 0), memory(4, 2, 0)]; }
+
+    // the raw memory (program buffers, device rings): [bytes in use, bytes in all]
+    static def raw() { return [memory(4, 5, 0), memory(4, 6, 0)]; }
+
+    // privileged: from here on this core's allocations are charged to 'account', which may hold 'limit' bytes
+    // (0: any amount)
+    static def begin(account, limit) {
+        memory(2, account, limit);
+        memory(0, account, 0);
+    }
+
+    // privileged: the process has ended: its objects are the system's, its limit is gone. Says how much it held.
+    static def end(account) {
+        memory(0, 0, 0);
+        held = memory(1, account, 0);
+        memory(6, account, 0);
+        return held;
+    }
+
+    // '1.5 MB', '312 KB', '800 B'
+    static def size(bytes) {
+        if (bytes >= 1048576) {
+            tenths = (bytes * 10) / 1048576;
+            return (tenths / 10) + '.' + (tenths % 10) + ' MB';
+        }
+        if (bytes >= 1024) { return (bytes / 1024) + ' KB'; }
+        return bytes + ' B';
+    }
+}
+Mem.foreground = 4095;

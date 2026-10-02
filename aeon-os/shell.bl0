@@ -50,6 +50,8 @@ import 'lib/cmdline.bl0';
 import 'lib/script.bl0';
 import 'lib/glob.bl0';
 import 'lib/proc.bl0';
+import 'lib/mem.bl0';
+import 'lib/limits.bl0';
 import 'lib/perm.bl0';
 import 'lib/users.bl0';
 import 'lib/power.bl0';
@@ -103,7 +105,7 @@ def cmdHelp() {
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo service logs shutdown mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait wm sshd - and any program you put there, run by its name');
+    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo service logs shutdown mount umount mkfs df mkdir rmdir edit sleep yes ps top free limits kill wait wm sshd - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
     say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd sshd');
 }
@@ -308,12 +310,16 @@ Exec.spawnVector = 9;
 
 // the kernel half of running a program (a syscall handler, so privileged): '' or the error
 def sysExec(path) {
+    // what the program makes is charged to the foreground account, up to what the user may hold
+    Mem.begin(Mem.foreground, Limits.of(Ctx.me().uid)[0]);
+    result = '';
     try {
         loadAndRun(path, 0);
-        return '';
     } catch (e) {
-        return str(e);
+        result = str(e);
     }
+    Mem.end(Mem.foreground);
+    return result;
 }
 registerHandler(sysExec, Exec.vector, 1);
 
@@ -527,8 +533,7 @@ def runProgram(path, words, label) {
             sayErr('^C');
             if (ShellState.depth > 0 || ShellState.loops > 0) { ShellState.signal = 'exit'; ShellState.exitCode = 130; }
         } else {
-            say(label + ': ' + problem);
-            c.failed = true;
+            sayErr(label + ': ' + problem);
             Log.write('shell: ' + label + ' failed: ' + problem);
         }
     }

@@ -21,6 +21,7 @@
 
 import 'userland.bl0';
 import 'proc.bl0';
+import 'mem.bl0';
 import '../../stdlib/time/clock.bl0';
 import '../../stdlib/crypto/random.bl0';
 import '../../stdlib/str/split.bl0';
@@ -86,6 +87,13 @@ def class Devfs {
         return ['console', 'cpu', 'null', 'random', 'time', 'uptime', 'zero'];
     }
 
+    // proc/meminfo: the heap and the raw memory, in bytes
+    static def memText() {
+        h = Mem.heap();
+        r = Mem.raw();
+        return 'heap_objects: ' + h[0] + '\nheap_used: ' + h[1] + '\nheap_limit: ' + h[2] + '\nraw_used: ' + r[0] + '\nraw_total: ' + r[1] + '\nsystem_held: ' + Mem.used(0) + '\n';
+    }
+
     // the process with number n, or nil
     static def process(n) {
         pid = unsignedNumber(n);
@@ -96,12 +104,12 @@ def class Devfs {
     static def statusText(p) {
         end = p.state == 'running' ? ticks() : p.ended;
         return 'name: ' + p.name + '\nstate: ' + p.state + '\ncore: ' + p.core + '\nuser: ' + Users.nameOf(p.uid) + ' (' + p.uid + ')\nstarted: '
-            + p.started + 'ms\nran: ' + (end - p.started) + 'ms\n' + (p.message == '' ? '' : 'message: ' + p.message + '\n');
+            + p.started + 'ms\nran: ' + (end - p.started) + 'ms\nmemory: ' + (p.state == 'running' ? (p.system ? Mem.used(0) : Mem.used(p.account)) : p.memory) + ' bytes\n' + (p.message == '' ? '' : 'message: ' + p.message + '\n');
     }
 
     static def procStat(rel) {
         if (rel == '') { return Devfs.folder(); }
-        if (rel == 'uptime') { return Devfs.file(0x124, 0); }
+        if (rel == 'uptime' || rel == 'meminfo') { return Devfs.file(0x124, 0); }
         parts = Split.split(rel, '/');
         p = Devfs.process(parts[0]);
         if (p == nil) { return nil; }
@@ -113,7 +121,7 @@ def class Devfs {
     }
 
     static def procNames() {
-        out = [['uptime', 0]];
+        out = [['uptime', 0], ['meminfo', 0]];
         i = 0;
         while (i < len(Proc.table)) {
             pid = Proc.table[i].pid;
@@ -177,6 +185,7 @@ def procProvider(op, rel, arg, uid, gid) {
     parts = Split.split(rel, '/');
     if (op == 2) {
         if (rel == 'uptime') { return '' + ticks() + '\n'; }
+        if (rel == 'meminfo') { return Devfs.memText(); }
         if (len(parts) != 2) { return nil; }
         p = Devfs.process(parts[0]);
         if (p == nil) { return nil; }
