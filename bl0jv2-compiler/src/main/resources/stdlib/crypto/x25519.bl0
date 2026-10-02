@@ -1,0 +1,57 @@
+// X25519 (RFC 7748): the Diffie-Hellman function on Curve25519. X25519.scalarMult(k, u) takes a 32-byte secret and a
+// 32-byte point (arrays of numbers 0-255) and gives the 32 bytes of the shared point; X25519.publicKey(k) is the
+// same with the base point (9). Not constant-time (see f25519.bl0).
+
+import 'f25519.bl0';
+
+def class X25519 {
+    static def scalarMult(scalar, point) {
+        k = [];
+        i = 0;
+        while (i < 32) { push(k, scalar[i]); i += 1; }
+        k[0] = k[0] & 248;
+        k[31] = (k[31] & 127) | 64;
+
+        x1 = F25519.decode(point);
+        x2 = F25519.one();
+        z2 = F25519.zero();
+        x3 = F25519.copy(x1);
+        z3 = F25519.one();
+        swap = 0;
+        t = 254;
+        while (t >= 0) {
+            bit = (k[t >>> 3] >>> (t & 7)) & 1;
+            if ((swap ^ bit) == 1) {
+                tmp = x2; x2 = x3; x3 = tmp;
+                tmp = z2; z2 = z3; z3 = tmp;
+            }
+            swap = bit;
+            a = F25519.add(x2, z2);
+            aa = F25519.sq(a);
+            b = F25519.sub(x2, z2);
+            bb = F25519.sq(b);
+            e = F25519.sub(aa, bb);
+            c = F25519.add(x3, z3);
+            d = F25519.sub(x3, z3);
+            da = F25519.mul(d, a);
+            cb = F25519.mul(c, b);
+            x3 = F25519.sq(F25519.add(da, cb));
+            z3 = F25519.mul(x1, F25519.sq(F25519.sub(da, cb)));
+            x2 = F25519.mul(aa, bb);
+            z2 = F25519.mul(e, F25519.add(aa, F25519.mulSmall(e, 121665)));
+            t -= 1;
+        }
+        if (swap == 1) {
+            tmp = x2; x2 = x3; x3 = tmp;
+            tmp = z2; z2 = z3; z3 = tmp;
+        }
+        return F25519.encode(F25519.mul(x2, F25519.inv(z2)));
+    }
+
+    static def publicKey(scalar) {
+        base = [9];
+        i = 1;
+        while (i < 32) { push(base, 0); i += 1; }
+        return X25519.scalarMult(scalar, base);
+    }
+}

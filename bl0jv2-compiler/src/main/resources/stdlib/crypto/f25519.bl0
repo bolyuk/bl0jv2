@@ -1,0 +1,210 @@
+// Arithmetic modulo p = 2^255 - 19, for X25519 and Ed25519. The VM's integers are 32 bits (and wrap), so a number is
+// 22 limbs of 12 bits (an array of 22 numbers 0 - 4095, the first the lowest; the top limb holds 3 bits), and a
+// product of two limbs (24 bits), added 22 times, still fits. Every operation gives a "tight" result: limbs under
+// 4096, the top one under 8, the value under 2^255 - which is not always below p; encode() gives the one true value.
+// Not constant-time (a loop that branches on secrets), which a machine of this kind cannot promise anyway.
+
+def class F25519 {
+    static field sub4p;     // 4p spread so that every limb is above any tight limb: a + sub4p - b never goes negative
+
+    // 4p as limbs, each moved up by borrowing from the next
+    static def makeSub4p() {
+        p = [4077];
+        i = 1;
+        while (i < 21) { push(p, 4095); i += 1; }
+        push(p, 7);
+        d = [];
+        i = 0;
+        while (i < 22) { push(d, p[i] * 4); i += 1; }
+        i = 0;
+        while (i < 21) {
+            d[i] = d[i] + 16384;
+            d[i + 1] = d[i + 1] - 4;
+            i += 1;
+        }
+        return d;
+    }
+
+    static def zero() {
+        out = [];
+        i = 0;
+        while (i < 22) { push(out, 0); i += 1; }
+        return out;
+    }
+
+    static def one() {
+        out = F25519.zero();
+        out[0] = 1;
+        return out;
+    }
+
+    static def copy(a) {
+        out = [];
+        i = 0;
+        while (i < 22) { push(out, a[i]); i += 1; }
+        return out;
+    }
+
+    // brings the first 22 limbs of t (each under 2^31) to the tight form, in place
+    static def carry(t) {
+        while (true) {
+            i = 0;
+            while (i < 21) {
+                c = t[i] >>> 12;
+                t[i] = t[i] & 4095;
+                t[i + 1] = t[i + 1] + c;
+                i += 1;
+            }
+            c = t[21] >>> 3;                    // bits 255 and up: 2^255 is 19
+            t[21] = t[21] & 7;
+            if (c == 0) { return t; }
+            t[0] = t[0] + c * 19;
+        }
+    }
+
+    static def add(a, b) {
+        r = [];
+        i = 0;
+        while (i < 22) { push(r, a[i] + b[i]); i += 1; }
+        return F25519.carry(r);
+    }
+
+    static def sub(a, b) {
+        d = F25519.sub4p;
+        r = [];
+        i = 0;
+        while (i < 22) { push(r, a[i] + d[i] - b[i]); i += 1; }
+        return F25519.carry(r);
+    }
+
+    // a * c for a small number c (under 2^19)
+    static def mulSmall(a, c) {
+        r = [];
+        i = 0;
+        while (i < 22) { push(r, a[i] * c); i += 1; }
+        return F25519.carry(r);
+    }
+
+    static def mul(a, b) {
+        t = [];
+        i = 0;
+        while (i < 44) { push(t, 0); i += 1; }
+        i = 0;
+        while (i < 22) {
+            ai = a[i];
+            j = 0;
+            while (j < 22) {
+                t[i + j] = t[i + j] + ai * b[j];
+                j += 1;
+            }
+            i += 1;
+        }
+        // the 44 limbs to 12 bits each
+        i = 0;
+        while (i < 43) {
+            c = t[i] >>> 12;
+            t[i] = t[i] & 4095;
+            t[i + 1] = t[i + 1] + c;
+            i += 1;
+        }
+        // limb 22 and up weigh 2^264 and up, and 2^264 is 19 * 2^9 = 9728
+        i = 22;
+        while (i < 44) {
+            t[i - 22] = t[i - 22] + t[i] * 9728;
+            i += 1;
+        }
+        return F25519.carry(t);
+    }
+
+    static def sq(a) {
+        return F25519.mul(a, a);
+    }
+
+    // a^(p-2): the inverse
+    static def inv(a) {
+        c = F25519.copy(a);
+        i = 253;
+        while (i >= 0) {
+            c = F25519.sq(c);
+            if (i != 2 && i != 4) { c = F25519.mul(c, a); }
+            i -= 1;
+        }
+        return c;
+    }
+
+    // the 32 bytes (little-endian) of the value mod p
+    static def encode(a) {
+        u = F25519.copy(a);
+        v = F25519.copy(a);
+        v[0] = v[0] + 19;
+        i = 0;
+        while (i < 21) {
+            c = v[i] >>> 12;
+            v[i] = v[i] & 4095;
+            v[i + 1] = v[i + 1] + c;
+            i += 1;
+        }
+        if ((v[21] >>> 3) != 0) {                // value + 19 reached 2^255: the value was p or more
+            v[21] = v[21] & 7;
+            u = v;
+        }
+        out = [];
+        acc = 0;
+        bits = 0;
+        i = 0;
+        while (i < 22) {
+            acc = acc | (u[i] << bits);
+            bits += 12;
+            while (bits >= 8) {
+                push(out, acc & 255);
+                acc = acc >>> 8;
+                bits -= 8;
+            }
+            i += 1;
+        }
+        // 22 limbs of 12 bits are 264 bits for a 255-bit value: the bytes after the 32nd are zero
+        bytes = [];
+        i = 0;
+        while (i < 32) { push(bytes, out[i]); i += 1; }
+        return bytes;
+    }
+
+    // the number in 32 bytes (little-endian); the top bit (bit 255) is not part of it
+    static def decode(bytes) {
+        out = [];
+        acc = 0;
+        bits = 0;
+        i = 0;
+        while (i < 32) {
+            b = bytes[i];
+            if (i == 31) { b = b & 127; }
+            acc = acc | (b << bits);
+            bits += 8;
+            while (bits >= 12) {
+                push(out, acc & 4095);
+                acc = acc >>> 12;
+                bits -= 12;
+            }
+            i += 1;
+        }
+        push(out, acc);
+        return out;
+    }
+
+    // true when the value is 0 mod p
+    static def isZero(a) {
+        e = F25519.encode(a);
+        i = 0;
+        while (i < 32) {
+            if (e[i] != 0) { return false; }
+            i += 1;
+        }
+        return true;
+    }
+
+    // the low bit of the value mod p
+    static def isOdd(a) {
+        return (F25519.encode(a)[0] & 1) == 1;
+    }
+}
+F25519.sub4p = F25519.makeSub4p();
