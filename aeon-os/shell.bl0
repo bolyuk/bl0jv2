@@ -231,6 +231,7 @@ def class ShellState {
     static field vars;         // [[name, value], ...]: the shell's variables
     static field aliases;      // [[name, text], ...]
     static field depth;        // scripts running inside scripts
+    static field status;       // how the last command ended: 0 went well, anything else failed ($?)
     static field home;         // the folder of whoever is logged in (their history lives there)
     static field userName;
 }
@@ -240,6 +241,7 @@ ShellState.pipeSeq = 0;
 ShellState.vars = [['PATH', 'bin']];
 ShellState.aliases = [];
 ShellState.depth = 0;
+ShellState.status = 0;
 ShellState.home = 'root';
 ShellState.userName = 'root';
 
@@ -506,6 +508,7 @@ def runProgram(path, words, label) {
             sayErr('^C');
         } else {
             say(label + ': ' + problem);
+            c.failed = true;
             Log.write('shell: ' + label + ' failed: ' + problem);
         }
     }
@@ -601,6 +604,7 @@ def runSequential(stages) {
             break;
         }
         c.reset();
+        c.failed = false;
         c.inPath = inPath;
         c.outPath = outPath;
         guarded(runStage, stage.words);
@@ -690,6 +694,7 @@ def runConcurrent(stages, background) {
     stage = stages[n - 1];
     c = Ctx.me();
     c.reset();
+    c.failed = false;
     c.pipeIn = pipes[n - 2];
     if (stage.outFile != nil) {
         c.outPath = here(stage.outFile);
@@ -733,9 +738,34 @@ def runPipeline(stages) {
     Ctx.me().reset();
 }
 
+// a line: commands joined by ; && ||. Each sets the status ($?): 0 when it went well, 1 when it reported an error
+// (sayErr, an exception, a program that stopped with one) - the way Plan 9's rc takes an error message as failure.
 def runCommand(line) {
+    parts = Cmdline.splitList(line);
+    i = 0;
+    while (i < len(parts) && ShellState.running) {
+        op = parts[i][0];
+        if (op == ';' || (op == '&&' && ShellState.status == 0) || (op == '||' && ShellState.status != 0)) {
+            runSimple(Trim.trim(parts[i][1]));
+        }
+        i += 1;
+    }
+}
+
+def setStatus(n) {
+    ShellState.status = n;
+    varSet('?', '' + n);
+}
+
+def runSimple(line) {
     if (line == '') { return nil; }
     Log.write('shell: ' + line);
+    Ctx.me().failed = false;
+    runOne(line);
+    setStatus(Ctx.me().failed ? 1 : 0);
+}
+
+def runOne(line) {
     stages = [];
     try {
         stages = Cmdline.parse(Cmdline.expand(line, varGet));
