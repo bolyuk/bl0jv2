@@ -1,0 +1,48 @@
+// Base64 (RFC 4648, the standard alphabet with = padding) of an array of bytes.
+//   Base64.encode(bytes) -> text           Base64.decode(text) -> array of bytes, or nil when the text is not base64
+
+def class Base64 {
+    static field alphabet;
+
+    static def encode(bytes) {
+        a = Base64.alphabet;
+        out = [];
+        i = 0;
+        n = len(bytes);
+        while (i < n) {
+            b0 = bytes[i];
+            b1 = i + 1 < n ? bytes[i + 1] : 0;
+            b2 = i + 2 < n ? bytes[i + 2] : 0;
+            push(out, a[b0 >>> 2]);
+            push(out, a[((b0 & 3) << 4) | (b1 >>> 4)]);
+            push(out, i + 1 < n ? a[((b1 & 15) << 2) | (b2 >>> 6)] : '=');
+            push(out, i + 2 < n ? a[b2 & 63] : '=');
+            i += 3;
+        }
+        return strJoin(out, '');
+    }
+
+    static def decode(text) {
+        a = Base64.alphabet;
+        out = [];
+        acc = 0;
+        bits = 0;
+        i = 0;
+        while (i < len(text)) {
+            c = text[i];
+            if (c == '=') { break; }
+            v = strFind(a, c, 0);
+            if (v < 0) { return nil; }
+            acc = (acc << 6) | v;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                push(out, (acc >>> bits) & 255);
+                acc = acc & ((1 << bits) - 1);
+            }
+            i += 1;
+        }
+        return out;
+    }
+}
+Base64.alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
