@@ -5,8 +5,8 @@
 //
 //   dev/null       0666   reads as empty, swallows what is written
 //   dev/zero       0444   reads as 64 NUL characters
-//   dev/random     0444   reads as 32 hex digits from a hash of the clock, the uptime and a counter - unpredictable
-//                         enough for a demo, not for a key
+//   dev/random     0444   reads as 32 hex digits from the machine's random-number port (the host's SecureRandom in the
+//                         VM, a hardware generator on a board)
 //   dev/console    0222   what is written appears on the terminal (the way a program's own output would)
 //   dev/time       0444   the date and time, UTC          dev/uptime   milliseconds since the machine started
 //   dev/cpu        0444   the cores and what each runs
@@ -22,7 +22,7 @@
 import 'userland.bl0';
 import 'proc.bl0';
 import '../../stdlib/time/clock.bl0';
-import '../../stdlib/crypto/sha256.bl0';
+import '../../stdlib/crypto/random.bl0';
 import '../../stdlib/str/split.bl0';
 import '../../stdlib/str/trim.bl0';
 import 'users.bl0';
@@ -33,9 +33,17 @@ def class Devfs {
     static def file(mode, size) { return [0, 0, mode, size, 0]; }
     static def folder() { return [0, 0, 0x16D, 0, 1]; }          // 0555
 
+    // 32 hex digits from the machine's random-number port
     static def randomText() {
-        Devfs.counter += 1;
-        return strSub(Sha256.hex(ticks() + ':' + Clock.text(Clock.read()) + ':' + Devfs.counter + ':' + Devfs.counter * 7919), 0, 32);
+        digits = '0123456789abcdef';
+        bytes = Random.bytes(16);
+        out = '';
+        i = 0;
+        while (i < 16) {
+            out = out + digits[bytes[i] >>> 4] + digits[bytes[i] & 15];
+            i += 1;
+        }
+        return out;
     }
 
     static def cpuText() {

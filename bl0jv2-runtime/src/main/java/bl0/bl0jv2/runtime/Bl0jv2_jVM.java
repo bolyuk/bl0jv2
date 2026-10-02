@@ -9,6 +9,7 @@ import bl0.bl0jv2.runtime.interrupt.TimerService;
 import bl0.bl0jv2.runtime.device.BlockDevice;
 import bl0.bl0jv2.runtime.device.DisplayController;
 import bl0.bl0jv2.runtime.device.DiskController;
+import bl0.bl0jv2.runtime.device.RandomDevice;
 import bl0.bl0jv2.runtime.device.RealTimeClock;
 import bl0.bl0jv2.runtime.device.UartController;
 import bl0.bl0jv2.runtime.device.PortDevice;
@@ -73,7 +74,8 @@ public final class Bl0jv2_jVM {
     }, () -> this.interrupts.raiseInterruptOn(0, 2));   // the serial port's interrupt is taken by core 0, always: its handler is not written for two cores at once
     private final DisplayController display = new DisplayController(portIO, rawMemory);
     private final RealTimeClock clock = new RealTimeClock();
-    private final PortDevice[] devices = {disk, share, uart, display, clock};
+    private final RandomDevice random = new RandomDevice();
+    private final PortDevice[] devices = {disk, share, uart, display, clock, random};
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
 
@@ -1172,6 +1174,11 @@ public final class Bl0jv2_jVM {
     }
 
     /** what the real-time clock (ports 0x0F70-0x0F77) reads: milliseconds since 1970-01-01 UTC; the host's clock by default */
+    /** where the random-number port (0x0F78) gets its bits: the host's SecureRandom by default */
+    public void set_random(java.util.Random source) {
+        random.setSource(source);
+    }
+
     public void set_clock(java.util.function.LongSupplier epochMillis) {
         clock.setSource(epochMillis);
     }

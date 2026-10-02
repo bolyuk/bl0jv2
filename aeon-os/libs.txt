@@ -25,6 +25,7 @@ stdlib/net/icmp.bl0
 stdlib/net/dns.bl0
 stdlib/net/http.bl0
 stdlib/time/clock.bl0
+stdlib/crypto/random.bl0
 aeon-os/lib/log.bl0
 aeon-os/lib/loader.bl0
 aeon-os/lib/pipe.bl0
