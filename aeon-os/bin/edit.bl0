@@ -301,6 +301,7 @@ def edBlankScreen() {
 }
 
 def main(words) {
+    if (!toTerminal()) { sayErr('edit: needs a terminal (its output cannot go to a file, a pipe or an ssh session)'); return nil; }
     if (len(words) != 2) { sayErr('usage: edit <file>'); return nil; }
     Ed.path = inCwd(words[1]);
     Ed.columns = Console.columns > 20 ? Console.columns : 80;

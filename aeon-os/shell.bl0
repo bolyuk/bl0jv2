@@ -103,9 +103,9 @@ def cmdHelp() {
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
-    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo service logs shutdown mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait - and any program you put there, run by its name');
+    say('          hexdump sort uniq find tree more diff seq chmod chown chgrp passwd useradd userdel groupadd groupdel usermod groups crond crontab date echo service logs shutdown mount umount mkfs df mkdir rmdir edit sleep yes ps top kill wait wm sshd - and any program you put there, run by its name');
     say('the folder shared with --bridge-fs is the directory host/: ls host, cp host/a.txt a.txt, ...');
-    say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd');
+    say('network (programs): net netstat setip setdns ping resolve http tcp udp httpd sshd');
 }
 
 def cmdUptime() {
@@ -142,6 +142,7 @@ def adoptIdentity(me) {
 
 // su [user]: become that user (root by default); exit comes back
 def cmdSu(words) {
+    if (ShellState.remote) { sayErr('su: not available over ssh'); return nil; }
     if (len(words) > 2) { sayErr('usage: su [user]'); return nil; }
     target = len(words) == 2 ? words[1] : 'root';
     password = '';
@@ -241,6 +242,7 @@ def class ShellState {
     static field signal;       // '' or what a script is doing: 'break' 'continue' 'exit' (see execNodes)
     static field exitCode;
     static field loops;        // loops being run
+    static field remote;       // a command for a remote user is running (nothing may wait for the console's keyboard)
     static field capture;      // the file the output of a $( ) goes to while one is run, or nil
     static field home;         // the folder of whoever is logged in (their history lives there)
     static field userName;
@@ -256,6 +258,7 @@ ShellState.signal = '';
 ShellState.exitCode = 0;
 ShellState.loops = 0;
 ShellState.capture = nil;
+ShellState.remote = false;
 ShellState.home = 'root';
 ShellState.userName = 'root';
 
@@ -1095,6 +1098,13 @@ def cmdSh(words) {
 // what a command prints, for $( ): run with its output going to a file, which is read and removed. The text loses
 // its trailing line breaks, and the ones inside become spaces, as sh does with the words of an unquoted result.
 def captureOutput(text) {
+    out = captureRaw(text);
+    while (len(out) > 0 && strSub(out, len(out) - 1, len(out)) == strChar(10)) { out = strSub(out, 0, len(out) - 1); }
+    return strJoin(Split.split(out, strChar(10)), ' ');
+}
+
+// exactly what a command prints
+def captureRaw(text) {
     if (!fsReady()) { return ''; }
     ShellState.pipeSeq += 1;
     path = 'tmp/sub' + ShellState.pipeSeq;
@@ -1111,9 +1121,7 @@ def captureOutput(text) {
     ShellState.capture = saved;
     out = Fs.read(path);
     Fs.remove(path);
-    if (out == nil) { return ''; }
-    while (len(out) > 0 && strSub(out, len(out) - 1, len(out)) == strChar(10)) { out = strSub(out, 0, len(out) - 1); }
-    return strJoin(Split.split(out, strChar(10)), ' ');
+    return out == nil ? '' : out;
 }
 
 // the lines of a script (or one typed line with an if, while or for): read, then run
@@ -1268,6 +1276,7 @@ def cmdLoopSignal(name) {
 
 // read [-p prompt] <name>: a line typed at the terminal becomes the variable (status 1 when none came: Ctrl-D)
 def cmdRead(words) {
+    if (ShellState.remote) { sayErr('read: not available over ssh'); return nil; }
     prompt = '';
     i = 1;
     if (i < len(words) && words[i] == '-p' && i + 1 < len(words)) { prompt = words[i + 1]; i += 2; }
@@ -1348,6 +1357,118 @@ def testHolds(args) {
     }
     throw('test: too many arguments');
 }
+
+
+// --- commands for remote users (sshd) ---
+//
+// sshd, running as root on a worker core, hands lines over; the shell runs them as that user between two keys of its own
+// prompt (see LineEditor.idle), so a remote command and the console never run at the same time, and the shell's state is
+// not shared between cores. A line runs with the output - the errors too - going into text that goes back. 'exit' ends
+// only the line; read and su are refused (they would wait for the console's keyboard); a program that wants a terminal
+// (edit, top, wm) refuses when its output is not one.
+
+def class Remote {
+    static field lock;
+    static field queue;       // [id, user, line, cwd]
+    static field done;        // [id, [output, status, cwd]]
+    static field nextId;
+}
+Remote.lock = newMutex();
+Remote.queue = [];
+Remote.done = [];
+Remote.nextId = 1;
+
+// ['submit', user, line, cwd] -> a number; ['poll', number] -> nil while it waits, then [output, status, cwd]
+def sysRemote(request) {
+    if (Ctx.me().uid != 0) { throw('remote: only root hands commands over'); }
+    lock(Remote.lock);
+    result = nil;
+    if (request[0] == 'submit') {
+        id = Remote.nextId;
+        Remote.nextId += 1;
+        push(Remote.queue, [id, request[1], request[2], request[3]]);
+        result = id;
+    } else if (request[0] == 'poll') {
+        i = 0;
+        while (i < len(Remote.done)) {
+            if (Remote.done[i][0] == request[1]) {
+                result = Remote.done[i][1];
+                kept = [];
+                j = 0;
+                while (j < len(Remote.done)) { if (j != i) { push(kept, Remote.done[j]); } j += 1; }
+                Remote.done = kept;
+                break;
+            }
+            i += 1;
+        }
+    }
+    unlock(Remote.lock);
+    return result;
+}
+registerHandler(sysRemote, Sys.remote, 1);
+
+// the shell's idle work: one waiting request
+def serveRemote() {
+    if (len(Remote.queue) == 0) { return nil; }
+    lock(Remote.lock);
+    req = Remote.queue[0];
+    rest = [];
+    i = 1;
+    while (i < len(Remote.queue)) { push(rest, Remote.queue[i]); i += 1; }
+    Remote.queue = rest;
+    unlock(Remote.lock);
+    result = nil;
+    try {
+        result = runRemote(req);
+    } catch (e) {
+        result = ['remote: ' + str(e) + '\n', 1, req[3]];
+    }
+    lock(Remote.lock);
+    push(Remote.done, [req[0], result]);
+    unlock(Remote.lock);
+}
+
+// [output, status, the folder it ended in] of a line run for a user
+def runRemote(req) {
+    u = Users.find(req[1]);
+    if (u == nil) { return ['no such user\n', 1, req[3]]; }
+    c = Ctx.me();
+    saved = [c.uid, c.gid, c.groups, ShellState.cwd, ShellState.userName, ShellState.home, ShellState.status, ShellState.signal];
+    c.uid = u[1];
+    c.gid = u[2];
+    c.groups = Users.groupsOf(u[0]);
+    if (len(c.groups) == 0) { c.groups = [u[2]]; }
+    ShellState.userName = u[0];
+    ShellState.home = u[3] == '' ? 'root' : u[3];
+    ShellState.cwd = req[3];
+    ShellState.remote = true;
+    ShellState.depth += 1;
+    ShellState.signal = '';
+    c.mergeErr = true;
+    Log.write('ssh: ' + u[0] + ': ' + req[2]);
+    out = '';
+    try {
+        out = captureRaw(req[2]);
+    } catch (e) {
+        out = out + str(e) + '\n';
+        ShellState.status = 1;
+    }
+    status = ShellState.status;
+    cwd = ShellState.cwd;
+    c.mergeErr = false;
+    ShellState.depth -= 1;
+    ShellState.remote = false;
+    c.uid = saved[0];
+    c.gid = saved[1];
+    c.groups = saved[2];
+    ShellState.cwd = saved[3];
+    ShellState.userName = saved[4];
+    ShellState.home = saved[5];
+    ShellState.status = saved[6];
+    ShellState.signal = saved[7];
+    return [out, status, cwd];
+}
+LineEditor.idle = serveRemote;
 
 // --- command history and completion for the line editor ---
 

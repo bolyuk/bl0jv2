@@ -1,0 +1,696 @@
+// An SSH-2 server (RFC 4253, 4252, 4254) for one connection at a time, over a TcpConn.
+//
+// What it speaks - one choice for each thing, which every current OpenSSH client offers:
+//   key exchange        curve25519-sha256 (RFC 8731), with the "strict kex" countermeasure (kex-strict-s-v00@openssh.com)
+//   host key            ssh-ed25519
+//   cipher and MAC      chacha20-poly1305@openssh.com (the MAC is part of the cipher)
+//   compression         none
+//   user authentication none (to list the methods), password, publickey (ssh-ed25519)
+//   connection          one "session" channel: pty-req, env, window-change, shell, exec
+// It is built from stdlib/crypto (X25519, Ed25519, ChaCha20, Poly1305, SHA-256, SHA-512), written for the VM's 32-bit
+// numbers, so it is slow (a login takes a second or two) and not constant-time: nothing here defends against someone
+// who can time it closely. Keys come from the machine's random-number port (stdlib/crypto/random.bl0).
+//
+//   server = new SshServer(conn, hostSeed, handler);       conn: a TcpConn that has been accepted
+//   reason = server.serve();                               returns when the connection ends, saying why
+//
+// The handler is an object with these methods (see aeon-os/bin/sshd.bl0 for one):
+//   authPassword(user, password) -> true when it is right        authKey(user, keyBlob) -> true when the key may log in
+//   start(session)        the shell or command was asked for: session.kind ('shell' or 'exec'), .command, .pty, .cols,
+//                         .rows, .user; a command is run here, its output written with session.write(), then the
+//                         engine ends the channel. A shell returns at once and gets input:
+//   input(session, text)  what the client typed (a string of the bytes: see Ip.stringOf)
+//   Both may call session.write(text) (a string of bytes), session.exit(status) and session.close().
+//   poll()                called every 200 ms while the server waits for the client: where the handler looks for an abort
+//                         (it may throw: the error is not caught here)
+// Everything is arrays of numbers 0-255 unless it says text.
+
+import 'tcp.bl0';
+import '../crypto/sha256.bl0';
+import '../crypto/x25519.bl0';
+import '../crypto/ed25519.bl0';
+import '../crypto/chacha20.bl0';
+import '../crypto/poly1305.bl0';
+import '../crypto/random.bl0';
+import '../str/utf8.bl0';
+import '../str/split.bl0';
+
+def class SshReader {
+    field data;
+    field pos;
+
+    def init(data, pos) {
+        this.data = data;
+        this.pos = pos;
+    }
+
+    def left() { return len(this.data) - this.pos; }
+
+    def u8() {
+        if (this.left() < 1) { throw('ssh: a packet is too short'); }
+        v = this.data[this.pos];
+        this.pos += 1;
+        return v;
+    }
+
+    def u32() {
+        if (this.left() < 4) { throw('ssh: a packet is too short'); }
+        d = this.data;
+        p = this.pos;
+        this.pos += 4;
+        return (d[p] << 24) | (d[p + 1] << 16) | (d[p + 2] << 8) | d[p + 3];
+    }
+
+    def bool() { return this.u8() != 0; }
+
+    def bytes() {
+        n = this.u32();
+        if (n < 0 || n > this.left()) { throw('ssh: a packet is too short'); }
+        out = [];
+        i = 0;
+        while (i < n) { push(out, this.data[this.pos + i]); i += 1; }
+        this.pos += n;
+        return out;
+    }
+
+    def text() { return Utf8.decode(this.bytes()); }
+
+    def rest() {
+        out = [];
+        while (this.pos < len(this.data)) { push(out, this.data[this.pos]); this.pos += 1; }
+        return out;
+    }
+}
+
+def class Ssh {
+    static def u32(n) { return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]; }
+
+    static def concat(a, b) {
+        out = [];
+        i = 0;
+        while (i < len(a)) { push(out, a[i]); i += 1; }
+        i = 0;
+        while (i < len(b)) { push(out, b[i]); i += 1; }
+        return out;
+    }
+
+    static def slice(a, from, to) {
+        out = [];
+        i = from;
+        while (i < to) { push(out, a[i]); i += 1; }
+        return out;
+    }
+
+    // a string: its length, then its bytes
+    static def str(bytes) { return Ssh.concat(Ssh.u32(len(bytes)), bytes); }
+
+    static def textStr(s) { return Ssh.str(Utf8.encode(s)); }
+
+    static def names(list) { return Ssh.textStr(strJoin(list, ',')); }
+
+    // an mpint for the unsigned number given as big-endian bytes: no leading zeros, a zero byte first when the top bit is set
+    static def mpint(be) {
+        i = 0;
+        while (i < len(be) && be[i] == 0) { i += 1; }
+        body = Ssh.slice(be, i, len(be));
+        if (len(body) > 0 && body[0] >= 128) { body = Ssh.concat([0], body); }
+        return Ssh.str(body);
+    }
+
+    static def same(a, b) {
+        if (len(a) != len(b)) { return false; }
+        i = 0;
+        while (i < len(a)) {
+            if (a[i] != b[i]) { return false; }
+            i += 1;
+        }
+        return true;
+    }
+
+    static def reverse(a) {
+        out = [];
+        i = len(a) - 1;
+        while (i >= 0) { push(out, a[i]); i -= 1; }
+        return out;
+    }
+
+    // the public key blob of an Ed25519 key, and a signature blob
+    static def keyBlob(pub) { return Ssh.concat(Ssh.textStr('ssh-ed25519'), Ssh.str(pub)); }
+    static def sigBlob(sig) { return Ssh.concat(Ssh.textStr('ssh-ed25519'), Ssh.str(sig)); }
+}
+
+// what the handler is given to talk to the client with
+def class SshSession {
+    field server;
+    field kind;
+    field command;
+    field pty;
+    field cols;
+    field rows;
+    field user;
+    field term;
+    field closed;
+    field status;
+
+    def init(server) {
+        this.server = server;
+        this.kind = '';
+        this.command = '';
+        this.pty = false;
+        this.cols = 80;
+        this.rows = 24;
+        this.user = '';
+        this.term = '';
+        this.closed = false;
+        this.status = nil;
+    }
+
+    // a string of bytes to the client
+    def write(text) { this.server.sendData(Ip.bytesOf(text)); }
+
+    def exit(status) { this.status = status; }
+
+    def close() { this.closed = true; }
+}
+
+def class SshServer {
+    field conn;
+    field hostSeed;
+    field hostPub;
+    field handler;
+    field inBuf;
+    field inHead;
+    field idleMs;            // how long to wait for the client in silence (0: for ever, looking for an abort)
+    field sendSeq;
+    field recvSeq;
+    field sendKeys;          // [main key, header key] once the keys are in use, else nil
+    field recvKeys;
+    field sessionId;
+    field strict;
+    field user;
+    field authed;
+    field channelOpen;       // the client's number of the one channel, or nil
+    field clientWindow;
+    field clientMax;
+    field ourWindow;
+    field session;
+    field pending;           // the data the client sent while the server waited for something else
+    field ended;
+
+    def init(conn, hostSeed, handler) {
+        this.conn = conn;
+        this.hostSeed = hostSeed;
+        this.hostPub = Ed25519.publicKey(hostSeed);
+        this.handler = handler;
+        this.inBuf = [];
+        this.inHead = 0;
+        this.idleMs = 60000;
+        this.sendSeq = 0;
+        this.recvSeq = 0;
+        this.sendKeys = nil;
+        this.recvKeys = nil;
+        this.sessionId = nil;
+        this.strict = false;
+        this.user = '';
+        this.authed = false;
+        this.channelOpen = nil;
+        this.clientWindow = 0;
+        this.clientMax = 16384;
+        this.ourWindow = 0;
+        this.session = nil;
+        this.pending = [];
+        this.ended = false;
+    }
+
+    // ---- bytes in and out
+
+    def have() { return len(this.inBuf) - this.inHead; }
+
+    // waits until n bytes are there; false when the client is gone or has been silent for too long
+    def fill(n) {
+        waited = 0;
+        while (this.have() < n) {
+            this.handler.poll();
+            if (this.conn.waitData(200)) {
+                if (this.inHead > 0) {
+                    this.inBuf = Ssh.slice(this.inBuf, this.inHead, len(this.inBuf));
+                    this.inHead = 0;
+                }
+                this.inBuf = Ssh.concat(this.inBuf, Ip.bytesOf(this.conn.receive()));
+            } else if (this.conn.peerFinReceived || this.conn.state == 'CLOSED') {
+                return false;
+            } else {
+                waited += 200;
+                if (this.idleMs > 0 && waited >= this.idleMs) { return false; }
+            }
+        }
+        return true;
+    }
+
+    def take(n) {
+        out = Ssh.slice(this.inBuf, this.inHead, this.inHead + n);
+        this.inHead += n;
+        return out;
+    }
+
+    // a line ending in LF (the CR before it is dropped); nil when the client goes away
+    def readLine() {
+        while (true) {
+            i = this.inHead;
+            while (i < len(this.inBuf) && this.inBuf[i] != 10) { i += 1; }
+            if (i < len(this.inBuf)) {
+                line = Ssh.slice(this.inBuf, this.inHead, i);
+                this.inHead = i + 1;
+                if (len(line) > 0 && line[len(line) - 1] == 13) { line = Ssh.slice(line, 0, len(line) - 1); }
+                return line;
+            }
+            if (this.have() > 512) { return nil; }
+            if (!this.fill(this.have() + 1)) { return nil; }
+        }
+    }
+
+    def sendRaw(bytes) {
+        this.conn.send(Ip.stringOf(bytes));
+    }
+
+    static def nonce(seq) {
+        return [0, 0, 0, 0, (seq >>> 24) & 255, (seq >>> 16) & 255, (seq >>> 8) & 255, seq & 255];
+    }
+
+    // ---- packets: the payload of one, or nil when the connection is over
+    def readPacket() {
+        if (this.recvKeys == nil) {
+            if (!this.fill(4)) { return nil; }
+            head = this.take(4);
+            n = (head[0] << 24) | (head[1] << 16) | (head[2] << 8) | head[3];
+            if (n < 5 || n > 35000) { throw('ssh: bad packet length'); }
+            if (!this.fill(n)) { return nil; }
+            body = this.take(n);
+            padding = body[0];
+            if (padding < 4 || padding + 1 > n) { throw('ssh: bad padding'); }
+            payload = Ssh.slice(body, 1, n - padding);
+            this.recvSeq += 1;
+            return payload;
+        }
+        main = this.recvKeys[0];
+        header = this.recvKeys[1];
+        nonce = SshServer.nonce(this.recvSeq);
+        if (!this.fill(4)) { return nil; }
+        encLen = this.take(4);
+        plain = ChaCha20.crypt(header, 0, nonce, encLen);
+        n = (plain[0] << 24) | (plain[1] << 16) | (plain[2] << 8) | plain[3];
+        if (n < 8 || n > 35000 || (n % 8) != 0) { throw('ssh: bad packet length'); }
+        if (!this.fill(n + 16)) { return nil; }
+        body = this.take(n);
+        tag = this.take(16);
+        polyKey = Ssh.slice(ChaCha20.block(main, 0, nonce), 0, 32);
+        if (!Ssh.same(Poly1305.mac(polyKey, Ssh.concat(encLen, body)), tag)) { throw('ssh: bad message authentication'); }
+        data = ChaCha20.crypt(main, 1, nonce, body);
+        padding = data[0];
+        if (padding < 4 || padding + 1 > n) { throw('ssh: bad padding'); }
+        this.recvSeq += 1;
+        return Ssh.slice(data, 1, n - padding);
+    }
+
+    def sendPacket(payload) {
+        block = 8;
+        padding = block - ((1 + len(payload)) % block);
+        if (padding < 4) { padding += block; }
+        body = Ssh.concat([padding], payload);
+        body = Ssh.concat(body, Random.bytes(padding));
+        n = len(body);
+        if (this.sendKeys == nil) {
+            this.sendRaw(Ssh.concat(Ssh.u32(n), body));
+        } else {
+            main = this.sendKeys[0];
+            header = this.sendKeys[1];
+            nonce = SshServer.nonce(this.sendSeq);
+            encLen = ChaCha20.crypt(header, 0, nonce, Ssh.u32(n));
+            ct = ChaCha20.crypt(main, 1, nonce, body);
+            polyKey = Ssh.slice(ChaCha20.block(main, 0, nonce), 0, 32);
+            tag = Poly1305.mac(polyKey, Ssh.concat(encLen, ct));
+            this.sendRaw(Ssh.concat(Ssh.concat(encLen, ct), tag));
+        }
+        this.sendSeq += 1;
+    }
+
+    def disconnect(code, why) {
+        this.sendPacket(Ssh.concat(Ssh.concat([1], Ssh.u32(code)), Ssh.concat(Ssh.textStr(why), Ssh.textStr(''))));
+        this.ended = true;
+    }
+
+    // ---- the key exchange
+
+    def keyExchangeInit() {
+        kex = ['curve25519-sha256', 'kex-strict-s-v00@openssh.com'];
+        payload = [20];
+        payload = Ssh.concat(payload, Random.bytes(16));
+        payload = Ssh.concat(payload, Ssh.names(kex));
+        payload = Ssh.concat(payload, Ssh.names(['ssh-ed25519']));
+        payload = Ssh.concat(payload, Ssh.names(['chacha20-poly1305@openssh.com']));
+        payload = Ssh.concat(payload, Ssh.names(['chacha20-poly1305@openssh.com']));
+        payload = Ssh.concat(payload, Ssh.names(['hmac-sha2-256']));
+        payload = Ssh.concat(payload, Ssh.names(['hmac-sha2-256']));
+        payload = Ssh.concat(payload, Ssh.names(['none']));
+        payload = Ssh.concat(payload, Ssh.names(['none']));
+        payload = Ssh.concat(payload, Ssh.names([]));
+        payload = Ssh.concat(payload, Ssh.names([]));
+        payload = Ssh.concat(payload, [0, 0, 0, 0, 0]);
+        return payload;
+    }
+
+    // the algorithms the client's KEXINIT lists, checked against ours; true when we can talk
+    def checkClientInit(init) {
+        r = new SshReader(init, 17);
+        kexList = Split.split(r.text(), ',');
+        hostList = Split.split(r.text(), ',');
+        cipherC2S = Split.split(r.text(), ',');
+        cipherS2C = Split.split(r.text(), ',');
+        r.text();
+        r.text();
+        compC2S = Split.split(r.text(), ',');
+        compS2C = Split.split(r.text(), ',');
+        this.strict = Arr.contains(kexList, 'kex-strict-c-v00@openssh.com');
+        return Arr.contains(kexList, 'curve25519-sha256') && Arr.contains(hostList, 'ssh-ed25519')
+            && Arr.contains(cipherC2S, 'chacha20-poly1305@openssh.com') && Arr.contains(cipherS2C, 'chacha20-poly1305@openssh.com')
+            && Arr.contains(compC2S, 'none') && Arr.contains(compS2C, 'none');
+    }
+
+    // the 64 key bytes of one direction: SHA-256(K H letter id), then SHA-256(K H the first)
+    def derive(kEnc, h, letter) {
+        first = Sha256.digest(Ssh.concat(Ssh.concat(Ssh.concat(kEnc, h), [letter]), this.sessionId));
+        second = Sha256.digest(Ssh.concat(Ssh.concat(kEnc, h), first));
+        return Ssh.concat(first, second);
+    }
+
+    // the whole exchange: versions, algorithms, keys; false if the client is gone or cannot talk to us
+    def handshake() {
+        ours = Utf8.encode('SSH-2.0-aeon_1');
+        this.sendRaw(Ssh.concat(ours, [13, 10]));
+        theirs = nil;
+        tries = 0;
+        while (theirs == nil && tries < 20) {
+            line = this.readLine();
+            if (line == nil) { return false; }
+            if (len(line) >= 4 && line[0] == 83 && line[1] == 83 && line[2] == 72 && line[3] == 45) { theirs = line; }
+            tries += 1;
+        }
+        if (theirs == nil) { return false; }
+        if (!(len(theirs) >= 8 && theirs[4] == 50 && theirs[5] == 46)) {      // "SSH-2."
+            return false;
+        }
+        myInit = this.keyExchangeInit();
+        this.sendPacket(myInit);
+        clientInit = this.readPacket();
+        if (clientInit == nil) { return false; }
+        if (clientInit[0] != 20) { throw('ssh: the key exchange did not start'); }
+        if (!this.checkClientInit(clientInit)) {
+            this.disconnect(3, 'no matching algorithms (this server speaks curve25519-sha256, ssh-ed25519, chacha20-poly1305@openssh.com)');
+            return false;
+        }
+        init = this.readPacket();
+        if (init == nil) { return false; }
+        if (init[0] != 30) { throw('ssh: expected the key exchange message'); }
+        r = new SshReader(init, 1);
+        clientPoint = r.bytes();
+        if (len(clientPoint) != 32) { throw('ssh: bad key exchange point'); }
+
+        secret = Random.bytes(32);
+        point = X25519.publicKey(secret);
+        shared = X25519.scalarMult(secret, clientPoint);
+        allZero = true;
+        i = 0;
+        while (i < 32) { if (shared[i] != 0) { allZero = false; } i += 1; }
+        if (allZero) { throw('ssh: bad key exchange point'); }
+        kEnc = Ssh.mpint(shared);                    // the bytes as they are, as a big-endian number (as OpenSSH does)
+        blob = Ssh.keyBlob(this.hostPub);
+        hashed = Ssh.concat(Ssh.str(theirs), Ssh.str(ours));
+        hashed = Ssh.concat(hashed, Ssh.concat(Ssh.str(clientInit), Ssh.str(myInit)));
+        hashed = Ssh.concat(hashed, Ssh.concat(Ssh.str(blob), Ssh.concat(Ssh.str(clientPoint), Ssh.str(point))));
+        hashed = Ssh.concat(hashed, kEnc);
+        h = Sha256.digest(hashed);
+        this.sessionId = h;
+        signature = Ssh.sigBlob(Ed25519.sign(this.hostSeed, h));
+        reply = Ssh.concat([31], Ssh.concat(Ssh.str(blob), Ssh.concat(Ssh.str(point), Ssh.str(signature))));
+        this.sendPacket(reply);
+        this.sendPacket([21]);
+        // the keys are in use for what we send from here on
+        s2c = this.derive(kEnc, h, 68);              // 'D'
+        c2s = this.derive(kEnc, h, 67);              // 'C'
+        this.sendKeys = [Ssh.slice(s2c, 0, 32), Ssh.slice(s2c, 32, 64)];
+        if (this.strict) { this.sendSeq = 0; }
+        nk = this.readPacket();
+        if (nk == nil) { return false; }
+        if (nk[0] != 21) { throw('ssh: expected the new keys message'); }
+        this.recvKeys = [Ssh.slice(c2s, 0, 32), Ssh.slice(c2s, 32, 64)];
+        if (this.strict) { this.recvSeq = 0; }
+        return true;
+    }
+
+    // ---- user authentication
+
+    def authFailure(partial) {
+        this.sendPacket(Ssh.concat([51], Ssh.concat(Ssh.names(['publickey', 'password']), [partial ? 1 : 0])));
+    }
+
+    // true when the client is logged in; false when it is gone or gave up
+    def authenticate() {
+        failures = 0;
+        while (failures < 6) {
+            p = this.readPacket();
+            if (p == nil) { return false; }
+            t = p[0];
+            if (t == 5) {
+                r = new SshReader(p, 1);
+                name = r.text();
+                if (name == 'ssh-userauth') { this.sendPacket(Ssh.concat([6], Ssh.textStr(name))); }
+                else { this.disconnect(7, 'service not available'); return false; }
+            } else if (t == 50) {
+                r = new SshReader(p, 1);
+                user = r.text();
+                service = r.text();
+                method = r.text();
+                if (service != 'ssh-connection') { this.disconnect(7, 'service not available'); return false; }
+                if (method == 'none') {
+                    this.authFailure(false);
+                } else if (method == 'password') {
+                    r.bool();
+                    password = r.text();
+                    if (this.handler.authPassword(user, password)) {
+                        this.user = user;
+                        this.sendPacket([52]);
+                        return true;
+                    }
+                    failures += 1;
+                    wait(1000);
+                    this.authFailure(false);
+                } else if (method == 'publickey') {
+                    signed = r.bool();
+                    algo = r.text();
+                    blob = r.bytes();
+                    ok = algo == 'ssh-ed25519' && this.handler.authKey(user, blob);
+                    if (!ok) {
+                        failures += 1;
+                        this.authFailure(false);
+                    } else if (!signed) {
+                        this.sendPacket(Ssh.concat([60], Ssh.concat(Ssh.textStr(algo), Ssh.str(blob))));
+                    } else {
+                        sig = r.bytes();
+                        signedData = Ssh.concat(Ssh.str(this.sessionId), Ssh.concat([50], Ssh.concat(Ssh.textStr(user),
+                            Ssh.concat(Ssh.textStr(service), Ssh.concat(Ssh.textStr('publickey'), Ssh.concat([1],
+                            Ssh.concat(Ssh.textStr(algo), Ssh.str(blob))))))));
+                        kr = new SshReader(blob, 0);
+                        kr.text();
+                        key = kr.bytes();
+                        sr = new SshReader(sig, 0);
+                        sr.text();
+                        raw = sr.bytes();
+                        if (Ed25519.verify(key, signedData, raw)) {
+                            this.user = user;
+                            this.sendPacket([52]);
+                            return true;
+                        }
+                        failures += 1;
+                        this.authFailure(false);
+                    }
+                } else {
+                    this.authFailure(false);
+                }
+            } else if (t == 1) {
+                return false;
+            } else if (t != 2 && t != 4) {
+                this.sendPacket(Ssh.concat([3], Ssh.u32(this.recvSeq - 1)));
+            }
+        }
+        this.disconnect(14, 'too many authentication failures');
+        return false;
+    }
+
+    // ---- the session channel
+
+    def sendData(bytes) {
+        at = 0;
+        while (at < len(bytes)) {
+            if (this.channelOpen == nil) { return nil; }
+            n = len(bytes) - at;
+            if (n > this.clientMax) { n = this.clientMax; }
+            if (n > 16384) { n = 16384; }
+            // wait for room in the client's window
+            while (this.clientWindow < n && !this.ended) {
+                if (this.clientWindow > 0) { n = this.clientWindow; break; }
+                this.pumpOne();
+            }
+            if (this.ended) { return nil; }
+            chunk = Ssh.slice(bytes, at, at + n);
+            this.sendPacket(Ssh.concat([94], Ssh.concat(Ssh.u32(this.channelOpen), Ssh.str(chunk))));
+            this.clientWindow -= n;
+            at += n;
+        }
+    }
+
+    // one packet from the client, while the server waits for room to write: only what changes the window or the
+    // connection is handled now; typed data is kept for later
+    def pumpOne() {
+        p = this.readPacket();
+        if (p == nil) { this.ended = true; return nil; }
+        this.dispatch(p, true);
+    }
+
+    def channelReply(ok) {
+        this.sendPacket(Ssh.concat([ok ? 99 : 100], Ssh.u32(this.channelOpen)));
+    }
+
+    def finishChannel() {
+        if (this.channelOpen == nil) { return nil; }
+        if (this.session != nil && this.session.status != nil) {
+            this.sendPacket(Ssh.concat([98], Ssh.concat(Ssh.u32(this.channelOpen),
+                Ssh.concat(Ssh.textStr('exit-status'), Ssh.concat([0], Ssh.u32(this.session.status))))));
+        }
+        this.sendPacket(Ssh.concat([96], Ssh.u32(this.channelOpen)));
+        this.sendPacket(Ssh.concat([97], Ssh.u32(this.channelOpen)));
+    }
+
+    // one connection-protocol packet; 'nested' when it arrives while the server was writing
+    def dispatch(p, nested) {
+        t = p[0];
+        r = new SshReader(p, 1);
+        if (t == 90) {
+            kind = r.text();
+            sender = r.u32();
+            window = r.u32();
+            maxPacket = r.u32();
+            if (kind == 'session' && this.channelOpen == nil) {
+                this.channelOpen = sender;
+                this.clientWindow = window;
+                this.clientMax = maxPacket;
+                this.ourWindow = 2097152;
+                this.session = new SshSession(this);
+                this.session.user = this.user;
+                this.sendPacket(Ssh.concat([91], Ssh.concat(Ssh.u32(sender), Ssh.concat(Ssh.u32(0),
+                    Ssh.concat(Ssh.u32(this.ourWindow), Ssh.u32(32768))))));
+            } else {
+                this.sendPacket(Ssh.concat([92], Ssh.concat(Ssh.u32(sender), Ssh.concat(Ssh.u32(kind == 'session' ? 4 : 3),
+                    Ssh.concat(Ssh.textStr('only one session at a time'), Ssh.textStr(''))))));
+            }
+        } else if (t == 98) {
+            r.u32();
+            kind = r.text();
+            want = r.bool();
+            ok = false;
+            if (this.channelOpen == nil || nested) {
+                ok = false;
+            } else if (kind == 'pty-req') {
+                this.session.term = r.text();
+                this.session.cols = r.u32();
+                this.session.rows = r.u32();
+                this.session.pty = true;
+                ok = true;
+            } else if (kind == 'env') {
+                ok = true;
+            } else if (kind == 'window-change') {
+                this.session.cols = r.u32();
+                this.session.rows = r.u32();
+                want = false;
+            } else if (kind == 'shell' || kind == 'exec') {
+                ok = true;
+                this.session.kind = kind;
+                if (kind == 'exec') { this.session.command = r.text(); }
+            }
+            if (want) { this.channelReply(ok); }
+            if (ok && (kind == 'shell' || kind == 'exec')) {
+                this.handler.start(this.session);
+                if (kind == 'exec' || this.session.closed) {
+                    this.finishChannel();
+                    this.channelOpen = nil;
+                }
+            }
+        } else if (t == 94) {
+            r.u32();
+            data = r.bytes();
+            if (nested) {
+                this.pending = Ssh.concat(this.pending, data);
+            } else {
+                this.deliver(data);
+            }
+            // the client may send more once we have said we took what it sent
+            this.ourWindow -= len(data);
+            if (this.ourWindow < 1048576 && this.channelOpen != nil) {
+                add = 2097152 - this.ourWindow;
+                this.ourWindow += add;
+                this.sendPacket(Ssh.concat([93], Ssh.concat(Ssh.u32(this.channelOpen), Ssh.u32(add))));
+            }
+        } else if (t == 93) {
+            r.u32();
+            this.clientWindow += r.u32();
+        } else if (t == 96) {
+            // the client will send no more: a command has all it will get, a shell ends
+            if (this.session != nil && this.session.kind == 'shell') { this.session.closed = true; }
+        } else if (t == 97) {
+            if (this.channelOpen != nil) {
+                this.sendPacket(Ssh.concat([97], Ssh.u32(this.channelOpen)));
+                this.channelOpen = nil;
+            }
+            this.ended = true;
+        } else if (t == 80) {
+            r.text();
+            if (r.bool()) { this.sendPacket([82]); }
+        } else if (t == 1) {
+            this.ended = true;
+        } else if (t != 2 && t != 4 && t != 3) {
+            this.sendPacket(Ssh.concat([3], Ssh.u32(this.recvSeq - 1)));
+        }
+    }
+
+    def deliver(data) {
+        if (this.session == nil || this.session.kind != 'shell' || this.channelOpen == nil) { return nil; }
+        this.handler.input(this.session, Ip.stringOf(data));
+        if (this.session.closed) {
+            this.finishChannel();
+            this.channelOpen = nil;
+        }
+    }
+
+    def serve() {
+        try {
+            if (!this.handshake()) { return 'no key exchange'; }
+            this.idleMs = 30000;
+            if (!this.authenticate()) { return 'not authenticated'; }
+            this.authed = true;
+            this.idleMs = 0;
+            while (!this.ended) {
+                p = this.readPacket();
+                if (p == nil) { return 'connection lost'; }
+                this.dispatch(p, false);
+                if (len(this.pending) > 0) {
+                    data = this.pending;
+                    this.pending = [];
+                    this.deliver(data);
+                }
+            }
+            return 'closed';
+        } catch (e) {
+            if (str(e) == 'interrupted') { throw(e); }
+            return 'error: ' + str(e);
+        }
+    }
+}

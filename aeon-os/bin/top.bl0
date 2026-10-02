@@ -93,6 +93,7 @@ def draw() {
 }
 
 def main(words) {
+    if (!toTerminal()) { sayErr('top: needs a terminal (its output cannot go to a file, a pipe or an ssh session)'); return nil; }
     consoleWrite(Term.esc + '[?1049h' + Term.esc + '[?25l' + Term.clearScreen());
     try {
         done = false;

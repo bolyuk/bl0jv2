@@ -289,6 +289,25 @@ onto the process table. `wm` opens the processes, `dev/cpu` and `dev/time`; `wm 
 Tab brings the next window to the top, arrows move it (after `r` they size it), `z` maximises, `n` opens a file by name,
 `x` closes, PgUp/PgDn scroll, `q` leaves.
 
+## Remote login: sshd
+
+`sshd [port]` (22 by default; `service sshd start` to run it as a service) is an SSH-2 server: `ssh alice@host` gives a shell,
+`ssh alice@host ls -l` runs one command. It speaks one choice of each thing, the ones every current OpenSSH offers:
+curve25519-sha256 key exchange (with the strict-kex countermeasure), an ssh-ed25519 host key, the
+chacha20-poly1305@openssh.com cipher, no compression. A user logs in with a password (an account without one is refused) or with a
+key listed in `<home>/.ssh/authorized_keys` (`ssh-ed25519 AAAA... comment`, one per line). The host key is made on the first start
+and kept in `etc/ssh/` (`host_ed25519` is the seed, readable by root only); its fingerprint is printed when sshd starts. The
+protocol is `stdlib/net/ssh.bl0`, the crypto `stdlib/crypto/` (X25519, Ed25519, SHA-256/512, ChaCha20, Poly1305), written for the VM's
+32-bit numbers and checked against the JDK's implementations and the RFC vectors; the keys come from the machine's random-number
+port (`RandomDevice`: the host's SecureRandom in the VM, a hardware generator on a board). A login takes a few seconds (the VM
+interprets the curve arithmetic) and none of it is constant-time.
+
+What a session is: the lines go to the shell, which runs them as that user between two keys of its own prompt (so the console and a
+remote user take turns, and sshd needs a second core), and the output - the errors too - comes back as text. That makes it a
+shell a line at a time: backspace, Ctrl-U, Ctrl-C and Ctrl-D work, and `cd` and the exit status stay between commands, but there is
+no history or completion, and a program that needs a screen (`edit`, `top`, `wm`) says so and refuses (`read` and `su` too). One
+connection at a time. A real terminal over ssh needs a console per session, which the system does not have yet.
+
 ## Moving files in and out
 
 `aeon.sh` shares `./share` (override with `SHARE=dir`) with `--bridge-fs`. It

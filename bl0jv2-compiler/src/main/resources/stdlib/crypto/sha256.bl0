@@ -77,6 +77,21 @@ def class Sha256 {
         return h;
     }
 
+    // the 32 bytes of the digest of an array of bytes
+    static def digest(data) {
+        h = Sha256.words(data);
+        out = [];
+        i = 0;
+        while (i < 8) {
+            push(out, (h[i] >>> 24) & 255);
+            push(out, (h[i] >>> 16) & 255);
+            push(out, (h[i] >>> 8) & 255);
+            push(out, h[i] & 255);
+            i += 1;
+        }
+        return out;
+    }
+
     static def hexOfBytes(data) {
         h = Sha256.words(data);
         out = '';
