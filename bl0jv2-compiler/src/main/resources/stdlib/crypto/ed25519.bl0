@@ -1,0 +1,296 @@
+// Ed25519 (RFC 8032): signatures on the twisted Edwards curve of Curve25519.
+//   Ed25519.publicKey(seed)           the 32-byte public key of a 32-byte seed (the private key)
+//   Ed25519.sign(seed, message)       the 64-byte signature (the same for the same input: there is no random number)
+//   Ed25519.verify(key, message, sig) true when the signature is the key's
+// Everything is arrays of numbers 0-255. A point is [X, Y, Z, T] of f25519 numbers (extended coordinates); a scalar
+// mod the group's order L is 22 limbs of 12 bits like there. Not constant-time (see f25519.bl0).
+
+import 'f25519.bl0';
+import 'sha512.bl0';
+
+def class Ed25519 {
+    static field d2;        // 2d
+    static field dd;        // d
+    static field sqrtM1;    // the square root of -1
+    static field baseX;
+    static field baseY;
+    static field order;     // L as 22 limbs
+
+    // ---- the points
+
+    static def identity() {
+        return [F25519.zero(), F25519.one(), F25519.one(), F25519.zero()];
+    }
+
+    static def basePoint() {
+        x = F25519.copy(Ed25519.baseX);
+        y = F25519.copy(Ed25519.baseY);
+        return [x, y, F25519.one(), F25519.mul(x, y)];
+    }
+
+    // P + Q (also fine for P = Q)
+    static def add(p, q) {
+        a = F25519.mul(F25519.sub(p[1], p[0]), F25519.sub(q[1], q[0]));
+        b = F25519.mul(F25519.add(p[1], p[0]), F25519.add(q[1], q[0]));
+        c = F25519.mul(F25519.mul(p[3], q[3]), Ed25519.d2);
+        zz = F25519.mul(p[2], q[2]);
+        d = F25519.add(zz, zz);
+        e = F25519.sub(b, a);
+        f = F25519.sub(d, c);
+        g = F25519.add(d, c);
+        h = F25519.add(b, a);
+        return [F25519.mul(e, f), F25519.mul(g, h), F25519.mul(f, g), F25519.mul(e, h)];
+    }
+
+    // k * P for a scalar of 32 bytes
+    static def scalarMult(p, k) {
+        q = Ed25519.identity();
+        i = 255;
+        while (i >= 0) {
+            q = Ed25519.add(q, q);
+            if (((k[i >>> 3] >>> (i & 7)) & 1) == 1) { q = Ed25519.add(q, p); }
+            i -= 1;
+        }
+        return q;
+    }
+
+    static def encodePoint(p) {
+        zi = F25519.inv(p[2]);
+        x = F25519.mul(p[0], zi);
+        y = F25519.mul(p[1], zi);
+        out = F25519.encode(y);
+        if (F25519.isOdd(x)) { out[31] = out[31] | 128; }
+        return out;
+    }
+
+    // the point of 32 bytes, or nil when they are not a point of the curve
+    static def decodePoint(bytes) {
+        y = F25519.decode(bytes);
+        sign = bytes[31] >>> 7;
+        y2 = F25519.sq(y);
+        u = F25519.sub(y2, F25519.one());
+        v = F25519.add(F25519.mul(Ed25519.dd, y2), F25519.one());
+        v3 = F25519.mul(F25519.sq(v), v);
+        v7 = F25519.mul(F25519.sq(v3), v);
+        // x = u v^3 (u v^7)^((p-5)/8)
+        r = F25519.mul(u, v7);
+        c = F25519.copy(r);
+        i = 250;
+        while (i >= 0) {
+            c = F25519.sq(c);
+            if (i != 1) { c = F25519.mul(c, r); }
+            i -= 1;
+        }
+        x = F25519.mul(F25519.mul(u, v3), c);
+        vxx = F25519.mul(v, F25519.sq(x));
+        if (!Ed25519.same(vxx, u)) {
+            if (!Ed25519.same(vxx, F25519.sub(F25519.zero(), u))) { return nil; }
+            x = F25519.mul(x, Ed25519.sqrtM1);
+        }
+        if (F25519.isZero(x) && sign == 1) { return nil; }
+        if ((F25519.isOdd(x) ? 1 : 0) != sign) { x = F25519.sub(F25519.zero(), x); }
+        return [x, y, F25519.one(), F25519.mul(x, y)];
+    }
+
+    static def same(a, b) {
+        return F25519.isZero(F25519.sub(a, b));
+    }
+
+    // ---- the scalars mod L: 12-bit limbs, the first the lowest
+
+    static def limbsOfBytes(bytes) {
+        out = [];
+        acc = 0;
+        bits = 0;
+        i = 0;
+        while (i < len(bytes)) {
+            acc = acc | (bytes[i] << bits);
+            bits += 8;
+            while (bits >= 12) {
+                push(out, acc & 4095);
+                acc = acc >>> 12;
+                bits -= 12;
+            }
+            i += 1;
+        }
+        if (bits > 0) { push(out, acc); }
+        return out;
+    }
+
+    static def bytesOfLimbs(limbs) {
+        out = [];
+        acc = 0;
+        bits = 0;
+        i = 0;
+        while (i < len(limbs)) {
+            acc = acc | (limbs[i] << bits);
+            bits += 12;
+            while (bits >= 8) {
+                push(out, acc & 255);
+                acc = acc >>> 8;
+                bits -= 8;
+            }
+            i += 1;
+        }
+        while (len(out) < 32) { push(out, 0); }
+        bytes = [];
+        i = 0;
+        while (i < 32) { push(bytes, out[i]); i += 1; }
+        return bytes;
+    }
+
+    // r >= L? (r: 22 limbs)
+    static def atLeastL(r) {
+        i = 21;
+        while (i >= 0) {
+            if (r[i] != Ed25519.order[i]) { return r[i] > Ed25519.order[i]; }
+            i -= 1;
+        }
+        return true;
+    }
+
+    static def subtractL(r) {
+        borrow = 0;
+        i = 0;
+        while (i < 22) {
+            v = r[i] - Ed25519.order[i] - borrow;
+            borrow = 0;
+            if (v < 0) { v += 4096; borrow = 1; }
+            r[i] = v;
+            i += 1;
+        }
+    }
+
+    // the value of x (limbs, any number of them) mod L, as 22 limbs: shift in one bit at a time and subtract L
+    // whenever it is reached
+    static def reduce(x) {
+        r = [];
+        i = 0;
+        while (i < 22) { push(r, 0); i += 1; }
+        i = len(x) - 1;
+        while (i >= 0) {
+            bit = 11;
+            while (bit >= 0) {
+                carry = (x[i] >>> bit) & 1;
+                j = 0;
+                while (j < 22) {
+                    v = (r[j] << 1) | carry;
+                    carry = v >>> 12;
+                    r[j] = v & 4095;
+                    j += 1;
+                }
+                if (Ed25519.atLeastL(r)) { Ed25519.subtractL(r); }
+                bit -= 1;
+            }
+            i -= 1;
+        }
+        return r;
+    }
+
+    // a * b mod L
+    static def mulModL(a, b) {
+        t = [];
+        i = 0;
+        while (i < 44) { push(t, 0); i += 1; }
+        i = 0;
+        while (i < 22) {
+            j = 0;
+            while (j < 22) {
+                t[i + j] = t[i + j] + a[i] * b[j];
+                j += 1;
+            }
+            i += 1;
+        }
+        i = 0;
+        while (i < 43) {
+            c = t[i] >>> 12;
+            t[i] = t[i] & 4095;
+            t[i + 1] = t[i + 1] + c;
+            i += 1;
+        }
+        return Ed25519.reduce(t);
+    }
+
+    static def addModL(a, b) {
+        t = [];
+        i = 0;
+        while (i < 22) { push(t, a[i] + b[i]); i += 1; }
+        i = 0;
+        while (i < 21) {
+            c = t[i] >>> 12;
+            t[i] = t[i] & 4095;
+            t[i + 1] = t[i + 1] + c;
+            i += 1;
+        }
+        return Ed25519.reduce(t);
+    }
+
+    // ---- the signature scheme
+
+    static def concat(a, b) {
+        out = [];
+        i = 0;
+        while (i < len(a)) { push(out, a[i]); i += 1; }
+        i = 0;
+        while (i < len(b)) { push(out, b[i]); i += 1; }
+        return out;
+    }
+
+    // the clamped secret scalar and the prefix of a seed: [a (32 bytes), prefix (32 bytes)]
+    static def expand(seed) {
+        h = Sha512.digest(seed);
+        a = [];
+        prefix = [];
+        i = 0;
+        while (i < 32) { push(a, h[i]); push(prefix, h[32 + i]); i += 1; }
+        a[0] = a[0] & 248;
+        a[31] = (a[31] & 127) | 64;
+        return [a, prefix];
+    }
+
+    static def publicKey(seed) {
+        e = Ed25519.expand(seed);
+        return Ed25519.encodePoint(Ed25519.scalarMult(Ed25519.basePoint(), e[0]));
+    }
+
+    static def sign(seed, message) {
+        e = Ed25519.expand(seed);
+        a = e[0];
+        pub = Ed25519.encodePoint(Ed25519.scalarMult(Ed25519.basePoint(), a));
+        r = Ed25519.reduce(Ed25519.limbsOfBytes(Sha512.digest(Ed25519.concat(e[1], message))));
+        rEnc = Ed25519.encodePoint(Ed25519.scalarMult(Ed25519.basePoint(), Ed25519.bytesOfLimbs(r)));
+        k = Ed25519.reduce(Ed25519.limbsOfBytes(Sha512.digest(Ed25519.concat(Ed25519.concat(rEnc, pub), message))));
+        s = Ed25519.addModL(r, Ed25519.mulModL(k, Ed25519.limbsOfBytes(a)));
+        return Ed25519.concat(rEnc, Ed25519.bytesOfLimbs(s));
+    }
+
+    static def verify(key, message, sig) {
+        if (len(key) != 32 || len(sig) != 64) { return false; }
+        rEnc = [];
+        sBytes = [];
+        i = 0;
+        while (i < 32) { push(rEnc, sig[i]); push(sBytes, sig[32 + i]); i += 1; }
+        sLimbs = Ed25519.limbsOfBytes(sBytes);
+        while (len(sLimbs) < 22) { push(sLimbs, 0); }
+        if (Ed25519.atLeastL(sLimbs)) { return false; }
+        a = Ed25519.decodePoint(key);
+        if (a == nil) { return false; }
+        h = Ed25519.reduce(Ed25519.limbsOfBytes(Sha512.digest(Ed25519.concat(Ed25519.concat(rEnc, key), message))));
+        negA = [F25519.sub(F25519.zero(), a[0]), a[1], a[2], F25519.sub(F25519.zero(), a[3])];
+        sb = Ed25519.scalarMult(Ed25519.basePoint(), sBytes);
+        ha = Ed25519.scalarMult(negA, Ed25519.bytesOfLimbs(h));
+        check = Ed25519.encodePoint(Ed25519.add(sb, ha));
+        i = 0;
+        while (i < 32) {
+            if (check[i] != rEnc[i]) { return false; }
+            i += 1;
+        }
+        return true;
+    }
+}
+Ed25519.dd = F25519.decode([163, 120, 89, 19, 202, 77, 235, 117, 171, 216, 65, 65, 77, 10, 112, 0, 152, 232, 121, 119, 121, 64, 199, 140, 115, 254, 111, 43, 238, 108, 3, 82]);
+Ed25519.d2 = F25519.decode([89, 241, 178, 38, 148, 155, 214, 235, 86, 177, 131, 130, 154, 20, 224, 0, 48, 209, 243, 238, 242, 128, 142, 25, 231, 252, 223, 86, 220, 217, 6, 36]);
+Ed25519.sqrtM1 = F25519.decode([176, 160, 14, 74, 39, 27, 238, 196, 120, 228, 47, 173, 6, 24, 67, 47, 167, 215, 251, 61, 153, 0, 77, 43, 11, 223, 193, 79, 128, 36, 131, 43]);
+Ed25519.baseX = F25519.decode([26, 213, 37, 143, 96, 45, 86, 201, 178, 167, 37, 149, 96, 199, 44, 105, 92, 220, 214, 253, 49, 226, 164, 192, 254, 83, 110, 205, 211, 54, 105, 33]);
+Ed25519.baseY = F25519.decode([88, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102]);
+Ed25519.order = Ed25519.limbsOfBytes([237, 211, 245, 92, 26, 99, 18, 88, 214, 156, 247, 162, 222, 249, 222, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16]);
