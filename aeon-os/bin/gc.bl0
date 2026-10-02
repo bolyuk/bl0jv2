@@ -1,0 +1,18 @@
+// aeon-os program: free the memory nothing uses any more; gc (root only)
+// The machine collects by itself every few MB of allocation, and after a process that held a lot; this does it now and says
+// what it freed. Every core stops for a moment. Loaded from the virtual disk by the shell (bin/gc.bl0c); see lib/mem.bl0.
+
+import '../lib/userland.bl0';
+import '../lib/mem.bl0';
+import '../lib/perm.bl0';
+
+def main(words) {
+    if (len(words) != 1) { sayErr('usage: gc'); return nil; }
+    if (Ctx.me().uid != 0) { sayErr('gc: only root may do that'); return nil; }
+    before = memory(4, 1, 0);
+    objectsBefore = memory(4, 0, 0);
+    after = syscall(Sys.memory, 'collect');
+    say('heap ' + Mem.size(before) + ' -> ' + Mem.size(after) + ', ' + (objectsBefore - memory(4, 0, 0)) + ' objects freed (' + memory(4, 4, 0) + ' collections so far)');
+}
+
+programMain(main);

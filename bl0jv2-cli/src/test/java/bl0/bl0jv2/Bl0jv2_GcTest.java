@@ -119,11 +119,23 @@ class Bl0jv2_GcTest {
     }
 
     @Test
-    void multiCoreMachinesDoNotCollectAutomatically() {
+    void severalCoresAreStoppedTogetherAndEverythingTheyHoldSurvives() {
+        // two worker cores churn out garbage while each keeps a growing list of its own; the main core does the same.
+        // Every list must come out whole, and the machine must have collected.
         var holder = new Bl0jv2_jVM[1];
-        String out = run("def t(v) { } dispatch(t, 1, 0); i = 0; while (i < 20000) { s = 'junk' + str(i); i = i + 1; } print 'done';",
-                vm -> { vm.set_core_count(2); vm.set_gc_enabled(true); vm.set_gc_threshold_bytes(8 * 1024); holder[0] = vm; });
-        assertEquals("done", out);
-        assertEquals(0, holder[0].gc_collections());
+        String out = run(
+                "def class G { static field m; static field d; } " +
+                "G.m = newMutex(); G.d = [0, 0]; " +
+                "def work(id) { mine = []; i = 0; while (i < 6000) { push(mine, 'w' + str(id) + '-' + str(i)); g = 'junk' + str(i); i = i + 1; } " +
+                "  ok = true; i = 0; while (i < 6000) { if (mine[i] != 'w' + str(id) + '-' + str(i)) { ok = false; } i = i + 1; } " +
+                "  lock(G.m); G.d[id] = ok ? 1 : 2; unlock(G.m); } " +
+                "dispatch(work, 1, 0); dispatch(work, 2, 1); " +
+                "mine = []; i = 0; while (i < 6000) { push(mine, 'm-' + str(i)); g = 'junk' + str(i); i = i + 1; } " +
+                "waited = 0; while ((G.d[0] == 0 || G.d[1] == 0) && waited < 3000) { wait(10); waited = waited + 1; } " +
+                "ok = true; i = 0; while (i < 6000) { if (mine[i] != 'm-' + str(i)) { ok = false; } i = i + 1; } " +
+                "print str(G.d[0]) + str(G.d[1]) + str(ok);",
+                vm -> { vm.set_core_count(3); vm.set_gc_enabled(true); vm.set_gc_threshold_bytes(32 * 1024); holder[0] = vm; });
+        assertEquals("11true", out);
+        assertTrue(holder[0].gc_collections() > 0, "collections: " + holder[0].gc_collections());
     }
 }

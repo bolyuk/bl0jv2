@@ -1,0 +1,4 @@
+# aeon-os service: run by 'service sshd start' (and at boot once enabled: 'service sshd enable')
+description = Remote login over SSH (port 22; see bin/sshd.bl0)
+command = sshd
+user = root

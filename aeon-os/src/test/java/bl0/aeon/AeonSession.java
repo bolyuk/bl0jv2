@@ -88,6 +88,13 @@ public final class AeonSession {
     /** the same with more drives attached after the first (drive 1, 2, ...) */
     static AeonSession shellOn(java.nio.file.Path image, boolean fresh, java.nio.file.Path share, int cores,
                                java.util.List<bl0.bl0jv2.runtime.device.BlockDevice> drives) throws Exception {
+        return shellOn(image, fresh, share, cores, drives, vm -> { });
+    }
+
+    /** the same, and 'extra' sets the machine up further (host bridges, ...) before it runs */
+    static AeonSession shellOn(java.nio.file.Path image, boolean fresh, java.nio.file.Path share, int cores,
+                               java.util.List<bl0.bl0jv2.runtime.device.BlockDevice> drives,
+                               java.util.function.Consumer<bl0.bl0jv2.runtime.Bl0jv2_jVM> extra) throws Exception {
         var s = new AeonSession();
         s.start(compile("init.bl0"), cores, vm -> {
             vm.set_clock(s.clock::get);
@@ -95,6 +102,7 @@ public final class AeonSession {
                 if (share != null) vm.attach_share(new bl0.bl0jv2.cli.DirShare(share));
                 vm.attach_disk(fresh ? AeonImage.os(image) : AeonImage.open(image, AeonImage.SECTORS));
                 for (var drive : drives) vm.attach_disk(drive);
+                extra.accept(vm);
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);
             }

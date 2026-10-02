@@ -9,6 +9,7 @@ import bl0.bl0jv2.runtime.interrupt.TimerService;
 import bl0.bl0jv2.runtime.device.BlockDevice;
 import bl0.bl0jv2.runtime.device.DisplayController;
 import bl0.bl0jv2.runtime.device.DiskController;
+import bl0.bl0jv2.runtime.device.RandomDevice;
 import bl0.bl0jv2.runtime.device.RealTimeClock;
 import bl0.bl0jv2.runtime.device.UartController;
 import bl0.bl0jv2.runtime.device.PortDevice;
@@ -73,7 +74,8 @@ public final class Bl0jv2_jVM {
     }, () -> this.interrupts.raiseInterruptOn(0, 2));   // the serial port's interrupt is taken by core 0, always: its handler is not written for two cores at once
     private final DisplayController display = new DisplayController(portIO, rawMemory);
     private final RealTimeClock clock = new RealTimeClock();
-    private final PortDevice[] devices = {disk, share, uart, display, clock};
+    private final RandomDevice random = new RandomDevice();
+    private final PortDevice[] devices = {disk, share, uart, display, clock, random};
     private final InterruptController interrupts = new InterruptController();
     private final TimerService timers = new TimerService(interrupts);
 
@@ -139,6 +141,7 @@ public final class Bl0jv2_jVM {
     private record DispatchedWork(Object callee, long argRaw) {}
 
     public Bl0jv2_jVM() {
+        heap.setAccounting(() -> currentContext().memoryAccount, () -> gcEnabled, () -> currentContext().privileged);
         nativeMethods.put(NativeMethods.PRINT, (d) -> {
             synchronized (ioLock) {
                 if (out != null) {
@@ -425,6 +428,52 @@ public final class Bl0jv2_jVM {
             byte[] fileBytes = new byte[size];
             rawMemory.readBytes(addr, fileBytes);
             return execBytes(fileBytes, "memory at " + addr, mode);
+        });
+
+        // memory(op, a, b): who holds how much of the heap. Accounts are numbers 0 - 4095; a core's allocations are
+        // charged to the account the kernel set for it, 0 (the system) at first.
+        //   0 set this core's account to a (privileged)      1 bytes held by account a      2 limit account a to b
+        //   bytes, 0 for none (privileged)                    3 the limit of account a
+        //   4 a statistic: a = 0 objects, 1 bytes in all, 2 limit of the whole heap, 3 slots made, 4 collections,
+        //     5 bytes of raw memory in use, 6 bytes of raw memory
+        //   5 limit the whole heap to a bytes (privileged)    6 account a's objects go to account 0 and its limit
+        //   ends (privileged: the process has ended)          7 recount sizes now
+        //   8 collecting garbage on (a = 1) or off (a = 0) (privileged)   9 collect after every a bytes of allocation
+        //   (privileged)    10 collect now (privileged): everything unreachable is freed, whatever core made it
+        // Sizes are estimates (a fixed cost per object, plus what a string, array or instance holds).
+        nativeMethods.put(NativeMethods.MEMORY, (arg) -> {
+            Object[] a = nativeArgs(arg, 3, "memory(op, a, b)");
+            int op = requireInt(a[0], "memory"), x = requireInt(a[1], "memory");
+            long y = requireInt(a[2], "memory");
+            if (op == 0 || op == 2 || op == 5 || op == 6 || op == 8 || op == 9 || op == 10) requirePrivileged(currentContext(), "memory");
+            if (x < 0 || x >= Heap.ACCOUNTS) if (op != 4 && op != 5 && op != 7 && op != 9) throw new Bl0j_VM_Exception("memory: no such account " + x);
+            switch (op) {
+                case 0 -> { currentContext().memoryAccount = x; return 0; }
+                case 1 -> { return (int) Math.min(heap.usedBy(x), Integer.MAX_VALUE); }
+                case 2 -> { heap.setLimit(x, y); return 0; }
+                case 3 -> { return (int) Math.min(heap.limitOf(x), Integer.MAX_VALUE); }
+                case 4 -> {
+                    long v = switch (x) {
+                        case 0 -> heap.liveCount();
+                        case 1 -> heap.usedTotal();
+                        case 2 -> heap.totalLimit();
+                        case 3 -> heap.slotCapacity();
+                        case 4 -> collections;
+                        case 5 -> rawMemory.peek(0, 4) & 0xFFFFFFFFL;
+                        case 6 -> rawMemory.sizeBytes();
+                        case 7 -> gcEnabled ? 1 : 0;
+                        default -> throw new Bl0j_VM_Exception("memory: no such statistic " + x);
+                    };
+                    return (int) Math.min(v, Integer.MAX_VALUE);
+                }
+                case 5 -> { heap.setTotalLimit(x); return 0; }
+                case 6 -> { heap.releaseAccount(x); return 0; }
+                case 7 -> { heap.recount(); return 0; }
+                case 8 -> { gcEnabled = x != 0; return 0; }
+                case 9 -> { heap.setCollectThresholdBytes(Math.max(x, 4096)); return 0; }
+                case 10 -> { collectGarbage(currentContext()); return 0; }
+                default -> throw new Bl0j_VM_Exception("memory: no such operation " + op);
+            }
         });
     }
 
@@ -1078,16 +1127,105 @@ public final class Bl0jv2_jVM {
     // nested handler/toString runs) it simply doesn't run: explicit free()
     // and set_max_heap_entries() remain the tools there.
     private volatile boolean gcEnabled = false;
-    private long collections;
+    private volatile long collections;
+
+    // ---- collection, with several cores
+    //
+    // Every core that runs bl0jv2 code is registered. A collection needs them all standing still at an instruction
+    // boundary (or somewhere they cannot touch the heap): the core that decides to collect sets gcPending and waits
+    // until each other core has either parked itself - at the poll that runs every few instructions, in a nested run
+    // too - or is "in native", sleeping in a call that blocks (wait, a mutex, an event, the idle loop of a worker).
+    // A core leaving such a call looks at gcPending before it does anything else. Then the collector marks from the
+    // constant pool, every core's frames, the handler functions and the work queued for the cores, sweeps, and lets
+    // everybody go.
+    private final java.util.concurrent.CopyOnWriteArrayList<CoreContext> registeredCores = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final Object gcMonitor = new Object();
+    private final java.util.concurrent.atomic.AtomicBoolean gcRunning = new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile boolean gcPending;
+
+    private void registerCore(CoreContext ctx) {
+        if (!registeredCores.contains(ctx)) registeredCores.add(ctx);
+    }
+
+    /** this core is about to block in a call that does not touch the heap: it counts as standing still */
+    private void enterNative(CoreContext ctx) {
+        ctx.inNative = true;
+    }
+
+    private void exitNative(CoreContext ctx) {
+        ctx.inNative = false;
+        if (gcPending) parkForGc(ctx);
+    }
+
+    private void parkForGc(CoreContext ctx) {
+        synchronized (gcMonitor) {
+            ctx.safe = true;
+            gcMonitor.notifyAll();
+            while (gcPending && !panicked) {
+                try {
+                    gcMonitor.wait(50);
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+            ctx.safe = false;
+        }
+    }
+
+    private boolean othersStandStill(CoreContext self) {
+        for (CoreContext c : registeredCores)
+            if (c != self && !c.safe && !c.inNative) return false;
+        return true;
+    }
+
+    /** the poll's part of collecting: park when somebody else is collecting, collect when the heap asks for it */
+    private void gcSafepoint(CoreContext ctx) {
+        if (gcPending) parkForGc(ctx);
+        else if (heap.collectWanted()) collectGarbage(ctx);
+    }
 
     private void collectGarbage(CoreContext ctx) {
-        Collector collector = new Collector(heap);
-        collector.markValues(consts);
-        ctx.callStack.forEachLive(collector::markValues);
-        interrupts.forEachHandlerFn(collector::markObject);
-        collector.drain();
-        collector.sweep();
-        collections++;
+        if (!gcRunning.compareAndSet(false, true)) {
+            if (gcPending) parkForGc(ctx);
+            return;
+        }
+        gcPending = true;
+        try {
+            synchronized (gcMonitor) {
+                while (!othersStandStill(ctx) && !panicked) {
+                    try {
+                        gcMonitor.wait(1);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+            }
+            if (panicked) return;
+            Collector collector = new Collector(heap);
+            collector.markValues(consts);
+            for (CoreContext c : registeredCores)
+                c.callStack.forEachLive(collector::markValues);
+            interrupts.forEachHandlerFn(collector::markObject);
+            // references the VM itself keeps outside any register: the strings it made once for TO_STRING / TYPE_OF, and what
+            // the shared libraries export
+            for (long ref : internedStrings.values()) collector.markValue(ref);
+            for (long ref : exports.values()) collector.markValue(ref);
+            for (BlockingQueue<DispatchedWork> inbox : coreInboxes.values()) {
+                for (DispatchedWork w : inbox) {
+                    collector.markObject(w.callee());
+                    collector.markValue(w.argRaw());
+                }
+            }
+            collector.drain();
+            collector.sweep();
+            collections++;
+        } finally {
+            synchronized (gcMonitor) {
+                gcPending = false;
+                gcRunning.set(false);
+                gcMonitor.notifyAll();
+            }
+        }
     }
 
     /** turns automatic collection on/off (default OFF: memory is released with free()); explicit free() is unaffected either way */
@@ -1103,6 +1241,11 @@ public final class Bl0jv2_jVM {
     /** number of automatic collections performed so far */
     public long gc_collections() {
         return collections;
+    }
+
+    /** the most bytes (estimated) the heap may hold in all; 0 for no limit. An allocation past it fails with 'out of memory'. */
+    public void set_heap_limit_bytes(long bytes) {
+        heap.setTotalLimit(bytes);
     }
 
     public void set_max_heap_entries(long maxHeapEntries){
@@ -1172,6 +1315,11 @@ public final class Bl0jv2_jVM {
     }
 
     /** what the real-time clock (ports 0x0F70-0x0F77) reads: milliseconds since 1970-01-01 UTC; the host's clock by default */
+    /** where the random-number port (0x0F78) gets its bits: the host's SecureRandom by default */
+    public void set_random(java.util.Random source) {
+        random.setSource(source);
+    }
+
     public void set_clock(java.util.function.LongSupplier epochMillis) {
         clock.setSource(epochMillis);
     }
@@ -1219,6 +1367,7 @@ public final class Bl0jv2_jVM {
     }
 
     public void run_instructions() throws IOException {
+        registerCore(currentContext());
         startWorkerCoresIfNeeded();
         execute(0, -1, true);
     }
@@ -1275,14 +1424,17 @@ public final class Bl0jv2_jVM {
             CoreContext ctx = new CoreContext(coreId);
             coreContext.set(ctx);
             ctx.callStack.push(new long[1], -1, -1);
+            registerCore(ctx);
 
             while (true) {
                 DispatchedWork work;
+                enterNative(ctx);              // idle: nothing of the heap is touched while waiting for work
                 try {
                     work = inbox.take();
                 } catch (InterruptedException e) {
                     return;
                 }
+                exitNative(ctx);
                 try {
                     invokeDispatchedWork(work.callee(), work.argRaw());
                 } catch (Bl0j_VM_Panic e) {
@@ -1460,16 +1612,17 @@ public final class Bl0jv2_jVM {
                 if (panicked)
                     throw new Bl0j_VM_Panic("halted: another core panicked");
 
-                if (pollEligible && ++sinceLastPoll >= interrupts.pollInterval()) {
+                if (++sinceLastPoll >= interrupts.pollInterval()) {
                     sinceLastPoll = 0;
+                    // a collection needs every core standing still: that holds in a nested run too (a program
+                    // runs inside a system call), so this part is not only for the outermost run
+                    if (gcEnabled) gcSafepoint(ctx);
                     // the cadence above always ticks on schedule regardless
                     // of masking (matches this VM's pre-multi-core timing
                     // exactly) - only the actual delivery attempt is
                     // skipped while this core is masked, so a pending
                     // interrupt stays queued rather than being dropped
-                    if (heap.collectWanted() && gcEnabled && coreCount == 1)
-                        collectGarbage(ctx);
-                    if (ctx.disableDepth == 0) {
+                    if (pollEligible && ctx.disableDepth == 0) {
                         InterruptController.Fired fired = interrupts.pollNext(ctx.coreId);
                         if (fired != null)
                             invokeAsTrap(fired.handlerFn(), NanBox.ofInt(fired.vector()));
@@ -1606,7 +1759,21 @@ public final class Bl0jv2_jVM {
                         var nativeFun = nativeMethods.get((byte) a);
                         if (nativeFun == null)
                             throw new Bl0j_VM_Exception("unknown native method: " + a);
-                        Object result = nativeFun.apply(unbox(reg[b]));
+                        // a call that sleeps (a timer, a mutex, an event, the keyboard) counts as standing still for a collection
+                        boolean sleeps = a == NativeMethods.WAIT || a == NativeMethods.READ || a == NativeMethods.LOCK_MUTEX
+                                || a == NativeMethods.WAIT_EVENT || a == NativeMethods.HALT_CORE;
+                        Object result;
+                        if (sleeps) {
+                            Object argument = unbox(reg[b]);
+                            enterNative(ctx);
+                            try {
+                                result = nativeFun.apply(argument);
+                            } finally {
+                                exitNative(ctx);
+                            }
+                        } else {
+                            result = nativeFun.apply(unbox(reg[b]));
+                        }
                         // -1 is the generic error sentinel of the older natives (wait() on
                         // interrupt...) - strFind legitimately answers -1 for 'not found'
                         if (a != NativeMethods.STR_FIND && result instanceof Integer failure && failure == -1)
@@ -2086,6 +2253,13 @@ public final class Bl0jv2_jVM {
 
         // how many invoke() calls (Java -> bl0jv2) are active on this core's Java stack
         int invokeDepth = 0;
+
+        // the account the heap objects this core makes are charged to (0 = the system); the kernel sets it
+        int memoryAccount = 0;
+
+        // for collecting with several cores (see collectGarbage): parked at a safe point / blocked in a call that does not touch the heap
+        volatile boolean safe;
+        volatile boolean inNative;
 
         CoreContext(int coreId) {
             this.coreId = coreId;

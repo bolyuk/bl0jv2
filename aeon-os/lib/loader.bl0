@@ -30,7 +30,7 @@ def loaderBuffer(core) {
         i = 0;
         while (i < coreCount()) {
             push(Loader.buffers, nil);
-            push(Loader.limits, i == 0 ? 262144 : 32768);
+            push(Loader.limits, i == 0 ? 262144 : 131072);
             i += 1;
         }
     }

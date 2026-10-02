@@ -81,6 +81,7 @@ def run(desk, words) {
 }
 
 def main(words) {
+    if (!toTerminal()) { sayErr('wm: needs a terminal (its output cannot go to a file, a pipe or an ssh session)'); return nil; }
     columns = Console.columns > 20 ? Console.columns : 80;
     rows = Console.rows > 6 ? Console.rows : 24;
     desk = new Desk(columns, rows);

@@ -1,0 +1,60 @@
+// aeon-os: what a user may use. etc/limits has one line per user and resource:
+//
+//   # user   resource   value
+//   *        memory     16384        KB of heap one process may hold (0: no limit)
+//   *        processes  4            how many processes the user may have running at once (0: no limit)
+//   alice    memory     65536        a user's own line beats the * line
+//
+// The memory limit is checked by the VM on every allocation (see lib/mem.bl0): a process that goes over it fails with
+// 'out of memory' and nothing else is touched. The processes limit is checked when a process is started in the
+// background or in a pipeline (a program run from the prompt is not counted: there is one at a time).
+
+import 'userland.bl0';
+import '../../stdlib/str/split.bl0';
+
+def class Limits {
+    // the name of user 'uid' from etc/passwd ('#N' when there is none)
+    static def nameOf(uid) {
+        text = Fs.mounted ? Fs.read('etc/passwd') : nil;
+        if (text != nil) {
+            lines = Split.split(text, strChar(10));
+            i = 0;
+            while (i < len(lines)) {
+                parts = Split.split(lines[i], ':');
+                if (len(parts) >= 3 && unsignedNumber(parts[1]) == uid) { return parts[0]; }
+                i += 1;
+            }
+        }
+        return uid == 0 ? 'root' : '#' + uid;
+    }
+
+    // [memory in bytes, processes] of a user (0 = no limit); what is not mentioned is no limit
+    static def of(uid) {
+        out = [0, 0];
+        if (!Fs.mounted) { return out; }
+        text = Fs.read('etc/limits');
+        if (text == nil) { return out; }
+        name = Limits.nameOf(uid);
+        general = [nil, nil];
+        own = [nil, nil];
+        lines = Split.split(text, strChar(10));
+        i = 0;
+        while (i < len(lines)) {
+            words = tokens(lines[i]);
+            if (len(words) == 3 && strSub(words[0], 0, 1) != '#') {
+                value = unsignedNumber(words[2]);
+                slot = words[1] == 'memory' ? 0 : (words[1] == 'processes' ? 1 : -1);
+                if (value != nil && slot >= 0) {
+                    if (words[0] == '*') { general[slot] = value; }
+                    else if (words[0] == name) { own[slot] = value; }
+                }
+            }
+            i += 1;
+        }
+        memory = own[0] != nil ? own[0] : general[0];
+        processes = own[1] != nil ? own[1] : general[1];
+        if (memory != nil) { out[0] = memory * 1024; }
+        if (processes != nil) { out[1] = processes; }
+        return out;
+    }
+}

@@ -2,14 +2,16 @@
 // Loaded from the virtual disk by the shell (bin/ps.bl0c); see lib/proc.bl0.
 
 import '../lib/proc.bl0';
+import '../lib/mem.bl0';
 
 def main(words) {
-    say(paintBold(7, Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {}', ['pid', 'state', 'core', 'time ms', 'command'])));
+    say(paintBold(7, Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {:>9}  {}', ['pid', 'state', 'core', 'time ms', 'memory', 'command'])));
     i = 0;
     while (i < len(Proc.table)) {
         p = Proc.table[i];
         end = p.state == 'running' ? ticks() : p.ended;
-        line = Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {}', [p.pid, p.state, p.core, end - p.started, p.name]);
+        held = p.state == 'running' ? (p.system ? Mem.used(0) : Mem.used(p.account)) : p.memory;
+        line = Fmt.format('{:>4}  {:<8} {:>4}  {:>8}  {:>9}  {}', [p.pid, p.state, p.core, end - p.started, Mem.size(held), p.name]);
         say(p.state == 'running' ? paint(2, line) : line);
         i += 1;
     }

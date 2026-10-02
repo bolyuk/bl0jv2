@@ -2,10 +2,16 @@ package bl0.bl0jv2.runtime;
 
 import bl0.bl0jv2.exceptions.Bl0j_VM_Exception;
 
+import bl0.bl0jv2.runtime.values.Bl0jArray;
+import bl0.bl0jv2.runtime.values.Bl0jInstance;
+import bl0.bl0jv2.runtime.values.Bl0jTuple;
+
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
+import java.util.function.IntSupplier;
 
 /**
  * The VM's managed heap: everything a register holds as a NanBox REF (strings,
@@ -47,6 +53,21 @@ final class Heap {
     private long collectThresholdBytes = minThresholdBytes;
     private volatile boolean collectWanted;
 
+    // ---- who holds how much: every slot is charged to an account (the VM says which, from the core that allocates),
+    // at an estimated size. 'used' follows allocations, free() and sweeps; the sizes of arrays and instances that
+    // grow afterwards are brought up to date by recount(). An account may have a limit; the total may too.
+    static final int ACCOUNTS = 4096;
+    private int[] owners = new int[1024];
+    private int[] weights = new int[1024];
+    private final long[] used = new long[ACCOUNTS];
+    private final long[] limits = new long[ACCOUNTS];
+    private long usedTotal;
+    private long totalLimit;
+    private long addsSinceRecount;
+    private IntSupplier ownerSource = () -> 0;
+    private BooleanSupplier gcPossible = () -> false;
+    private BooleanSupplier kernelMode = () -> false;     // limits bind a program, not the kernel running on its behalf
+
     /** how much allocation (estimated bytes) triggers a collection request; the floor of the adaptive threshold */
     void setCollectThresholdBytes(long bytes) {
         lock.lock();
@@ -66,26 +87,81 @@ final class Heap {
     int add(Object value) {
         lock.lock();
         try {
-            bytesSinceCollect += weigh(value);
+            long w = weigh(value);
+            int owner = ownerSource.getAsInt();
+            checkLimits(owner, w);
+            bytesSinceCollect += w;
             if (bytesSinceCollect >= collectThresholdBytes
                     || (maxEntries > 0 && live >= maxEntries - maxEntries / 4))
                 collectWanted = true;
+            if (++addsSinceRecount >= Math.max(2048, live / 4) && hasLimits())
+                recountLocked();
 
+            int slot;
             if (!freeSlots.isEmpty()) {
-                int slot = freeSlots.pop();
+                slot = freeSlots.pop();
                 slots[slot] = value;
                 live++;
-                return slot;
+            } else {
+                if (maxEntries > 0 && live >= maxEntries)
+                    throw new Bl0j_VM_Exception("out of memory: heap entry limit (" + maxEntries + ") reached");
+                if (size == slots.length) {
+                    slots = Arrays.copyOf(slots, size * 2);
+                    owners = Arrays.copyOf(owners, size * 2);
+                    weights = Arrays.copyOf(weights, size * 2);
+                }
+                slots[size] = value;
+                live++;
+                slot = size++;
             }
-            if (maxEntries > 0 && live >= maxEntries)
-                throw new Bl0j_VM_Exception("out of memory: heap entry limit (" + maxEntries + ") reached");
-            if (size == slots.length)
-                slots = Arrays.copyOf(slots, size * 2);
-            slots[size] = value;
-            live++;
-            return size++;
+            owners[slot] = owner;
+            weights[slot] = (int) w;
+            used[owner] += w;
+            usedTotal += w;
+            return slot;
         } finally {
             lock.unlock();
+        }
+    }
+
+    private boolean hasLimits() {
+        return totalLimit > 0 || limitedAccounts > 0;
+    }
+
+    private int limitedAccounts;
+
+    // How much more than its limit an account may take once it has been told: enough for the program's own handler to
+    // report the error (an error needs a string, a message another).
+    private static final long RESERVE = 16384;
+    private final boolean[] breached = new boolean[ACCOUNTS];
+    private boolean breachedTotal;
+
+    // refuses an allocation that would take an account (or the whole heap) over its limit; when a collection could
+    // make room it is asked for first and the allocation goes through, up to a quarter more than the limit. The first
+    // refusal throws and opens the reserve above, so the error can be handled; beyond the reserve every allocation is
+    // refused until the account is back under its limit.
+    private void checkLimits(int owner, long w) {
+        if (kernelMode.getAsBoolean()) return;
+        long limit = limits[owner];
+        if (limit > 0 && used[owner] + w > limit) {
+            if (gcPossible.getAsBoolean() && used[owner] + w <= limit + limit / 4) {
+                collectWanted = true;
+            } else if (!breached[owner]) {
+                breached[owner] = true;
+                throw new Bl0j_VM_Exception("out of memory: the limit of " + limit + " bytes for this process is reached");
+            } else if (used[owner] + w > limit + RESERVE) {
+                throw new Bl0j_VM_Exception("out of memory: the limit of " + limit + " bytes for this process is reached");
+            }
+        }
+        if (totalLimit > 0 && usedTotal + w > totalLimit) {
+            if (gcPossible.getAsBoolean() && usedTotal + w <= totalLimit + totalLimit / 4) {
+                collectWanted = true;
+            } else if (!breachedTotal) {
+                breachedTotal = true;
+                throw new Bl0j_VM_Exception("out of memory: the heap limit of " + totalLimit + " bytes is reached");
+            } else if (usedTotal + w > totalLimit + RESERVE) {
+                throw new Bl0j_VM_Exception("out of memory: the heap limit of " + totalLimit + " bytes is reached");
+            }
         }
     }
 
@@ -94,6 +170,12 @@ final class Heap {
     private static long weigh(Object value) {
         if (value instanceof String s)
             return 48 + 2L * s.length();
+        if (value instanceof Bl0jArray a)
+            return 64 + 8L * a.length();
+        if (value instanceof Bl0jTuple t)
+            return 64 + 8L * t.length();
+        if (value instanceof Bl0jInstance i)
+            return 64 + 8L * i.cls.fieldCount();
         return 64;
     }
 
@@ -122,6 +204,7 @@ final class Heap {
         try {
             if (slot < 0 || slot >= size || slots[slot] == FREED)
                 return false;
+            release(slot);
             slots[slot] = FREED;
             freeSlots.push(slot);
             live--;
@@ -138,6 +221,11 @@ final class Heap {
             size = 0;
             live = 0;
             freeSlots.clear();
+            owners = new int[1024];
+            weights = new int[1024];
+            Arrays.fill(used, 0);
+            usedTotal = 0;
+            addsSinceRecount = 0;
             bytesSinceCollect = 0;
             collectWanted = false;
         } finally {
@@ -170,6 +258,7 @@ final class Heap {
                 Object v = slots[i];
                 if (v == null || v == FREED || reachable.get(i))
                     continue;
+                release(i);
                 slots[i] = FREED;
                 freeSlots.push(i);
                 live--;
@@ -189,5 +278,106 @@ final class Heap {
 
     int liveCount() {
         return live;
+    }
+
+    // ---- accounts
+
+    /** takes a slot's charge back from its account */
+    private void release(int slot) {
+        int o = owners[slot];
+        used[o] = Math.max(0, used[o] - weights[slot]);
+        usedTotal = Math.max(0, usedTotal - weights[slot]);
+        weights[slot] = 0;
+        if (breached[o] && used[o] <= limits[o]) breached[o] = false;
+        if (breachedTotal && usedTotal <= totalLimit) breachedTotal = false;
+    }
+
+    void setAccounting(IntSupplier ownerSource, BooleanSupplier gcPossible, BooleanSupplier kernelMode) {
+        this.ownerSource = ownerSource;
+        this.gcPossible = gcPossible;
+        this.kernelMode = kernelMode;
+    }
+
+    long usedBy(int account) {
+        lock.lock();
+        try {
+            return used[account];
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    long usedTotal() {
+        return usedTotal;
+    }
+
+    long limitOf(int account) {
+        return limits[account];
+    }
+
+    void setLimit(int account, long bytes) {
+        lock.lock();
+        try {
+            if (limits[account] > 0) limitedAccounts--;
+            limits[account] = Math.max(0, bytes);
+            breached[account] = false;
+            if (limits[account] > 0) limitedAccounts++;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    long totalLimit() {
+        return totalLimit;
+    }
+
+    void setTotalLimit(long bytes) {
+        totalLimit = Math.max(0, bytes);
+        breachedTotal = false;
+    }
+
+    int slotCapacity() {
+        return slots.length;
+    }
+
+    /** moves what an account holds to account 0 and takes its limit off: the process that held it has ended */
+    void releaseAccount(int account) {
+        if (account == 0) return;
+        lock.lock();
+        try {
+            for (int i = 0; i < size; i++) {
+                if (owners[i] == account && slots[i] != null && slots[i] != FREED) owners[i] = 0;
+            }
+            used[0] += used[account];
+            used[account] = 0;
+            if (limits[account] > 0) limitedAccounts--;
+            limits[account] = 0;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** the sizes of everything, as they are now (arrays grow after they are made) */
+    void recount() {
+        lock.lock();
+        try {
+            recountLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void recountLocked() {
+        Arrays.fill(used, 0);
+        usedTotal = 0;
+        for (int i = 0; i < size; i++) {
+            Object v = slots[i];
+            if (v == null || v == FREED) continue;
+            long w = weigh(v);
+            weights[i] = (int) Math.min(w, Integer.MAX_VALUE);
+            used[owners[i]] += w;
+            usedTotal += w;
+        }
+        addsSinceRecount = 0;
     }
 }

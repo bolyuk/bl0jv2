@@ -45,6 +45,7 @@ def class Ctx {
     field gid;            // the primary group
     field groups;         // every group (numbers), the primary first
     field stack;          // the identities su has switched away from, newest last
+    field mergeErr;       // errors go into the output (a remote session has no console to show them on)
     field failed;         // the command has reported an error (sayErr) since the shell cleared this: its status is 'failed'
 
     def init() {
@@ -63,6 +64,7 @@ def class Ctx {
         this.groups = [0];
         this.stack = [];
         this.failed = false;
+        this.mergeErr = false;
     }
 
     // the context of the core running this code
@@ -226,6 +228,10 @@ def paintBold(n, text) {
 
 def sayErr(text) {
     Ctx.me().failed = true;
+    if (Ctx.me().mergeErr) {
+        sayRaw(text + '\n');
+        return nil;
+    }
     text = Term.paint(1, text);
     if (Ctx.me().background) {
         consoleAsync(text + '\n');

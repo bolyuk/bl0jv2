@@ -5,6 +5,7 @@
 // Loaded from the virtual disk by the shell (bin/top.bl0c); see lib/userland.bl0.
 
 import '../lib/proc.bl0';
+import '../lib/mem.bl0';
 import '../lib/term.bl0';
 import '../lib/keys.bl0';
 
@@ -64,13 +65,17 @@ def screenLines(columns, rows) {
     } else {
         push(lines, ' disk  none');
     }
+    h = Mem.heap();
+    r = Mem.raw();
+    push(lines, ' heap  ' + Mem.size(h[1]) + (h[2] > 0 ? ' of ' + Mem.size(h[2]) : '') + ' in ' + h[0] + ' objects    raw memory  ' + Mem.size(r[0]) + ' of ' + Mem.size(r[1]));
     push(lines, '');
-    push(lines, Term.invert() + pad(Fmt.format(' {:>4}  {:<8} {:>4}  {:>8}  {}', ['pid', 'state', 'core', 'time ms', 'command']), columns) + Term.normal());
+    push(lines, Term.invert() + pad(Fmt.format(' {:>4}  {:<8} {:>4}  {:>8}  {:>9}  {}', ['pid', 'state', 'core', 'time ms', 'memory', 'command']), columns) + Term.normal());
     i = 0;
     while (i < len(Proc.table) && len(lines) < rows - 1) {
         p = Proc.table[i];
         end = p.state == 'running' ? ticks() : p.ended;
-        text = Fmt.format(' {:>4}  {:<8} {:>4}  {:>8}  {}', [p.pid, p.state, p.core, end - p.started, p.name]);
+        held = p.state == 'running' ? (p.system ? Mem.used(0) : Mem.used(p.account)) : p.memory;
+        text = Fmt.format(' {:>4}  {:<8} {:>4}  {:>8}  {:>9}  {}', [p.pid, p.state, p.core, end - p.started, Mem.size(held), p.name]);
         push(lines, p.state == 'running' ? Term.paint(2, text) : text);
         i += 1;
     }
@@ -93,6 +98,7 @@ def draw() {
 }
 
 def main(words) {
+    if (!toTerminal()) { sayErr('top: needs a terminal (its output cannot go to a file, a pipe or an ssh session)'); return nil; }
     consoleWrite(Term.esc + '[?1049h' + Term.esc + '[?25l' + Term.clearScreen());
     try {
         done = false;

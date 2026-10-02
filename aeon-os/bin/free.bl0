@@ -1,0 +1,31 @@
+// aeon-os program: how much memory is in use; free
+//
+// The heap (what strings, arrays and objects take; the sizes are estimates), the raw memory (program buffers and device
+// rings) and, per process, what each running one holds. A heap limit (--heap-kb of the VM) and the users' limits
+// (etc/limits) are shown where they apply. Loaded from the virtual disk by the shell (bin/free.bl0c); see lib/mem.bl0.
+
+import '../lib/proc.bl0';
+import '../lib/mem.bl0';
+
+def main(words) {
+    h = Mem.heap();
+    r = Mem.raw();
+    say(paintBold(7, Fmt.format('{:<12} {:>12} {:>12}', ['', 'in use', 'limit'])));
+    say(Fmt.format('{:<12} {:>12} {:>12}', ['heap', Mem.size(h[1]), h[2] > 0 ? Mem.size(h[2]) : 'none']));
+    say(Fmt.format('{:<12} {:>12} {:>12}', ['raw memory', Mem.size(r[0]), Mem.size(r[1])]));
+    say(h[0] + ' objects on the heap, ' + memory(4, 4, 0) + ' collections so far');
+    say('');
+    say(paintBold(7, Fmt.format('{:<12} {:>12} {:>12}', ['charged to', 'held', 'limit'])));
+    say(Fmt.format('{:<12} {:>12} {:>12}', ['system', Mem.size(Mem.used(0)), 'none']));
+    i = 0;
+    while (i < len(Proc.table)) {
+        p = Proc.table[i];
+        if (p.state == 'running' && !p.system) {
+            limit = Mem.limitOf(p.account);
+            say(Fmt.format('{:<12} {:>12} {:>12}', ['[' + p.pid + '] ' + p.name, Mem.size(Mem.used(p.account)), limit > 0 ? Mem.size(limit) : 'none']));
+        }
+        i += 1;
+    }
+}
+
+programMain(main);

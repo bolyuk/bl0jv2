@@ -275,6 +275,13 @@ def class LineEditor {
     // ---- the loop ----
 
     // text that jobs in the background queued while this editor waited: print it above the line
+    static field idle;         // a function the shell runs while it waits for a key (every quarter second at most), or nil
+
+    static def idleWork() {
+        hook = LineEditor.idle;
+        if (hook != nil) { hook(); }
+    }
+
     static def flushAsync() {
         text = consoleTakeAsync();
         if (text == '') { return nil; }
@@ -325,6 +332,7 @@ def class LineEditor {
         while (true) {
             key = Keys.read(250);
             LineEditor.flushAsync();
+            LineEditor.idleWork();
             if (key == nil) {
                 if (Power.requested) {
                     // the machine is shutting down while we wait at the prompt: end like Ctrl-D does

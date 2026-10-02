@@ -1,0 +1,36 @@
+// Random numbers from the machine's random-number port (0x0F78, see RandomDevice in the runtime): on a real board the
+// hardware generator, in the VM the host's SecureRandom. The port is privileged, so a caller in user mode goes
+// through a system call the kernel registers with Random.init(), like Clock.
+//
+// Random.bytes(n) is an array of n numbers 0-255.
+
+def class Random {
+    static field vector;
+
+    // privileged, once
+    static def init() {
+        registerHandler(onRandomSyscall, Random.vector, 1);
+    }
+
+    static def bytes(n) {
+        if (isPrivileged()) { return Random.read(n); }
+        return syscall(Random.vector, n);
+    }
+
+    // privileged: the port
+    static def read(n) {
+        out = [];
+        while (len(out) < n) {
+            v = in16(0x0F78);
+            push(out, v & 255);
+            if (len(out) < n) { push(out, (v >>> 8) & 255); }
+        }
+        return out;
+    }
+}
+
+def onRandomSyscall(n) {
+    if (n < 0 || n > 4096) { throw('random: between 0 and 4096 bytes at a time'); }
+    return Random.read(n);
+}
+Random.vector = 20;

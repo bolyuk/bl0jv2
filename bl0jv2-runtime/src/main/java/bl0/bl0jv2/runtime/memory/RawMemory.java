@@ -63,6 +63,11 @@ public final class RawMemory {
     // hand out for anything else. Only rejects overlap against *other*
     // reservations and the arena's own bounds; peek/poke remain unaffected
     // either way, matching real MMIO's "no isolation" stance.
+    /** the size of the arena in bytes */
+    public int sizeBytes() {
+        return memory == null ? 0 : memory.length;
+    }
+
     public void reserve(int addr, int size) {
         lock.writeLock().lock();
         try {

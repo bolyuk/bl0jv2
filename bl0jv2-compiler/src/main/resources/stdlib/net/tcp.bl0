@@ -84,6 +84,7 @@ def class TcpConn {
     field peerFinReceived;
     field unacked;         // array of TcpUnacked, oldest first
 
+    static field mss;          // the most payload bytes in one segment
     static field connectTimeoutMs;
     static field rtoMs;        // base retransmission timeout; doubles per retry
     static field maxRetries;   // after this many, the connection is declared dead (CLOSED)
@@ -422,9 +423,19 @@ def class TcpConn {
     // no window/unacked-byte tracking to wait on - see this file's own
     // header comment on why a lossless loopback link has no real need for
     // it
+    //
+    // A message longer than TcpConn.mss goes out as several segments, so a frame never outgrows what a link (or the
+    // host bridge, which cuts a frame at Nic.maxFrameBytes) carries.
     def send(message) {
-        this.sendSegment(TcpFlags.ack | TcpFlags.psh, message);
-        this.sndNext = this.sndNext + len(message);
+        at = 0;
+        while (at < len(message) || at == 0) {
+            n = len(message) - at;
+            if (n > TcpConn.mss) { n = TcpConn.mss; }
+            this.sendSegment(TcpFlags.ack | TcpFlags.psh, strSub(message, at, at + n));
+            this.sndNext = this.sndNext + n;
+            at += n;
+            if (n == 0) { break; }
+        }
     }
 
     def hasData() {
@@ -506,6 +517,7 @@ def class TcpSegment {
 }
 
 TcpConn.connectTimeoutMs = 10000;
+TcpConn.mss = 1000;
 TcpConn.rtoMs = 200;
 TcpConn.maxRetries = 6;
 

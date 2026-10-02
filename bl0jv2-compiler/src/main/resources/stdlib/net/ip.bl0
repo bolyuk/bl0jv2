@@ -45,27 +45,20 @@ def class Ip {
         return (bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
     }
 
-    // byte -> single-char string for reconstructing a payload - NOT the
-    // same job stdlib/str/char.bl0's Char.char() does. That one is for
-    // rendering a keystroke on a console: anything outside printable ASCII
-    // has no drawable glyph, so it maps to '?' on purpose. A network
-    // payload has no such luxury - HTTP's own '\r\n\r\n' framing (see
-    // http.bl0) needs \r/\n to survive a round trip through here INTACT,
-    // not collapse to '?' and silently break every request/response
-    // boundary. So this preserves \r, \n, \t and \0 as themselves before
-    // falling back to Char.char()'s printable-range handling for
-    // everything else. It's still not a lossless 0-255 round trip in
-    // general: bl0jv2's lexer only recognizes a small fixed set of
-    // \-escapes (see Bl0jv2_Lexer's own unescape()), so a string literal
-    // naming most OTHER control bytes can't be written in this language at
-    // all - covering the specific bytes this stack's own framing actually
-    // uses is as far as that limitation lets this go.
+    // byte -> single-char string for reconstructing a payload: the character whose code is the byte, for every
+    // byte 0-255, so a payload survives the trip through a string exactly (bytesOf() is the way back) - binary
+    // protocols such as SSH depend on it. Such a string is a carrier for bytes, not text to print: the bytes
+    // above 127 are the characters U+0080 - U+00FF.
     static def netByteToChar(b) {
-        if (b == 13) { return '\r'; }
-        if (b == 10) { return '\n'; }
-        if (b == 9) { return '\t'; }
-        if (b == 0) { return '\0'; }
-        return Char.char(b);
+        return strChar(b);
+    }
+
+    // an array of byte values as a string of the same characters
+    static def stringOf(bytes) {
+        parts = [];
+        i = 0;
+        while (i < len(bytes)) { push(parts, strChar(bytes[i])); i += 1; }
+        return strJoin(parts, '');
     }
 
     // standard Internet checksum (RFC1071): ones'-complement sum of 16-bit

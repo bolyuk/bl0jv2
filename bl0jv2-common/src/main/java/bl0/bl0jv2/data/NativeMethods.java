@@ -53,4 +53,6 @@ public final class NativeMethods {
     // execMem(addr, size, mode): run a compiled program that sits in raw memory
     // (0x11, once exec(path), is free: the VM never reads a host file)
     public static final byte EXEC_MEM = 0x20;
+    // memory(op, a, b): who holds how much of the heap, and limits - see Bl0jv2_jVM's registration
+    public static final byte MEMORY = 0x21;
 }

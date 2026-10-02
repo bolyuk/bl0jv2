@@ -14,6 +14,8 @@ import '../kernel.bl0';
 import 'loader.bl0';
 import '../../stdlib/arrlib.bl0';
 import 'userland.bl0';
+import 'mem.bl0';
+import 'limits.bl0';
 
 def class Process {
     field pid;
@@ -29,6 +31,8 @@ def class Process {
     field uid;         // who it runs for
     field quiet;       // a job started by crond: no notice on the terminal when it ends, a line in the log instead
     field system;      // the shell: listed by ps, but not something to wait for or stop
+    field account;     // the memory account it is charged to (see lib/mem.bl0)
+    field memory;      // how much it held when it ended
 
     def init(pid, name, path, core) {
         this.pid = pid;
@@ -44,6 +48,8 @@ def class Process {
         this.system = false;
         this.quiet = false;
         this.uid = 0;
+        this.account = 0;
+        this.memory = 0;
     }
 }
 
@@ -100,6 +106,14 @@ def class Proc {
     // pipeOut, background] or [..., background, quiet]. 'who' - [uid, gid, groups] - is who it runs for when the
     // caller is root; in every other case it runs for the caller.
     static def spawn(path, words, cwd, io, who) {
+        // whose process it will be: the caller, or whoever root says
+        parent = Ctx.me();
+        uid = parent.uid;
+        if (who != nil && parent.uid == 0) { uid = who[0]; }
+        allowed = Limits.of(uid)[1];
+        if (allowed > 0 && Proc.countOf(uid) >= allowed) {
+            throw('too many processes: ' + Limits.nameOf(uid) + ' may have ' + allowed + ' running at once (etc/limits)');
+        }
         lock(Proc.mutex);
         core = -1;
         i = 1;
@@ -144,6 +158,18 @@ def class Proc {
         abortSetForegroundJob(core, !io[4]);
         dispatch(procEntry, core, pid);
         return p;
+    }
+
+    // how many processes of a user are running (the shell is not counted)
+    static def countOf(uid) {
+        n = 0;
+        i = 0;
+        while (i < len(Proc.table)) {
+            p = Proc.table[i];
+            if (p.state == 'running' && !p.system && p.uid == uid) { n += 1; }
+            i += 1;
+        }
+        return n;
     }
 
     // drops the oldest finished processes beyond 32
@@ -227,6 +253,8 @@ def procEntry(pid) {
     c = Ctx.table[currentCore()];
     state = 'done';
     message = '';
+    p.account = Mem.accountOf(pid);
+    Mem.begin(p.account, Limits.of(p.uid)[0]);
     try {
         loadAndRun(p.path, 0);
     } catch (e) {
@@ -238,6 +266,7 @@ def procEntry(pid) {
             message = text;
         }
     }
+    p.memory = Mem.end(p.account);
     c.finish();
     Proc.finish(p, state, message);
 }

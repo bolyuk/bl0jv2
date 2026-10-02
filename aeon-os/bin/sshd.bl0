@@ -1,0 +1,282 @@
+// aeon-os program: the SSH server; sshd [port]  (22 by default; run it in the background or as a service)
+//
+// Speaks SSH-2 (see stdlib/net/ssh.bl0 for what exactly): ssh user@host gives a shell, ssh user@host command runs
+// one. One connection at a time. Users log in with their password (an account with no password is refused) or with
+// an ssh-ed25519 key listed in <home>/.ssh/authorized_keys. The host key is made on the first start and kept in
+// etc/ssh/ (host_ed25519: the seed, readable by root only; host_ed25519.pub); its fingerprint is printed.
+//
+// The commands run in the shell, as the user, and the output comes back as text: so a shell over ssh is a line at a
+// time, with no editing beyond backspace, and a program that needs a screen (edit, top, wm, more) will not run
+// there. Only root runs sshd (it hands lines to the shell with the remote system call), so the shell has to be on
+// another core than sshd: start the machine with at least 2 cores. Loaded from the virtual disk by the shell
+// (bin/sshd.bl0c); see lib/netutil.bl0.
+
+import '../lib/netutil.bl0';
+import '../lib/users.bl0';
+import '../lib/log.bl0';
+import '../lib/perm.bl0';
+import '../../stdlib/net/ssh.bl0';
+import '../../stdlib/str/base64.bl0';
+import '../../stdlib/str/trim.bl0';
+import '../../stdlib/crypto/sha256.bl0';
+
+def hex(bytes) {
+    digits = '0123456789abcdef';
+    out = '';
+    i = 0;
+    while (i < len(bytes)) {
+        out = out + digits[bytes[i] >>> 4] + digits[bytes[i] & 15];
+        i += 1;
+    }
+    return out;
+}
+
+def unhex(text) {
+    out = [];
+    i = 0;
+    while (i + 1 < len(text)) {
+        hi = strFind('0123456789abcdef', text[i], 0);
+        lo = strFind('0123456789abcdef', text[i + 1], 0);
+        if (hi < 0 || lo < 0) { return nil; }
+        push(out, hi * 16 + lo);
+        i += 2;
+    }
+    return out;
+}
+
+// the host key's seed: read from etc/ssh/host_ed25519, made (and kept) when there is none
+def hostSeed() {
+    text = Fs.read('etc/ssh/host_ed25519');
+    if (text != nil) {
+        seed = unhex(Trim.trim(text));
+        if (seed != nil && len(seed) == 32) { return seed; }
+        throw('etc/ssh/host_ed25519 is not a key');
+    }
+    seed = Random.bytes(32);
+    if (!Dirs.isDir('etc/ssh')) { Dirs.mkdir('etc/ssh'); }
+    Fs.write('etc/ssh/host_ed25519', hex(seed) + '\n');
+    Fs.chmod('etc/ssh/host_ed25519', 0x180);                 // 0600
+    pub = Ed25519.publicKey(seed);
+    Fs.write('etc/ssh/host_ed25519.pub', 'ssh-ed25519 ' + Base64.encode(Ssh.keyBlob(pub)) + ' aeon-os\n');
+    Log.write('sshd: made a host key');
+    return seed;
+}
+
+def fingerprint(pub) {
+    text = Base64.encode(Sha256.digest(Ssh.keyBlob(pub)));
+    while (strSub(text, len(text) - 1, len(text)) == '=') { text = strSub(text, 0, len(text) - 1); }
+    return 'SHA256:' + text;
+}
+
+def hasPassword(name) {
+    entries = Users.shadow();
+    i = 0;
+    while (i < len(entries)) {
+        if (entries[i][0] == name) { return entries[i][2] != '' && entries[i][2] != '*'; }
+        i += 1;
+    }
+    return false;
+}
+
+def class SshdHandler {
+    field cwd;
+    field line;          // what the user has typed so far (a string of bytes)
+    field esc;           // 0, or where in an escape sequence the input is: 1 after ESC, 2 inside ESC [, 3 after ESC O
+    field afterCr;
+    field pty;
+
+    def init() {
+        this.cwd = '';
+        this.line = '';
+        this.esc = 0;
+        this.afterCr = false;
+        this.pty = false;
+    }
+
+    def poll() { checkAbort(); }
+
+    def authPassword(user, password) {
+        u = Users.find(user);
+        if (u == nil) { return false; }
+        if (!hasPassword(user)) {
+            Log.write('sshd: ' + user + ': no password, refused');
+            return false;
+        }
+        ok = Users.verify(user, password);
+        Log.write('sshd: ' + (ok ? 'password login of ' : 'wrong password for ') + user);
+        return ok;
+    }
+
+    def authKey(user, blob) {
+        u = Users.find(user);
+        if (u == nil) { return false; }
+        home = u[3] == '' ? 'root' : u[3];
+        text = Fs.read(home + '/.ssh/authorized_keys');
+        if (text == nil) { return false; }
+        lines = Split.split(text, strChar(10));
+        i = 0;
+        while (i < len(lines)) {
+            words = tokens(lines[i]);
+            if (len(words) >= 2 && words[0] == 'ssh-ed25519') {
+                key = Base64.decode(words[1]);
+                if (key != nil && Ssh.same(key, blob)) { return true; }
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    // [output text, status, folder] of a line, run in the shell as the user
+    def run(user, text) {
+        id = syscall(Sys.remote, ['submit', user, text, this.cwd]);
+        waited = 0;
+        while (true) {
+            result = syscall(Sys.remote, ['poll', id]);
+            if (result != nil) { return result; }
+            checkAbort();
+            wait(20);
+            waited += 20;
+            if (waited > 600000) { return ['(the shell did not answer)\n', 1, this.cwd]; }
+        }
+    }
+
+    // text for the client: line breaks as a terminal wants them, as a string of bytes
+    def wire(text) {
+        if (this.pty) { text = strJoin(Split.split(text, strChar(10)), strChar(13) + strChar(10)); }
+        return Ip.stringOf(Utf8.encode(text));
+    }
+
+    def prompt(user) {
+        return user + ' /' + this.cwd + ' $ ';
+    }
+
+    def start(session) {
+        u = Users.find(session.user);
+        this.cwd = u == nil || u[3] == '' ? 'root' : u[3];
+        this.pty = session.pty;
+        if (session.kind == 'exec') {
+            r = this.run(session.user, session.command);
+            session.write(this.wire(r[0]));
+            session.exit(r[1]);
+            return nil;
+        }
+        if (this.pty) { session.write(this.wire('aeon-os - type exit to leave\n' + this.prompt(session.user))); }
+    }
+
+    def input(session, text) {
+        i = 0;
+        while (i < len(text) && !session.closed) {
+            this.key(session, strSub(text, i, i + 1));
+            i += 1;
+        }
+    }
+
+    def echo(session, text) {
+        if (this.pty) { session.write(text); }
+    }
+
+    def key(session, c) {
+        if (this.esc == 1) {
+            this.esc = c == '[' ? 2 : (c == 'O' ? 3 : 0);
+            return nil;
+        }
+        if (this.esc == 2) {
+            // an escape sequence (an arrow key, ...) ends with a byte from @ to ~
+            if (c >= '@' && c <= '~') { this.esc = 0; }
+            return nil;
+        }
+        if (this.esc == 3) { this.esc = 0; return nil; }
+        wasCr = this.afterCr;
+        this.afterCr = c == strChar(13);
+        if (c == strChar(10) && wasCr) { return nil; }
+        if (c == strChar(27)) { this.esc = 1; return nil; }
+        if (c == strChar(13) || c == strChar(10)) {
+            this.echo(session, strChar(13) + strChar(10));
+            this.execute(session);
+            return nil;
+        }
+        if (c == strChar(127) || c == strChar(8)) {
+            // one character off: a UTF-8 character is its first byte and the continuation bytes after it
+            while (len(this.line) > 0) {
+                last = strSub(this.line, len(this.line) - 1, len(this.line));
+                this.line = strSub(this.line, 0, len(this.line) - 1);
+                if (!(last >= strChar(128) && last <= strChar(191))) { break; }
+            }
+            this.echo(session, strChar(8) + ' ' + strChar(8));
+            return nil;
+        }
+        if (c == strChar(3)) {
+            this.line = '';
+            this.echo(session, '^C' + strChar(13) + strChar(10) + this.prompt(session.user));
+            return nil;
+        }
+        if (c == strChar(4)) {
+            if (this.line == '') {
+                this.echo(session, 'logout' + strChar(13) + strChar(10));
+                session.exit(0);
+                session.close();
+            }
+            return nil;
+        }
+        if (c == strChar(21)) {
+            n = len(this.line);
+            this.line = '';
+            this.echo(session, strRepeat(strChar(8) + ' ' + strChar(8), n));
+            return nil;
+        }
+        if (c >= ' ') {
+            this.line = this.line + c;
+            this.echo(session, c);
+        }
+    }
+
+    def execute(session) {
+        text = Trim.trim(Utf8.decode(Ip.bytesOf(this.line)));
+        this.line = '';
+        if (text == 'exit' || text == 'logout') {
+            session.exit(0);
+            session.close();
+            return nil;
+        }
+        if (text != '') {
+            r = this.run(session.user, text);
+            this.cwd = r[2];
+            session.write(this.wire(r[0]));
+        }
+        this.echo(session, this.wire(this.prompt(session.user)));
+    }
+}
+
+def strRepeat(s, n) {
+    out = '';
+    i = 0;
+    while (i < n) { out += s; i += 1; }
+    return out;
+}
+
+def main(words) {
+    if (len(words) > 2) { sayErr('usage: sshd [port]'); return nil; }
+    port = 22;
+    if (len(words) == 2) { port = portNumber(words[1]); }
+    if (port == nil) { sayErr('bad port'); return nil; }
+    seed = hostSeed();
+    say('sshd: host key ' + fingerprint(Ed25519.publicKey(seed)));
+    say('sshd: listening on ' + Ip.formatAddr(Net.localIp) + ':' + port);
+    Log.write('sshd: listening on port ' + port);
+    while (true) {
+        listener = TcpConn.listen(Net.localIp, port);
+        while (listener.state == 'LISTEN' || listener.state == 'SYN_RCVD') {
+            checkAbort();
+            listener.hasData();
+            wait(20);
+        }
+        peer = Ip.formatAddr(listener.remoteIp);
+        Log.write('sshd: connection from ' + peer);
+        server = new SshServer(listener, seed, new SshdHandler());
+        reason = server.serve();
+        Log.write('sshd: ' + peer + ' ' + (server.authed ? 'as ' + server.user + ' ' : '') + 'ended: ' + reason);
+        listener.close();
+    }
+}
+
+programMain(main);

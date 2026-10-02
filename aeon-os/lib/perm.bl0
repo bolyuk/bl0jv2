@@ -33,6 +33,8 @@ def class Sys {
     static field who;          // [uid, gid, home, name] of the caller
     static field setPassword;  // [user, old, new] -> '' or why not
     static field shutdown;     // root only: the shell ends, the machine halts -> '' or why not
+    static field memory;       // root only: 'collect' - free what nothing reaches any more -> the bytes in use afterwards
+    static field remote;       // root only: [submit, user, line, folder] / [poll, number] - lines for the shell to run for a remote user
     static field spawn;        // [path, words, folder, [inPath, outPath, pipeIn, pipeOut, background, quiet], who] -> [true, Process] or [false, why]
 }
 // (vectors 1-9 are the console, keyboard, NIC, host NIC, disk, exec, host folder and spawn)
@@ -42,6 +44,8 @@ Sys.logout = 14;
 Sys.who = 15;
 Sys.setPassword = 16;
 Sys.shutdown = 19;
+Sys.remote = 21;
+Sys.memory = 22;           // collect now (see bin/gc.bl0)           // commands for the shell to run for a remote user (see sshd)
 Sys.spawn = 9;             // (the shell's Exec.spawnVector)
 
 def class Perm {
