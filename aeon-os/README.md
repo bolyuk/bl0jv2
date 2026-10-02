@@ -261,6 +261,14 @@ $ echo connect 10.0.0.2 7000 > net/tcp/1/ctl
 $ echo hello > net/tcp/1/data
 ```
 
+## Windows
+
+`wm` puts windows on the text screen (`lib/win.bl0` composes them and redraws only the rows that changed). A window is a
+view onto a file - `dev/cpu`, `proc/3/status`, `net/ip` and the like are live, any other file is shown as it was - or
+onto the process table. `wm` opens the processes, `dev/cpu` and `dev/time`; `wm a.txt b.txt` opens those files.
+Tab brings the next window to the top, arrows move it (after `r` they size it), `z` maximises, `n` opens a file by name,
+`x` closes, PgUp/PgDn scroll, `q` leaves.
+
 ## Moving files in and out
 
 `aeon.sh` shares `./share` (override with `SHARE=dir`) with `--bridge-fs`. It
