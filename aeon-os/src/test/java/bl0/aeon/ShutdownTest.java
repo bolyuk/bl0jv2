@@ -126,4 +126,17 @@ class ShutdownTest {
         waitFinished(s);                                                // the prompt gives up waiting
         assertTrue(s.output().contains("aeon-shell exiting"), s.output());
     }
+
+    @Test
+    void rebootIsAShutdownForRootOnly(@TempDir Path dir) throws Exception {
+        var s = AeonSession.shellOnOsDisk(dir);
+        command(s, "useradd alice", "added alice");
+        command(s, "su alice", "$");
+        command(s, "reboot", "only root may do that");
+        command(s, "exit", "$");
+        command(s, "reboot", "the system is going down for a reboot");
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline && !s.finished) Thread.sleep(20);
+        assertTrue(s.finished, "the machine did not halt:\n" + s.output());
+    }
 }

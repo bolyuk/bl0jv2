@@ -191,13 +191,14 @@ def loginIfNeeded() {
 
 // deliberately tries to bypass the syscall gate and write to the console
 // device directly - proves the ring boundary is real, not just documented
+// reboot: the machine has no way to start itself again, so this is the orderly shutdown (whoever runs the VM starts it
+// again); only root, like shutdown
 def cmdReboot() {
-    try {
-        out8(Console.port, 0);
-        say('rebooting...');
-    } catch (e) {
-        sayErr('reboot: permission denied');
-    }
+    if (Ctx.me().uid != 0) { sayErr('reboot: only root may do that'); return nil; }
+    say('the system is going down for a reboot: the machine halts, start it again to boot');
+    left = Shutdown.stopAll(true);
+    problem = syscall(Sys.shutdown, left);
+    if (problem != '') { sayErr('reboot: ' + problem); }
 }
 
 // --- files and programs ---
