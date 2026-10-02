@@ -1,0 +1,4 @@
+# the files are read by the guest as they are: a carriage return in aeon-os/etc/* ends up inside a name
+* text=auto eol=lf
+*.bl0c binary
+*.img binary

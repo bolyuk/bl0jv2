@@ -117,7 +117,7 @@ def class Ctx {
 
 // the words of a command line, without the empty pieces repeated spaces leave
 def tokens(text) {
-    raw = Split.split(text, ' ');
+    raw = Split.split(Arr.join(Split.split(text, strChar(13)), ''), ' ');      // a carriage return (a CRLF file) is not part of a word
     words = [];
     i = 0;
     while (i < len(raw)) {
