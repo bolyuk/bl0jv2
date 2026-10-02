@@ -1,0 +1,278 @@
+// aeon-os: the network as files, in the way of Plan 9 - a virtual folder, net/, made by the kernel (see Fs.provide in
+// stdlib/fs/fs.bl0). Nothing is on the disk behind it; a connection is a folder, and talking is reading and writing.
+//
+//   net/ip                  the address of this machine
+//   net/dns/server          the address of the DNS server
+//   net/dns/<name>          reads as the address of <name> (a lookup is made when it is read)
+//   net/tcp/clone           reading it makes a new connection and tells its number N
+//   net/tcp/N/ctl           write a command:  connect <host> <port>   |  listen <port>  |  accept  |  close
+//   net/tcp/N/data          what is read is what has arrived (waits for the first of it; empty when the peer has
+//                           closed); what is written is sent
+//   net/tcp/N/status        state, local and remote address
+//   net/udp/clone, N/ctl (bind <port> | connect <host> <port> | close), N/data (one datagram per read; a write
+//                           goes to the address of 'connect'), N/status - the same for datagrams
+//
+// <host> is a dotted address or a name. The files of a connection belong to the user who made it (mode 0600), so
+// who may use it is decided like for any file; the rest of the folder is readable by everyone. A listening
+// connection takes one peer (see TcpConn.listen). Reading waits in slices and looks for an abort between them, so
+// a program waiting on a silent peer can be stopped.
+
+import 'userland.bl0';
+import 'netutil.bl0';
+import '../../stdlib/str/split.bl0';
+import 'devfs.bl0';
+import '../../stdlib/str/trim.bl0';
+
+def class NetConn {
+    field id;
+    field proto;
+    field owner;
+    field conn;         // tcp: the TcpConn once connected or listening
+    field port;         // udp: the local port
+    field destIp;
+    field destPort;
+    field closed;
+}
+
+def class Netfs {
+    static field tcp;
+    static field udp;
+    static field counter;
+    static field limit;
+    static field waitLimitMs;
+
+    static def table(proto) { return proto == 'tcp' ? Netfs.tcp : Netfs.udp; }
+
+    static def find(proto, n) {
+        id = unsignedNumber(n);
+        if (id == nil) { return nil; }
+        t = Netfs.table(proto);
+        i = 0;
+        while (i < len(t)) {
+            if (t[i].id == id) { return t[i]; }
+            i += 1;
+        }
+        return nil;
+    }
+
+    static def make(proto, uid) {
+        t = Netfs.table(proto);
+        if (len(t) >= Netfs.limit) {
+            drop = -1;
+            i = 0;
+            while (drop < 0 && i < len(t)) {
+                if (t[i].closed) { drop = i; }
+                i += 1;
+            }
+            if (drop < 0) { throw('fs: net/' + proto + ': no free connection (close one first)'); }
+            rest = [];
+            i = 0;
+            while (i < len(t)) {
+                if (i != drop) { push(rest, t[i]); }
+                i += 1;
+            }
+            if (proto == 'tcp') { Netfs.tcp = rest; } else { Netfs.udp = rest; }
+            t = rest;
+        }
+        Netfs.counter += 1;
+        c = new NetConn();
+        c.id = Netfs.counter;
+        c.proto = proto;
+        c.owner = uid;
+        c.conn = nil;
+        c.port = proto == 'udp' ? freePort() : 0;
+        c.destIp = nil;
+        c.destPort = 0;
+        c.closed = false;
+        push(t, c);
+        return c;
+    }
+
+    static def resolve(host) {
+        addr = Ip.parseAddr(host);
+        if (addr != nil) { return addr; }
+        addr = Dns.resolve(host);
+        if (addr == 0) { throw('fs: ' + host + ': name not found'); }
+        return addr;
+    }
+
+    static def statusText(c) {
+        if (c.proto == 'tcp') {
+            if (c.conn == nil) { return 'IDLE\n'; }
+            t = c.conn;
+            remote = t.remoteIp == nil ? '-' : Ip.formatAddr(t.remoteIp) + '!' + t.remotePort;
+            return t.state + '\nlocal ' + Ip.formatAddr(t.localIp) + '!' + t.localPort + '\nremote ' + remote + '\n';
+        }
+        remote = c.destIp == nil ? '-' : Ip.formatAddr(c.destIp) + '!' + c.destPort;
+        return (c.closed ? 'CLOSED' : 'BOUND') + '\nlocal ' + Ip.formatAddr(Net.localIp) + '!' + c.port + '\nremote ' + remote + '\n';
+    }
+
+    // what has arrived on a connection: waits (in slices, looking for an abort) for the first of it
+    static def receive(c) {
+        waited = 0;
+        if (c.proto == 'tcp') {
+            if (c.conn == nil) { throw('fs: net/tcp/' + c.id + ' is not connected'); }
+            while (waited < Netfs.waitLimitMs) {
+                checkAbort();
+                if (c.conn.waitData(100)) { return c.conn.receive(); }
+                if (c.conn.peerFinReceived || c.conn.state == 'CLOSED') { return c.conn.receive(); }
+                waited += 100;
+            }
+            return '';
+        }
+        if (c.closed) { return ''; }
+        while (waited < Netfs.waitLimitMs) {
+            checkAbort();
+            pkt = Udp.recvWait(c.port, 100);
+            if (pkt != nil) { return pkt.message; }
+            waited += 100;
+        }
+        return '';
+    }
+
+    static def transmit(c, text) {
+        if (c.proto == 'tcp') {
+            if (c.conn == nil || c.conn.state != 'ESTABLISHED') { throw('fs: net/tcp/' + c.id + ' is not connected'); }
+            c.conn.send(text);
+            return nil;
+        }
+        if (c.closed) { throw('fs: net/udp/' + c.id + ' is closed'); }
+        if (c.destIp == nil) { throw('fs: net/udp/' + c.id + ' has no address (write "connect <host> <port>" to ctl)'); }
+        Udp.send(Net.localIp, c.port, c.destIp, c.destPort, text);
+    }
+
+    static def portOf(word) {
+        p = unsignedNumber(word);
+        if (p == nil || p < 1 || p > 65535) { throw('fs: ' + word + ': not a port'); }
+        return p;
+    }
+
+    static def control(c, command) {
+        words = Split.split(Trim.trim(command), ' ');
+        verb = words[0];
+        if (verb == 'close') {
+            if (!c.closed) {
+                c.closed = true;
+                if (c.proto == 'tcp' && c.conn != nil && c.conn.state != 'CLOSED' && c.conn.state != 'LISTEN') { c.conn.close(); }
+            }
+            return nil;
+        }
+        if (c.closed) { throw('fs: net/' + c.proto + '/' + c.id + ' is closed'); }
+        if (c.proto == 'tcp') {
+            if (verb == 'connect' && len(words) == 3) {
+                if (c.conn != nil) { throw('fs: net/tcp/' + c.id + ' is already in use'); }
+                addr = Netfs.resolve(words[1]);
+                port = Netfs.portOf(words[2]);
+                t = TcpConn.connect(Net.localIp, freePort(), addr, port);
+                if (t == nil) { throw('fs: connection to ' + Ip.formatAddr(addr) + '!' + port + ' timed out'); }
+                c.conn = t;
+                return nil;
+            }
+            if (verb == 'listen' && len(words) == 2) {
+                if (c.conn != nil) { throw('fs: net/tcp/' + c.id + ' is already in use'); }
+                c.conn = TcpConn.listen(Net.localIp, Netfs.portOf(words[1]));
+                return nil;
+            }
+            if (verb == 'accept' && len(words) == 1) {
+                if (c.conn == nil || c.conn.state == 'CLOSED') { throw('fs: net/tcp/' + c.id + ' is not listening'); }
+                waited = 0;
+                while ((c.conn.state == 'LISTEN' || c.conn.state == 'SYN_RCVD') && waited < Netfs.waitLimitMs) {
+                    checkAbort();
+                    c.conn.hasData();
+                    wait(20);
+                    waited += 20;
+                }
+                if (c.conn.state == 'LISTEN' || c.conn.state == 'SYN_RCVD') { throw('fs: nobody came to net/tcp/' + c.id); }
+                return nil;
+            }
+            throw('fs: net/tcp/' + c.id + '/ctl: connect <host> <port>, listen <port>, accept or close');
+        }
+        if (verb == 'bind' && len(words) == 2) { c.port = Netfs.portOf(words[1]); return nil; }
+        if (verb == 'connect' && len(words) == 3) {
+            c.destIp = Netfs.resolve(words[1]);
+            c.destPort = Netfs.portOf(words[2]);
+            return nil;
+        }
+        throw('fs: net/udp/' + c.id + '/ctl: bind <port>, connect <host> <port> or close');
+    }
+
+    static def names() {
+        out = [['ip', 0], ['dns/server', 0], ['tcp/clone', 0], ['udp/clone', 0]];
+        protos = ['tcp', 'udp'];
+        p = 0;
+        while (p < 2) {
+            t = Netfs.table(protos[p]);
+            i = 0;
+            while (i < len(t)) {
+                base = protos[p] + '/' + t[i].id + '/';
+                push(out, [base + 'ctl', 0]);
+                push(out, [base + 'data', 0]);
+                push(out, [base + 'status', 0]);
+                i += 1;
+            }
+            p += 1;
+        }
+        return out;
+    }
+
+    static def stat(rel) {
+        if (rel == '' || rel == 'dns' || rel == 'tcp' || rel == 'udp') { return Devfs.folder(); }
+        if (rel == 'ip' || rel == 'dns/server') { return Devfs.file(0x124, 0); }
+        parts = Split.split(rel, '/');
+        if (parts[0] == 'dns' && len(parts) == 2) { return Devfs.file(0x124, 0); }
+        if (parts[0] != 'tcp' && parts[0] != 'udp') { return nil; }
+        if (len(parts) == 2 && parts[1] == 'clone') { return Devfs.file(0x124, 0); }
+        c = Netfs.find(parts[0], parts[1]);
+        if (c == nil) { return nil; }
+        if (len(parts) == 2) { return [c.owner, c.owner, 0x16D, 0, 1]; }
+        if (len(parts) != 3) { return nil; }
+        if (parts[2] == 'status') { return [c.owner, c.owner, 0x124, 0, 0]; }
+        if (parts[2] == 'ctl' || parts[2] == 'data') { return [c.owner, c.owner, 0x180, 0, 0]; }
+        return nil;
+    }
+
+    static def read(rel, uid) {
+        if (rel == 'ip') { return Ip.formatAddr(Net.localIp) + '\n'; }
+        if (rel == 'dns/server') { return Ip.formatAddr(Dns.serverIp) + '\n'; }
+        parts = Split.split(rel, '/');
+        if (parts[0] == 'dns' && len(parts) == 2) { return Ip.formatAddr(Netfs.resolve(parts[1])) + '\n'; }
+        if (len(parts) == 2 && parts[1] == 'clone') { return '' + Netfs.make(parts[0], uid).id + '\n'; }
+        if (len(parts) != 3) { return nil; }
+        c = Netfs.find(parts[0], parts[1]);
+        if (c == nil) { return nil; }
+        if (parts[2] == 'status') { return Netfs.statusText(c); }
+        if (parts[2] == 'data') { return Netfs.receive(c); }
+        return nil;
+    }
+
+    static def write(rel, arg) {
+        parts = Split.split(rel, '/');
+        c = len(parts) == 3 ? Netfs.find(parts[0], parts[1]) : nil;
+        if (c == nil) { throw('fs: net/' + rel + ' cannot be written'); }
+        if (parts[2] == 'ctl') {
+            if (Trim.trim(arg) == '') { return nil; }
+            Netfs.control(c, arg);
+            return nil;
+        }
+        if (parts[2] == 'data') {
+            if (arg != '') { Netfs.transmit(c, arg); }
+            return nil;
+        }
+        throw('fs: net/' + rel + ' cannot be written');
+    }
+}
+Netfs.tcp = [];
+Netfs.udp = [];
+Netfs.counter = 0;
+Netfs.limit = 32;
+Netfs.waitLimitMs = 30000;
+
+// the provider of net/
+def netProvider(op, rel, arg, uid, gid) {
+    if (op == 13) { return Netfs.stat(rel); }
+    if (op == 4) { return startingWith(Netfs.names(), rel); }
+    if (op == 2) { return Netfs.read(rel, uid); }
+    if (op == 1 || op == 10) { return Netfs.write(rel, arg); }
+    if (op == 3) { throw('fs: write close to the ctl file of a connection to end it'); }
+    return nil;
+}

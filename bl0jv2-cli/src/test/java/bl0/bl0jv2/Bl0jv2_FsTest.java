@@ -235,6 +235,59 @@ class Bl0jv2_FsTest {
                 "Fs.write('d/', ''); print str(Fs.stat('d')[2]) + '|'; Fs.chmod('d', 0x3FF + 0x400); print str(Fs.stat('d')[2]);"));
     }
 
+    // a virtual folder 'v': v/hello (read gives text), v/echo (write is remembered, read gives it back),
+    // v/sub/deep, v/gone (removable); the provider sees who asks
+    private static final String TOY =
+            "def class Toy { static field state; static field gone; } Toy.state = ''; Toy.gone = true; " +
+            "def has(list, x) { i = 0; while (i < len(list)) { if (list[i] == x) { return true; } i += 1; } return false; } " +
+            "def toy(op, rel, arg, uid, gid) { " +
+            "  if (op == 2) { if (rel == 'hello') { return 'hi from ' + str(uid); } if (rel == 'echo') { return Toy.state; } " +
+            "                 if (rel == 'sub/deep') { return 'deep'; } if (rel == 'gone' && Toy.gone) { return 'x'; } return nil; } " +
+            "  if (op == 1 || op == 10) { if (rel != 'echo') { throw('fs: no such device'); } if (arg != '') { Toy.state = (op == 10 ? Toy.state : '') + arg; } return nil; } " +
+            "  if (op == 3) { if (rel == 'gone' && Toy.gone) { Toy.gone = false; return true; } return false; } " +
+            "  if (op == 13) { if (rel == '') { return [0, 0, 0x16D, 0, 1]; } if (rel == 'sub') { return [0, 0, 0x16D, 0, 1]; } " +
+            "                  if (rel == 'hello' || rel == 'echo' || rel == 'sub/deep' || (rel == 'gone' && Toy.gone)) { return [7, 8, 0x1A4, 5, 0]; } return nil; } " +
+            "  if (op == 4) { out = []; names = ['echo', 'gone', 'hello', 'sub/deep']; i = 0; " +
+            "                 while (i < len(names)) { if (strFind(names[i], rel, 0) == 0 && !(names[i] == 'gone' && !Toy.gone)) { push(out, [names[i], 5]); } i += 1; } return out; } " +
+            "  return nil; } " +
+            "Fs.provide('v', toy); ";
+
+    @Test
+    void aVirtualFolderIsAnsweredByCode(@TempDir Path dir) throws IOException {
+        assertEquals("hi from 0|5|5|true|false|true|nil", run(dir, 64, TOY +
+                "Fs.format(); print Fs.read('v/hello') + '|' + str(Fs.size('v/hello')) + '|' + str(Fs.stat('v/hello')[3]) + '|' + " +
+                "str(Fs.exists('v/hello')) + '|' + str(Fs.exists('v/nosuch')) + '|' + str(Fs.stat('v')[4] == 1) + '|' + str(Fs.read('v/nosuch'));"));
+    }
+
+    @Test
+    void writingActsAndTheNameIsTheProvidersToRefuse(@TempDir Path dir) throws IOException {
+        assertEquals("abc|ab|fs: no such device|true", run(dir, 64, TOY +
+                "Fs.format(); Fs.write('v/echo', ''); Fs.append('v/echo', 'abc'); print Fs.read('v/echo') + '|'; " +
+                "Fs.write('v/echo', 'ab'); print Fs.read('v/echo') + '|'; " +
+                "try { Fs.write('v/other', 'x'); } catch (e) { print e; } print '|' + str(Fs.remove('v/gone'));"));
+    }
+
+    @Test
+    void theFolderShowsUpInListingsAndKeepsItsOwnTree(@TempDir Path dir) throws IOException {
+        // the root listing has the virtual files below it, 'v/' itself is a folder, a list inside it is the provider's alone
+        assertEquals("true|echo,gone,hello,sub/deep|deep", run(dir, 64, TOY +
+                "Fs.format(); Fs.write('disk.txt', 'on disk'); " +
+                "all = Fs.list(''); names = []; i = 0; while (i < len(all)) { push(names, all[i][0]); i += 1; } " +
+                "print str(has(names, 'disk.txt') && has(names, 'v/hello') && has(names, 'v/')) + '|'; " +
+                "inside = Fs.list('v/'); n = []; i = 0; while (i < len(inside)) { if (inside[i][0] != 'v/') { push(n, strSub(inside[i][0], 2, len(inside[i][0]))); } i += 1; } " +
+                "print strJoin(n, ',') + '|' + Fs.read('v/sub/deep');"));
+    }
+
+    @Test
+    void aVirtualFileCannotBeRenamedOrGivenAnOwnerAndOnlyTheKernelProvides(@TempDir Path dir) throws IOException {
+        String out = run(dir, 64, TOY + "Fs.format(); " +
+                "def tryIt(f) { try { f(); return 'ok'; } catch (e) { return str(e); } } " +
+                "print tryIt(() -> Fs.rename('v/hello', 'x')) + '|' + tryIt(() -> Fs.rename('a', 'v/b')) + '|' + tryIt(() -> Fs.chmod('v/hello', 1)) + '|' + " +
+                "tryIt(() -> Fs.chown('v/hello', 1, 1));");
+        for (String part : new String[]{"cannot be renamed", "fixed owner and mode"})
+            org.junit.jupiter.api.Assertions.assertTrue(out.contains(part), part + " in: " + out);
+    }
+
     private static String twoDisks(Path dir, MemoryDisk first, MemoryDisk second, String body) throws IOException {
         Path entry = dir.resolve("entry.bl0");
         Files.writeString(entry, "import 'stdlib/fs/fs.bl0'; Disk.init(8192); " + body);

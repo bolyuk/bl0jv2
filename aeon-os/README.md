@@ -243,6 +243,32 @@ works it stays in line mode, warns, and shows its own echo too) and passes size 
 Limits: one terminal cell per character (no double-width or combining marks); there is no
 preemption (see Several programs at once), and a background job cannot read the terminal.
 
+## Devices, processes and the network are files
+
+Three folders are made by the kernel, not stored on the disk (`Fs.provide`, see `stdlib/fs/fs.bl0`): a file in them is
+generated when read and does something when written, and the usual owners and modes apply.
+
+- `dev/` - `null`, `zero`, `random`, `console` (write to print), `time`, `uptime`, `cpu`.
+- `proc/<pid>/` - `status`, `cmd`, and `ctl` (`echo kill > proc/3/ctl`; only the owner or root).
+- `net/` - `ip`, `dns/server`, `dns/<name>` (reads as the address), and for `tcp` and `udp`: `clone` (read it to get a
+  connection number N), then `N/ctl` (`connect <host> <port>`, `listen <port>`, `accept`, `close`; udp: `bind`,
+  `connect`, `close`), `N/data` (read what arrived, write to send) and `N/status`. A connection belongs to its maker (0600).
+
+```
+$ cat net/tcp/clone
+1
+$ echo connect 10.0.0.2 7000 > net/tcp/1/ctl
+$ echo hello > net/tcp/1/data
+```
+
+## Windows
+
+`wm` puts windows on the text screen (`lib/win.bl0` composes them and redraws only the rows that changed). A window is a
+view onto a file - `dev/cpu`, `proc/3/status`, `net/ip` and the like are live, any other file is shown as it was - or
+onto the process table. `wm` opens the processes, `dev/cpu` and `dev/time`; `wm a.txt b.txt` opens those files.
+Tab brings the next window to the top, arrows move it (after `r` they size it), `z` maximises, `n` opens a file by name,
+`x` closes, PgUp/PgDn scroll, `q` leaves.
+
 ## Moving files in and out
 
 `aeon.sh` shares `./share` (override with `SHARE=dir`) with `--bridge-fs`. It

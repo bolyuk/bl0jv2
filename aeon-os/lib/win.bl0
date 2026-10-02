@@ -1,0 +1,311 @@
+// aeon-os: windows on the text screen. A Desk holds Windows in stacking order (the last one is on top and has the
+// focus); it composes them onto a grid of cells - box, title and text - and writes only the rows that changed since the
+// last time, so the terminal does not flicker. It knows nothing of the keyboard (see bin/wm.bl0 for that).
+//
+// What a window shows is named by its source, and a window is a view onto a file in the way of everything else here:
+//   'ps'           the process table
+//   'file:<path>'  the text of that file - a file of dev/, proc/ or net/ is read again at every refresh, so it is live
+// A file whose reading does something (net/*/clone, net/*/data) is not shown.
+
+import 'userland.bl0';
+import 'proc.bl0';
+import 'term.bl0';
+import '../../stdlib/str/split.bl0';
+
+def class Window {
+    field title;
+    field source;
+    field x;            // the top left corner, 0-based, on the desk
+    field y;
+    field w;            // the size with the border
+    field h;
+    field lines;
+    field scroll;       // the first line shown
+    field saved;        // [x, y, w, h] before it was maximised, or nil
+
+    def init(title, source, x, y, w, h) {
+        this.title = title;
+        this.source = source;
+        this.x = x;
+        this.y = y;
+        this.w = w;
+        this.h = h;
+        this.lines = [];
+        this.scroll = 0;
+        this.saved = nil;
+    }
+}
+
+def class Win {
+    static field control;     // the characters that must not reach the terminal as they are
+
+    static def pad(text, width) {
+        if (len(text) >= width) { return strSub(text, 0, width); }
+        out = text;
+        n = width - len(text);
+        while (n > 0) { out += ' '; n -= 1; }
+        return out;
+    }
+
+    static def isLive(path) {
+        return strFind(path, 'dev/', 0) == 0 || strFind(path, 'proc/', 0) == 0 || strFind(path, 'net/', 0) == 0;
+    }
+
+    static def hasEffect(path) {
+        parts = Split.split(path, '/');
+        last = parts[len(parts) - 1];
+        return strFind(path, 'net/', 0) == 0 && (last == 'clone' || last == 'data' || last == 'ctl');
+    }
+
+    // the text lines of a window's source
+    static def load(source) {
+        if (source == 'ps') {
+            out = [Win.pad('pid  state    core  command', 40)];
+            i = 0;
+            while (i < len(Proc.table)) {
+                p = Proc.table[i];
+                push(out, Win.pad('' + p.pid, 5) + Win.pad(p.state, 9) + Win.pad('' + p.core, 6) + p.name);
+                i += 1;
+            }
+            return out;
+        }
+        path = strSub(source, 5, len(source));
+        if (Win.hasEffect(path)) { return ['(not shown: reading it has an effect)']; }
+        text = nil;
+        try {
+            text = Fs.read(inCwd(path));
+        } catch (e) {
+            return ['(' + e + ')'];
+        }
+        if (text == nil) { return ['(no such file)']; }
+        return Split.split(text, strChar(10));
+    }
+
+    static def refresh(window) {
+        if (window.source == 'ps' || strFind(window.source, 'file:', 0) != 0 || len(window.lines) == 0 || Win.isLive(strSub(window.source, 5, len(window.source)))) {
+            window.lines = Win.load(window.source);
+        }
+    }
+}
+
+def class Desk {
+    field cols;
+    field rows;         // the whole screen: the last row is the status line
+    field windows;
+    field prev;
+
+    def init(cols, rows) {
+        this.cols = cols;
+        this.rows = rows;
+        this.windows = [];
+        this.prev = [];
+    }
+
+    def usableRows() { return this.rows - 1; }
+
+    def add(window) {
+        Win.refresh(window);
+        push(this.windows, window);
+    }
+
+    def top() { return len(this.windows) == 0 ? nil : this.windows[len(this.windows) - 1]; }
+
+    // the bottom window comes to the top
+    def cycle() {
+        if (len(this.windows) < 2) { return nil; }
+        rotated = [];
+        j = 1;
+        while (j < len(this.windows)) { push(rotated, this.windows[j]); j += 1; }
+        push(rotated, this.windows[0]);
+        this.windows = rotated;
+        this.prev = [];
+    }
+
+    def close() {
+        if (len(this.windows) == 0) { return nil; }
+        rest = [];
+        i = 0;
+        while (i < len(this.windows) - 1) { push(rest, this.windows[i]); i += 1; }
+        this.windows = rest;
+        this.prev = [];
+    }
+
+    def keepInside(w) {
+        if (w.w > this.cols) { w.w = this.cols; }
+        if (w.h > this.usableRows()) { w.h = this.usableRows(); }
+        if (w.w < 8) { w.w = 8; }
+        if (w.h < 4) { w.h = 4; }
+        if (w.x + w.w > this.cols) { w.x = this.cols - w.w; }
+        if (w.y + w.h > this.usableRows()) { w.y = this.usableRows() - w.h; }
+        if (w.x < 0) { w.x = 0; }
+        if (w.y < 0) { w.y = 0; }
+    }
+
+    def moveBy(dx, dy) {
+        w = this.top();
+        if (w == nil) { return nil; }
+        w.x += dx;
+        w.y += dy;
+        this.keepInside(w);
+    }
+
+    def resizeBy(dw, dh) {
+        w = this.top();
+        if (w == nil) { return nil; }
+        w.w += dw;
+        w.h += dh;
+        this.keepInside(w);
+    }
+
+    def scrollBy(n) {
+        w = this.top();
+        if (w == nil) { return nil; }
+        w.scroll += n;
+        most = len(w.lines) - (w.h - 2);
+        if (w.scroll > most) { w.scroll = most; }
+        if (w.scroll < 0) { w.scroll = 0; }
+    }
+
+    def toggleMaximise() {
+        w = this.top();
+        if (w == nil) { return nil; }
+        if (w.saved == nil) {
+            w.saved = [w.x, w.y, w.w, w.h];
+            w.x = 0;
+            w.y = 0;
+            w.w = this.cols;
+            w.h = this.usableRows();
+        } else {
+            w.x = w.saved[0];
+            w.y = w.saved[1];
+            w.w = w.saved[2];
+            w.h = w.saved[3];
+            w.saved = nil;
+        }
+    }
+
+    def refreshAll() {
+        i = 0;
+        while (i < len(this.windows)) {
+            Win.refresh(this.windows[i]);
+            i += 1;
+        }
+    }
+
+    // the rows of the desk as [characters, styles] grids: style 0 plain, 1 border, 2 the focused window's border and
+    // title
+    def paint(window, chars, styles, focused) {
+        edge = focused ? 2 : 1;
+        x0 = window.x;
+        y0 = window.y;
+        x1 = window.x + window.w - 1;
+        y1 = window.y + window.h - 1;
+        r = y0;
+        while (r <= y1) {
+            c = x0;
+            while (c <= x1) {
+                ch = ' ';
+                st = 0;
+                if (r == y0 || r == y1 || c == x0 || c == x1) {
+                    st = edge;
+                    if (r == y0 && c == x0) { ch = '┌'; }
+                    else if (r == y0 && c == x1) { ch = '┐'; }
+                    else if (r == y1 && c == x0) { ch = '└'; }
+                    else if (r == y1 && c == x1) { ch = '┘'; }
+                    else if (r == y0 || r == y1) { ch = '─'; }
+                    else { ch = '│'; }
+                }
+                chars[r][c] = ch;
+                styles[r][c] = st;
+                c += 1;
+            }
+            r += 1;
+        }
+        title = ' ' + window.title + ' ';
+        if (len(title) > window.w - 4) { title = strSub(title, 0, window.w - 4); }
+        k = 0;
+        while (k < len(title)) {
+            chars[y0][x0 + 2 + k] = strSub(title, k, k + 1);
+            styles[y0][x0 + 2 + k] = focused ? 3 : 1;
+            k += 1;
+        }
+        inner = window.w - 2;
+        line = 0;
+        while (line < window.h - 2) {
+            idx = window.scroll + line;
+            if (idx < len(window.lines)) {
+                text = window.lines[idx];
+                k = 0;
+                while (k < inner && k < len(text)) {
+                    ch = strSub(text, k, k + 1);
+                    if (strFind(Win.control, ch, 0) >= 0) { ch = '.'; }
+                    chars[y0 + 1 + line][x0 + 1 + k] = ch;
+                    k += 1;
+                }
+            }
+            line += 1;
+        }
+    }
+
+    static def styleCode(st) {
+        if (st == 0) { return Term.normal(); }
+        if (st == 1) { return Term.normal() + Term.colour(7); }
+        if (st == 2) { return Term.normal() + Term.bold() + Term.colour(6); }
+        return Term.normal() + Term.invert() + Term.colour(6);
+    }
+
+    // the screen as rows of text with their escape sequences; 'status' is the last row
+    def compose(status) {
+        chars = [];
+        styles = [];
+        r = 0;
+        while (r < this.usableRows()) {
+            cr = [];
+            sr = [];
+            c = 0;
+            while (c < this.cols) { push(cr, ' '); push(sr, 0); c += 1; }
+            push(chars, cr);
+            push(styles, sr);
+            r += 1;
+        }
+        i = 0;
+        while (i < len(this.windows)) {
+            this.paint(this.windows[i], chars, styles, i == len(this.windows) - 1);
+            i += 1;
+        }
+        out = [];
+        r = 0;
+        while (r < this.usableRows()) {
+            line = '';
+            cur = -1;
+            c = 0;
+            while (c < this.cols) {
+                if (styles[r][c] != cur) { cur = styles[r][c]; line += Desk.styleCode(cur); }
+                line += chars[r][c];
+                c += 1;
+            }
+            push(out, line + Term.normal());
+            r += 1;
+        }
+        push(out, Term.invert() + Win.pad(status, this.cols) + Term.normal());
+        return out;
+    }
+
+    // writes the rows that differ from what is on the screen
+    def draw(status) {
+        lines = this.compose(status);
+        text = '';
+        r = 0;
+        while (r < len(lines)) {
+            if (r >= len(this.prev) || this.prev[r] != lines[r]) { text += Term.moveTo(r + 1, 1) + lines[r]; }
+            r += 1;
+        }
+        this.prev = lines;
+        if (text != '') { consoleWrite(text); }
+    }
+}
+
+Win.control = '';
+k = 0;
+while (k < 32) { Win.control += strChar(k); k += 1; }
+Win.control += strChar(127);
