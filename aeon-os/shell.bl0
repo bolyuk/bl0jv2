@@ -47,6 +47,7 @@ import 'lib/loader.bl0';
 import 'lib/userland.bl0';
 import 'lib/lineedit.bl0';
 import 'lib/cmdline.bl0';
+import 'lib/script.bl0';
 import 'lib/proc.bl0';
 import 'lib/perm.bl0';
 import 'lib/users.bl0';
@@ -94,6 +95,8 @@ Log.write('shell: started');
 // --- built-in commands ---
 def cmdHelp() {
     say('built in: help, clear, echo <text> [> file], uptime, whoami, reboot, exit, pwd, cd, format yes,');
+    say('          test (or [ ]), true, false, shift, break, continue; a && b, a || b, a; b ($? is the status);');
+    say('          if .. then .. elif .. else .. fi, while .. do .. done, for x in .. do .. done (in a script or on one line)');
     say('          NAME=value  $NAME  set  unset <name>  sh <file> [args]  (a script: one command per line, # comments)');
     say('          exec <file> [args]  (a text may hold \\n for a line break)');
     say('programs on the disk (bin/): ls cat write append touch rm mv cp stat wc head tail grep');
@@ -232,6 +235,9 @@ def class ShellState {
     static field aliases;      // [[name, text], ...]
     static field depth;        // scripts running inside scripts
     static field status;       // how the last command ended: 0 went well, anything else failed ($?)
+    static field signal;       // '' or what a script is doing: 'break' 'continue' 'exit' (see execNodes)
+    static field exitCode;
+    static field loops;        // loops being run
     static field home;         // the folder of whoever is logged in (their history lives there)
     static field userName;
 }
@@ -242,6 +248,9 @@ ShellState.vars = [['PATH', 'bin']];
 ShellState.aliases = [];
 ShellState.depth = 0;
 ShellState.status = 0;
+ShellState.signal = '';
+ShellState.exitCode = 0;
+ShellState.loops = 0;
 ShellState.home = 'root';
 ShellState.userName = 'root';
 
@@ -506,6 +515,7 @@ def runProgram(path, words, label) {
         problem = programError(problem);
         if (problem == 'interrupted') {
             sayErr('^C');
+            if (ShellState.depth > 0 || ShellState.loops > 0) { ShellState.signal = 'exit'; ShellState.exitCode = 130; }
         } else {
             say(label + ': ' + problem);
             c.failed = true;
@@ -547,7 +557,12 @@ def runStage(words) {
     if (cmd == 'uptime') { cmdUptime(); return nil; }
     if (cmd == 'whoami') { cmdWhoami(); return nil; }
     if (cmd == 'reboot') { cmdReboot(); return nil; }
-    if (cmd == 'exit') { cmdExit(); return nil; }
+    if (cmd == 'exit') { cmdExitWords(words); return nil; }
+    if (cmd == 'test' || cmd == '[') { guarded(cmdTest, words); return nil; }
+    if (cmd == 'true') { return nil; }
+    if (cmd == 'false') { Ctx.me().failed = true; return nil; }
+    if (cmd == 'shift') { guarded(cmdShift, words); return nil; }
+    if (cmd == 'break' || cmd == 'continue') { cmdLoopSignal(cmd); return nil; }
     if (cmd == 'su') { cmdSu(words); return nil; }
     if (cmd == 'id') { cmdId(); return nil; }
     if (cmd == 'echo') { cmdEcho(words); return nil; }
@@ -743,7 +758,15 @@ def runPipeline(stages) {
 def runCommand(line) {
     parts = Cmdline.splitList(line);
     i = 0;
-    while (i < len(parts) && ShellState.running) {
+    while (i < len(parts)) {
+        if (parts[i][0] == ';' && Arr.contains(Script.keywords(), Cmdline.firstWord(parts[i][1]))) {
+            runScript([line]);
+            return nil;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < len(parts) && ShellState.running && ShellState.signal == '') {
         op = parts[i][0];
         if (op == ';' || (op == '&&' && ShellState.status == 0) || (op == '||' && ShellState.status != 0)) {
             runSimple(Trim.trim(parts[i][1]));
@@ -762,7 +785,7 @@ def runSimple(line) {
     Log.write('shell: ' + line);
     Ctx.me().failed = false;
     runOne(line);
-    setStatus(Ctx.me().failed ? 1 : 0);
+    setStatus(ShellState.signal == 'exit' ? ShellState.exitCode : (Ctx.me().failed ? 1 : 0));
 }
 
 def runOne(line) {
@@ -1021,19 +1044,207 @@ def cmdSh(words) {
         i += 1;
     }
     ShellState.depth += 1;
-    lines = Split.split(text, strChar(10));
-    n = 0;
-    while (n < len(lines) && ShellState.running) {
-        line = Trim.trim(lines[n]);
-        if (line != '' && strSub(line, 0, 1) != '#') { runCommand(line); }
-        n += 1;
-    }
+    saved = Arr.concat(saved, [varGet('#'), varGet('*')]);
+    varSet('#', '' + (len(words) - 2));
+    varSet('*', strJoin(Arr.slice(words, 2, len(words)), ' '));
+    runScript(Split.split(text, strChar(10)));
     ShellState.depth -= 1;
+    if (ShellState.signal == 'exit' && ShellState.exitCode != 130) { ShellState.signal = ''; }
+    if (ShellState.depth == 0) { ShellState.signal = ''; }
+    if (ShellState.status != 0) { Ctx.me().failed = true; }
     i = 0;
-    while (i < len(saved)) {
+    while (i < len(saved) - 2) {
         if (saved[i] == nil) { varUnset('' + i); } else { varSet('' + i, saved[i]); }
         i += 1;
     }
+    if (saved[len(saved) - 2] == nil) { varUnset('#'); } else { varSet('#', saved[len(saved) - 2]); }
+    if (saved[len(saved) - 1] == nil) { varUnset('*'); } else { varSet('*', saved[len(saved) - 1]); }
+}
+
+
+// the lines of a script (or one typed line with an if, while or for): read, then run
+def runScript(lines) {
+    nodes = nil;
+    try {
+        nodes = Script.parse(lines);
+    } catch (e) {
+        sayErr(str(e));
+        return nil;
+    }
+    execNodes(nodes);
+}
+
+// one tick of a loop: false when Ctrl-C has asked to stop
+def loopTick() {
+    poke32(abortForegroundWord(), 1);
+    try {
+        checkAbort();
+    } catch (e) {
+        poke32(abortForegroundWord(), 0);
+        sayErr('^C');
+        ShellState.signal = 'exit';
+        ShellState.exitCode = 130;
+        return false;
+    }
+    return true;
+}
+
+def stopped() {
+    return ShellState.signal != '' || !ShellState.running;
+}
+
+def execNodes(nodes) {
+    i = 0;
+    while (i < len(nodes) && !stopped()) {
+        n = nodes[i];
+        kind = n[0];
+        if (kind == 'cmd') {
+            runCommand(n[1]);
+        } else if (kind == 'if') {
+            ran = false;
+            j = 0;
+            while (j < len(n[1]) && !ran && !stopped()) {
+                execNodes(n[1][j][0]);
+                if (!stopped() && ShellState.status == 0) {
+                    ran = true;
+                    execNodes(n[1][j][1]);
+                }
+                j += 1;
+            }
+            if (!ran && !stopped()) { execNodes(n[2]); }
+        } else if (kind == 'while') {
+            ShellState.loops += 1;
+            going = true;
+            while (going && !stopped() && loopTick()) {
+                execNodes(n[1]);
+                if (stopped() || ShellState.status != 0) { going = false; }
+                else {
+                    execNodes(n[2]);
+                    if (ShellState.signal == 'break') { ShellState.signal = ''; going = false; }
+                    else if (ShellState.signal == 'continue') { ShellState.signal = ''; }
+                }
+            }
+            ShellState.loops -= 1;
+            poke32(abortForegroundWord(), 0);
+        } else if (kind == 'for') {
+            words = expandWords(n[2]);
+            ShellState.loops += 1;
+            j = 0;
+            while (j < len(words) && !stopped() && loopTick()) {
+                varSet(n[1], words[j]);
+                execNodes(n[3]);
+                if (ShellState.signal == 'break') { ShellState.signal = ''; j = len(words); }
+                else if (ShellState.signal == 'continue') { ShellState.signal = ''; }
+                j += 1;
+            }
+            ShellState.loops -= 1;
+            poke32(abortForegroundWord(), 0);
+        }
+        i += 1;
+    }
+}
+
+// the words a text stands for: variables replaced, quotes taken off
+def expandWords(text) {
+    tokens = Cmdline.tokenize(Cmdline.expand(text, varGet));
+    out = [];
+    i = 0;
+    while (i < len(tokens)) {
+        if (tokens[i][0]) { throw('syntax error: ' + tokens[i][1] + ' cannot be in a list of words'); }
+        push(out, tokens[i][1]);
+        i += 1;
+    }
+    return out;
+}
+
+// exit [n]: in a script it ends the script; at the prompt it leaves the shell (or the user's session)
+def cmdExitWords(words) {
+    if (ShellState.depth > 0) {
+        code = 0;
+        if (len(words) > 1) { code = unsignedNumber(words[1]); }
+        if (code == nil) { sayErr('usage: exit [status]'); return nil; }
+        ShellState.signal = 'exit';
+        ShellState.exitCode = code;
+        return nil;
+    }
+    cmdExit();
+}
+
+def cmdLoopSignal(name) {
+    if (ShellState.loops == 0) { sayErr(name + ': not in a loop'); return nil; }
+    ShellState.signal = name;
+}
+
+// shift: $2 becomes $1, $3 becomes $2, ...
+def cmdShift(words) {
+    n = unsignedNumber(varGet('#'));
+    if (n == nil || n == 0) { Ctx.me().failed = true; return nil; }
+    i = 1;
+    while (i < 9) {
+        v = varGet('' + (i + 1));
+        if (v == nil) { varUnset('' + i); } else { varSet('' + i, v); }
+        i += 1;
+    }
+    varUnset('9');
+    varSet('#', '' + (n - 1));
+    rest = [];
+    i = 1;
+    while (i <= n - 1 && i < 10) { push(rest, varGet('' + i)); i += 1; }
+    varSet('*', strJoin(rest, ' '));
+}
+
+// a whole number, maybe negative; nil when it is not one
+def signedNumber(text) {
+    if (strSub(text, 0, 1) == '-') {
+        n = unsignedNumber(strSub(text, 1, len(text)));
+        return n == nil ? nil : 0 - n;
+    }
+    return unsignedNumber(text);
+}
+
+// test <expression>, or [ <expression> ]: status 0 when it holds, 1 when it does not
+//   -e path  exists   -f path  a file   -d path  a folder   -z text  empty   -n text  not empty
+//   a = b   a != b   (text)      a -eq b  -ne  -lt  -le  -gt  -ge   (numbers)      ! expression   a single text: not empty
+def cmdTest(words) {
+    args = Arr.slice(words, 1, len(words));
+    if (words[0] == '[') {
+        if (len(args) == 0 || args[len(args) - 1] != ']') { throw('[: ] is missing'); }
+        args = Arr.slice(args, 0, len(args) - 1);
+    }
+    if (!testHolds(args)) { Ctx.me().failed = true; }
+}
+
+def testHolds(args) {
+    if (len(args) == 0) { return false; }
+    if (args[0] == '!') { return !testHolds(Arr.slice(args, 1, len(args))); }
+    if (len(args) == 1) { return args[0] != ''; }
+    if (len(args) == 2) {
+        op = args[0];
+        if (op == '-z') { return args[1] == ''; }
+        if (op == '-n') { return args[1] != ''; }
+        if (op == '-e') { return Fs.exists(here(args[1])); }
+        if (op == '-f') { return Fs.exists(here(args[1])) && !Dirs.isDir(here(args[1])); }
+        if (op == '-d') { return Dirs.isDir(here(args[1])); }
+        throw('test: unknown test ' + op);
+    }
+    if (len(args) == 3) {
+        op = args[1];
+        if (op == '=') { return args[0] == args[2]; }
+        if (op == '!=') { return args[0] != args[2]; }
+        a = signedNumber(args[0]);
+        b = signedNumber(args[2]);
+        if (op == '-eq' || op == '-ne' || op == '-lt' || op == '-le' || op == '-gt' || op == '-ge') {
+            if (a == nil || b == nil) { throw('test: ' + (a == nil ? args[0] : args[2]) + ' is not a number'); }
+            if (op == '-eq') { return a == b; }
+            if (op == '-ne') { return a != b; }
+            if (op == '-lt') { return a < b; }
+            if (op == '-le') { return a <= b; }
+            if (op == '-gt') { return a > b; }
+            return a >= b;
+        }
+        throw('test: unknown test ' + op);
+    }
+    throw('test: too many arguments');
 }
 
 // --- command history and completion for the line editor ---
@@ -1077,7 +1288,7 @@ def histSave(line) {
 }
 
 def shellBuiltins() {
-    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec', 'sh', 'set', 'unset', 'alias', 'unalias', 'which', 'history', 'su', 'id'];
+    return ['help', 'echo', 'uptime', 'whoami', 'clear', 'reboot', 'exit', 'pwd', 'cd', 'format', 'exec', 'sh', 'set', 'unset', 'alias', 'unalias', 'which', 'history', 'su', 'id', 'test', '[', 'true', 'false', 'shift', 'break', 'continue'];
 }
 
 // Tab: what could replace the word under the cursor. The first word is a command

@@ -134,6 +134,16 @@ def class Cmdline {
         return parts;
     }
 
+    // the first word of a line (up to a space), '' for an empty line
+    static def firstWord(line) {
+        t = line;
+        i = 0;
+        while (i < len(t) && (strSub(t, i, i + 1) == ' ' || strSub(t, i, i + 1) == '\t')) { i += 1; }
+        j = i;
+        while (j < len(t) && strSub(t, j, j + 1) != ' ' && strSub(t, j, j + 1) != '\t') { j += 1; }
+        return strSub(t, i, j);
+    }
+
     static def hasText(text) {
         i = 0;
         while (i < len(text)) {

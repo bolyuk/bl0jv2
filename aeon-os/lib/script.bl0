@@ -1,0 +1,131 @@
+// aeon-os: the shell's language above the single command - if, while, for. This file only reads it (the running is
+// in shell.bl0, which knows how to run a command):
+//
+//   if <commands>; then <commands>; elif <commands>; then <commands>; else <commands>; fi
+//   while <commands>; do <commands>; done
+//   for <name> in <words>; do <commands>; done
+//
+// ';' and a line break are the same; 'then' and 'do' may start the next line. A condition holds when the last
+// command in it has status 0. Script.parse(lines) -> nodes:
+//   ['cmd', text]                     a command line (it may hold && and ||)
+//   ['if', [[condition, body], ...], elseBody]
+//   ['while', condition, body]
+//   ['for', name, wordsText, body]
+// where a condition and a body are arrays of nodes. Mistakes are thrown as "syntax error: ...".
+
+import 'cmdline.bl0';
+import '../../stdlib/str/trim.bl0';
+
+def class Script {
+    static def keywords() { return ['if', 'elif', 'then', 'else', 'fi', 'while', 'do', 'done', 'for']; }
+
+    // [kind, text] for every statement of the lines: keywords are kinds of their own, anything else is 'cmd'
+    static def statements(lines) {
+        out = [];
+        i = 0;
+        while (i < len(lines)) {
+            line = Trim.trim(lines[i]);
+            if (line != '' && strSub(line, 0, 1) != '#') {
+                parts = Cmdline.splitList(line);
+                cur = nil;
+                j = 0;
+                while (j < len(parts)) {
+                    if (parts[j][0] == ';' || cur == nil) {
+                        if (cur != nil) { Script.classify(out, cur); }
+                        cur = Trim.trim(parts[j][1]);
+                    } else {
+                        cur = cur + ' ' + parts[j][0] + ' ' + Trim.trim(parts[j][1]);
+                    }
+                    j += 1;
+                }
+                if (cur != nil) { Script.classify(out, cur); }
+            }
+            i += 1;
+        }
+        return out;
+    }
+
+    static def classify(out, text) {
+        sp = strFind(text, ' ', 0);
+        first = sp < 0 ? text : strSub(text, 0, sp);
+        rest = sp < 0 ? '' : Trim.trim(strSub(text, sp + 1, len(text)));
+        if (!Arr.contains(Script.keywords(), first)) {
+            push(out, ['cmd', text]);
+            return nil;
+        }
+        push(out, [first, first == 'if' || first == 'elif' || first == 'while' || first == 'for' ? rest : '']);
+        if ((first == 'then' || first == 'do' || first == 'else') && rest != '') { Script.classify(out, rest); }
+        if ((first == 'fi' || first == 'done') && rest != '') { throw('syntax error: nothing may follow ' + first); }
+        if ((first == 'if' || first == 'elif' || first == 'while' || first == 'for') && rest == '') { throw('syntax error: ' + first + ' needs something after it'); }
+    }
+
+    static def parse(lines) {
+        items = Script.statements(lines);
+        r = Script.block(items, 0, []);
+        if (r[1] < len(items)) { throw('syntax error: unexpected ' + items[r[1]][0]); }
+        return r[0];
+    }
+
+    // [nodes, position of the keyword that ended the block (or the end)]
+    static def block(items, pos, stops) {
+        nodes = [];
+        while (pos < len(items) && !Arr.contains(stops, items[pos][0])) {
+            item = items[pos];
+            kind = item[0];
+            if (kind == 'cmd') {
+                push(nodes, ['cmd', item[1]]);
+                pos += 1;
+            } else if (kind == 'if') {
+                clauses = [];
+                elseBody = [];
+                text = item[1];
+                done = false;
+                while (!done) {
+                    r = Script.block(items, pos + 1, ['then']);
+                    cond = Arr.concat([['cmd', text]], r[0]);
+                    pos = Script.expect(items, r[1], 'then');
+                    r = Script.block(items, pos, ['elif', 'else', 'fi']);
+                    push(clauses, [cond, r[0]]);
+                    pos = r[1];
+                    if (pos < len(items) && items[pos][0] == 'elif') {
+                        text = items[pos][1];
+                    } else {
+                        done = true;
+                    }
+                }
+                if (pos < len(items) && items[pos][0] == 'else') {
+                    r = Script.block(items, pos + 1, ['fi']);
+                    elseBody = r[0];
+                    pos = r[1];
+                }
+                pos = Script.expect(items, pos, 'fi');
+                push(nodes, ['if', clauses, elseBody]);
+            } else if (kind == 'while') {
+                r = Script.block(items, pos + 1, ['do']);
+                cond = Arr.concat([['cmd', item[1]]], r[0]);
+                pos = Script.expect(items, r[1], 'do');
+                r = Script.block(items, pos, ['done']);
+                pos = Script.expect(items, r[1], 'done');
+                push(nodes, ['while', cond, r[0]]);
+            } else if (kind == 'for') {
+                words = Cmdline.tokenize(item[1]);
+                if (len(words) < 2 || words[1][1] != 'in') { throw('syntax error: for <name> in <words>'); }
+                after = Trim.trim(strSub(item[1], strFind(item[1], ' ', 0) + 1, len(item[1])));
+                rest = Trim.trim(strSub(after, 2, len(after)));
+                pos = Script.expect(items, pos + 1, 'do');
+                r = Script.block(items, pos, ['done']);
+                pos = Script.expect(items, r[1], 'done');
+                push(nodes, ['for', words[0][1], rest, r[0]]);
+            } else {
+                throw('syntax error: unexpected ' + kind);
+            }
+        }
+        return [nodes, pos];
+    }
+
+    // the position after the keyword 'kind' at 'pos'
+    static def expect(items, pos, kind) {
+        if (pos >= len(items) || items[pos][0] != kind) { throw('syntax error: ' + kind + ' is missing'); }
+        return pos + 1;
+    }
+}
